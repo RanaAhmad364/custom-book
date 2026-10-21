@@ -1,0 +1,20 @@
+:root {
+  font-family: "DM Sans", sans-serif;
+  color: #1d2824;
+  background: #f6f2ea;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  --green: #17483e;
+  --green-soft: #2f6a5d;
+  --warm: #f6f2ea;
+  --surface: #fffdf9;
+  --ink: #1d2824;
+  --muted: #707873;
+  --sage: #dce8e1;
+  --sand: #e9ddca;
+  --border: #d9d3c8;
+  --serif: "Playfair Display", Georgia, serif;
+  --content-width: 1280px;
+}

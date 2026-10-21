@@ -1,0 +1,54 @@
+export const policyContent = {
+  privacy: {
+    title: "Privacy Policy",
+    eyebrow: "How information is handled",
+    introduction: "This draft describes topics the published privacy notice should address. It is not a statement of current data practices.",
+    sections: [
+      ["Information collected", "Before publication, identify the information the live service collects, such as account, order, contact, device, and uploaded-photo data. Do not publish until the actual collection is confirmed."],
+      ["How information is used", "Document each purpose for using information and the systems or service providers involved. The current preview does not provide account registration, photo uploads, or checkout."],
+      ["Retention and deletion", "Specify retention periods, deletion methods, and any legal or operational exceptions only after they have been confirmed."],
+      ["Sharing and service providers", "List the categories of recipients and service providers that actually receive information, and explain why sharing is necessary."],
+      ["Choices and requests", "Describe the privacy choices available to people, the process for submitting requests, and the contact channel that will be monitored."],
+      ["Contact and effective date", "Add the responsible business identity, a working privacy contact, jurisdiction-specific disclosures, and an effective date after review."],
+    ],
+  },
+  terms: {
+    title: "Terms and Conditions",
+    eyebrow: "Terms for using the service",
+    introduction: "This structured draft needs review against the actual product, operating entity, and applicable requirements before publication.",
+    sections: [
+      ["Service description", "Describe the features that are available at launch and distinguish them from previews or planned editor, account, download, and ordering features."],
+      ["Accounts and user content", "Set out account requirements, user responsibilities, content handling, and any rights needed to provide the service. Confirm the terms are consistent with actual workflows."],
+      ["Orders and prices", "Specify how offers, taxes, payment, order acceptance, cancellations, and changes work. Sample catalog prices in this preview are not final prices."],
+      ["Intellectual property", "Have counsel review ownership, licenses, user-uploaded content, templates, and permitted use. Do not assume rights beyond those expressly agreed."],
+      ["Disputes and applicable terms", "Add governing terms and any dispute, liability, or consumer provisions only after appropriate legal review for the intended markets."],
+      ["Operator and effective date", "Identify the contracting entity, official contact, version date, and process for notifying users of changes."],
+    ],
+  },
+  shipping: {
+    title: "Shipping Policy",
+    eyebrow: "From production to delivery",
+    introduction: "Shipping options, destinations, fees, and timing are not configured in this preview. Confirm operational details before publishing this policy.",
+    sections: [
+      ["Production estimates", "Set realistic production estimates by product and explain when the estimate begins. Any estimate should be presented as an estimate, not a guarantee."],
+      ["Delivery destinations", "List the destinations that can actually be served and any geographic limits after fulfillment coverage is confirmed."],
+      ["Shipping methods and charges", "Specify available methods, carriers where relevant, and how shipping charges are calculated and displayed before purchase."],
+      ["Tracking and delivery issues", "Describe what information customers receive and the process for late, missing, or damaged shipments once a support process exists."],
+      ["Address changes", "State whether and when an address can be changed after an order is placed, based on the actual fulfillment workflow."],
+      ["Contact and effective date", "Add a monitored support channel and effective date after operational and legal review."],
+    ],
+  },
+  refunds: {
+    title: "Refund and Cancellation Policy",
+    eyebrow: "Changes, cancellations, and refunds",
+    introduction: "No cancellation window, refund eligibility, or remedy is established by this preview. This draft must be reviewed against applicable consumer requirements and actual fulfillment processes before publication.",
+    sections: [
+      ["Before an order is placed", "Explain how a customer can review the book, options, and full total before committing to an order."],
+      ["Cancellation requests", "Define when cancellation requests can be received and what happens after production or fulfillment begins. Confirm this matches supplier capabilities."],
+      ["Personalized products", "Have counsel determine how local consumer laws apply to customized products and any exceptions. Do not state an exception without verification."],
+      ["Damaged, defective, or incorrect items", "Document the evidence requested, contact channel, resolution options, and timeframes only after those processes are approved."],
+      ["Digital PDF purchases", "Clarify delivery, access, and applicable cancellation/refund terms for digital goods after legal and product review."],
+      ["Contact and effective date", "Provide a staffed contact route and approved version date before this policy is published."],
+    ],
+  },
+};
