@@ -8,6 +8,7 @@ import "./styles/PublicPages.css";
 import "./styles/Auth.css";
 import "./styles/Dashboard.css";
 import "./pages/public/BookCreation/BookCreation.css";
+import "./styles/Admin.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {

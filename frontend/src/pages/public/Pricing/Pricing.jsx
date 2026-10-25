@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowRight, Check, CircleHelp } from "lucide-react";
 import { Link } from "react-router-dom";
 import { catalogService } from "../../../services/catalog.js";
+import { formatCurrency } from "../../../services/money.js";
 import { DemoNotice } from "../../../components/common/DemoNotice.jsx";
 import { ErrorState } from "../../../components/common/ErrorState.jsx";
 import { LoadingState } from "../../../components/common/LoadingState.jsx";
@@ -57,7 +58,7 @@ function PricingPage() {
             <h2>{tier.name}</h2>
             <p className="pricing-tier-price">
               <small>Example catalog starting price</small>
-              <strong>${tier.startingPrice.toFixed(2)}<span>+</span></strong>
+              <strong>{formatCurrency(tier.startingPrice, tier.currency)}<span>+</span></strong>
             </p>
             <ul>
               {tier.features.map((feature) => (

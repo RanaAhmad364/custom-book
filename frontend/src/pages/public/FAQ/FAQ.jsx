@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { ChevronDown, Search } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import { DemoNotice } from "../../../components/common/DemoNotice.jsx";
+import "../../../styles/FAQPage.css";
 
 const faqItems = [
   { category: "Getting started", question: "How do I start a photo book?", answer: "Choose a design from Explore Books and select Start Designing, or begin with a template, a blank book, or Quick Start. Set up the book, add photos in the browser preview, then sign in to initialize a project. The full page editor is still in development." },
@@ -53,11 +54,11 @@ function FAQPage() {
         <h1>Good questions,<br /><em>thoughtful answers.</em></h1>
         <p>Search common questions about creating, pricing, printing, and support.</p>
       </section>
-      <label className="faq-search">
-        <Search size={17} aria-hidden="true" />
-        <span className="sr-only">Search frequently asked questions</span>
-        <input value={search} onChange={(event) => updateSearch(event.target.value)} placeholder="What would you like to know?" />
-      </label>
+      <div className="faq-search">
+        <Search size={18} aria-hidden="true" />
+        <label className="sr-only" htmlFor="faq-search-input">Search frequently asked questions</label>
+        <input id="faq-search-input" type="search" value={search} onChange={(event) => updateSearch(event.target.value)} placeholder="What would you like to know?" />
+      </div>
       <div className="faq-category-tabs" role="group" aria-label="FAQ categories">
         {faqCategories.map((category) => (
           <button className={activeCategory === category ? "is-active" : ""} type="button" key={category} aria-pressed={activeCategory === category} onClick={() => setActiveCategory(category)}>
@@ -66,18 +67,19 @@ function FAQPage() {
         ))}
       </div>
       <section className="faq-list" aria-label="Frequently asked questions">
-        {visibleItems.length ? visibleItems.map((item) => {
+        {visibleItems.length ? visibleItems.map((item, index) => {
           const isOpen = openItems.includes(item.question);
+          const answerId = `faq-answer-${index}`;
           return (
             <article className={`faq-item ${isOpen ? "is-open" : ""}`} key={item.question}>
               <span className="faq-item-category">{item.category}</span>
               <h2>
-                <button type="button" aria-expanded={isOpen} onClick={() => toggleItem(item.question)}>
+                <button type="button" aria-expanded={isOpen} aria-controls={answerId} onClick={() => toggleItem(item.question)}>
                   <span>{item.question}</span>
                   <ChevronDown size={19} aria-hidden="true" />
                 </button>
               </h2>
-              <div className="faq-answer" hidden={!isOpen}><p>{item.answer}</p></div>
+              <div className="faq-answer" id={answerId} hidden={!isOpen}><p>{item.answer}</p></div>
             </article>
           );
         }) : (

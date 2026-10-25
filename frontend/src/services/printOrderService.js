@@ -1,5 +1,8 @@
-const API_ROOT = "/api/print";
-const paymentStates = new Set(["pending", "successful", "failed"]);
+import { apiRequest } from "./apiClient.js";
+import { paymentMethodService } from "./paymentMethodService.js";
+
+const API_ROOT = "/print";
+const paymentStates = new Set(["pending", "successful", "failed", "partially_refunded", "refunded"]);
 const productionStates = [
   "order_placed",
   "payment_confirmed",
@@ -14,25 +17,9 @@ const productionStates = [
 const cancellationStates = new Set(["requested", "accepted", "rejected", "pending"]);
 
 async function request(path, options = {}) {
-  let response;
-  try {
-    response = await fetch(`${API_ROOT}${path}`, {
-      credentials: "include",
-      ...options,
-      headers: {
-        Accept: "application/json",
-        ...(options.body ? { "Content-Type": "application/json" } : {}),
-        ...options.headers,
-      },
-    });
-  } catch (failure) {
-    throw new Error(failure instanceof Error ? `Printing service is unavailable: ${failure.message}` : "Printing service is unavailable.");
-  }
-
-  const body = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(body?.message || `Printing service request failed (${response.status}).`);
-  if (!body || typeof body !== "object") throw new Error("Printing service returned an invalid response.");
-  return body;
+  const { data } = await apiRequest(`${API_ROOT}${path}`, options);
+  if (!data || typeof data !== "object") throw new Error("Printing service returned an invalid response.");
+  return data;
 }
 
 function amount(value, label, nullable = false) {
@@ -115,16 +102,27 @@ export const printOrderService = {
   async getQuote(projectId, configuration, shippingAddress) {
     const quote = await request("/quotes", {
       method: "POST",
-      body: JSON.stringify({ projectId, configuration, shippingAddress }),
+      body: { projectId, configuration, shippingAddress },
     });
     return normalizePrintQuote(quote);
   },
 
-  async createOrder(projectId, configuration, shippingAddress, quoteId) {
+  async getPaymentMethods(currency) {
+    return paymentMethodService.list(currency);
+  },
+
+  async createOrder(projectId, configuration, shippingAddress, quoteId, paymentMethod) {
     if (!quoteId) throw new Error("Refresh the server quote before placing your print order.");
     const order = await request("/orders", {
       method: "POST",
-      body: JSON.stringify({ projectId, configuration, shippingAddress, quoteId }),
+      body: {
+        projectId,
+        configuration,
+        shippingAddress,
+        quoteId,
+        provider: paymentMethod?.provider,
+        paymentMethod: paymentMethod?.method,
+      },
       headers: { "Idempotency-Key": crypto.randomUUID() },
     });
     return normalizePrintOrder(order);
@@ -146,7 +144,7 @@ export const printOrderService = {
     }
     const result = await request(`/orders/${encodeURIComponent(orderId)}/cancellation-requests`, {
       method: "POST",
-      body: JSON.stringify({ reason }),
+      body: { reason },
       headers: { "Idempotency-Key": crypto.randomUUID() },
     });
     if (!cancellationStates.has(result.status)) {

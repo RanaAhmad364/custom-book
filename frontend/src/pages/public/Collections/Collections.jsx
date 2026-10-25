@@ -5,6 +5,7 @@ import { catalogService } from "../../../services/catalog.js";
 import { DemoNotice } from "../../../components/common/DemoNotice.jsx";
 import { ErrorState } from "../../../components/common/ErrorState.jsx";
 import { LoadingState } from "../../../components/common/LoadingState.jsx";
+import { SafeImage } from "../../../components/common/SafeImage.jsx";
 
 function CollectionsPage() {
   const {
@@ -46,7 +47,7 @@ function CollectionsPage() {
                 to={`/collections/${collection.slug}`}
               >
                 <div className="collection-image">
-                  <img src={collection.image} alt={collection.imageAlt} loading="lazy" />
+                  <SafeImage src={collection.image} alt={collection.imageAlt || collection.name} />
                   <span>0{index + 1}</span>
                 </div>
                 <div className="collection-copy">

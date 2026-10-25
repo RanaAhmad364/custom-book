@@ -1,4 +1,4 @@
-import { ArrowLeft, BookOpen, ShieldAlert } from "lucide-react";
+import { ArrowLeft, BookOpen, ShieldCheck } from "lucide-react";
 import { Link } from "react-router-dom";
 
 export default function AuthLayout({ children }) {
@@ -10,8 +10,8 @@ export default function AuthLayout({ children }) {
           <span>MemoryBook</span>
         </Link>
         <div className="auth-demo-warning" role="note">
-          <ShieldAlert size={16} />
-          <span><strong>Authentication preview.</strong> This client-side demo is not secure production authentication. Never use a real password.</span>
+          <ShieldCheck size={16} />
+          <span><strong>Your account is protected.</strong> Sessions use secure, HttpOnly authentication cookies.</span>
         </div>
         {children}
         <Link className="auth-back-home" to="/"><ArrowLeft size={14} /> Return to MemoryBook</Link>

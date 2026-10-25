@@ -1,5 +1,7 @@
 import { ArrowRight, Eye } from "lucide-react";
 import { Link } from "react-router-dom";
+import { SafeImage } from "../common/SafeImage.jsx";
+import { formatCurrency } from "../../services/money.js";
 
 export function BookCard({ book, index = 0, onPreview, onCreate }) {
   return (
@@ -8,7 +10,7 @@ export function BookCard({ book, index = 0, onPreview, onCreate }) {
       style={{ "--card-index": index }}
     >
       <div className="book-card-image">
-        <img src={book.image} alt={book.imageAlt} loading="lazy" />
+        <SafeImage src={book.image} alt={book.imageAlt || book.title} />
         <button
           className="book-card-preview"
           type="button"
@@ -24,7 +26,7 @@ export function BookCard({ book, index = 0, onPreview, onCreate }) {
             <Link to={`/books/${book.id}`}>{book.title}</Link>
           </h3>
         </div>
-        <span className="book-card-price">From ${book.startingPrice.toFixed(2)}</span>
+        <span className="book-card-price">From {formatCurrency(book.startingPrice, book.currency)}</span>
       </div>
       <p>{book.description}</p>
       <div className="discovery-card-specs">

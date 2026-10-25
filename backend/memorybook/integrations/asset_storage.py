@@ -13,6 +13,13 @@ from werkzeug.utils import safe_join
 from memorybook.errors import ServiceUnavailableError
 
 
+def _asset_api_url(path: str) -> str:
+    base = current_app.config.get("PUBLIC_API_URL", "").rstrip("/")
+    if base.endswith("/api/v1"):
+        return f"{base}/assets/{path}"
+    return f"{base}/api/v1/assets/{path}"
+
+
 class LocalFilesystemAssetStorage:
     def __init__(self):
         self.root = Path(current_app.config["ASSET_LOCAL_DIRECTORY"]).expanduser().resolve()
@@ -55,6 +62,15 @@ class LocalFilesystemAssetStorage:
         self._path(key)
         token = quote(self.signer.dumps(key), safe="")
         return f"/api/v1/assets/{token}"
+
+    def public_download_url(self, key: str) -> str:
+        self._path(key)
+        return _asset_api_url(f"public/{quote(key, safe='/')}")
+
+    def private_download_url(self, key: str) -> str:
+        self._path(key)
+        token = quote(self.signer.dumps(key), safe="")
+        return _asset_api_url(f"private/{token}")
 
     def download(self, key: str) -> bytes:
         try:
@@ -111,6 +127,7 @@ class S3AssetStorage:
             aws_secret_access_key=config.get("ASSET_S3_SECRET_ACCESS_KEY") or None,
         )
         self.url_ttl = config["ASSET_S3_PRESIGNED_URL_TTL"]
+        self.signer = URLSafeTimedSerializer(config["SECRET_KEY"], salt="memorybook-local-assets")
 
     def upload(self, key: str, stream: BinaryIO, mime_type: str) -> None:
         try:
@@ -135,6 +152,13 @@ class S3AssetStorage:
             current_app.logger.exception("Project asset download URL could not be created.")
             raise ServiceUnavailableError("The photo is temporarily unavailable.") from failure
 
+    def public_download_url(self, key: str) -> str:
+        return _asset_api_url(f"public/{quote(key, safe='/')}")
+
+    def private_download_url(self, key: str) -> str:
+        token = quote(self.signer.dumps(key), safe="")
+        return _asset_api_url(f"private/{token}")
+
     def download(self, key: str) -> bytes:
         try:
             response = self.client.get_object(Bucket=self.bucket, Key=key)
@@ -143,6 +167,20 @@ class S3AssetStorage:
         except (BotoCoreError, ClientError) as failure:
             current_app.logger.exception("Project asset download failed.")
             raise ServiceUnavailableError("A photo needed for this book is temporarily unavailable.") from failure
+
+    def content_type(self, key: str) -> str:
+        try:
+            response = self.client.head_object(Bucket=self.bucket, Key=key)
+            return response.get("ContentType", "application/octet-stream")
+        except (BotoCoreError, ClientError) as failure:
+            current_app.logger.exception("Project asset content type could not be read.")
+            raise ServiceUnavailableError("The photo is temporarily unavailable.") from failure
+
+    def download_token(self, token: str) -> str:
+        try:
+            return self.signer.loads(token, max_age=self.url_ttl)
+        except (BadSignature, SignatureExpired) as failure:
+            raise ServiceUnavailableError("The requested photo is unavailable or its link has expired.") from failure
 
     def delete(self, key: str) -> None:
         try:

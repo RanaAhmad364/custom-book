@@ -36,7 +36,7 @@ function CollectionDetailPage() {
       <DemoNotice />
       <section
         className="discovery-collection-hero"
-        style={{ "--discovery-hero-image": `url("${collection.image}")` }}
+        style={collection.image ? { "--discovery-hero-image": `url("${collection.image}")` } : undefined}
       >
         <div>
           <span className="eyebrow">{collection.eyebrow}</span>
@@ -61,7 +61,7 @@ function CollectionDetailPage() {
           <span className="eyebrow">A few ways to begin</span>
           <h2>Recommended layouts</h2>
           <div>
-            {collection.recommendedLayouts.map((layout, index) => (
+            {(collection.recommendedLayouts ?? []).map((layout, index) => (
               <article key={layout}>
                 <span>0{index + 1}</span>
                 <h3>{layout}</h3>
@@ -74,7 +74,7 @@ function CollectionDetailPage() {
           <span className="eyebrow">Keep exploring</span>
           <h2>Related categories</h2>
           <div>
-            {collection.relatedCategories.map((name) => (
+            {(collection.relatedCategories ?? []).map((name) => (
               <Link
                 key={name}
                 to={`/categories/${name.toLowerCase().replace(/\s+/g, "-")}`}

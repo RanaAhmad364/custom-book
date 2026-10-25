@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from urllib.parse import urlsplit
 
+from PIL import Image
+
 from memorybook.extensions import db
 from memorybook.models import (
     BookCategory,
@@ -26,6 +28,12 @@ class FakeAssetStorage:
 
     def download_url(self, key):
         return f"https://storage.example.test/{key}?signature=test"
+
+    def public_download_url(self, key):
+        return f"https://storage.example.test/public/{key}"
+
+    def private_download_url(self, key):
+        return f"https://storage.example.test/private/{key}?signature=test"
 
     def delete(self, key):
         self.objects.pop(key, None)
@@ -54,6 +62,18 @@ def authenticated_client(app, email):
     return client, {"X-CSRF-TOKEN": csrf}
 
 
+def valid_png():
+    stream = io.BytesIO()
+    Image.new("RGB", (2, 2), (20, 40, 60)).save(stream, format="PNG")
+    return stream.getvalue()
+
+
+def valid_jpeg():
+    stream = io.BytesIO()
+    Image.new("RGB", (2, 2), (20, 40, 60)).save(stream, format="JPEG")
+    return stream.getvalue()
+
+
 def project_document(project_id=None, *, title="A real project"):
     return {
         "schemaVersion": 1,
@@ -72,8 +92,15 @@ def project_document(project_id=None, *, title="A real project"):
 
 def seed_catalog():
     category = BookCategory(name="Travel", slug="travel", description="Books for journeys", style="Editorial")
-    collection = BookCollection(name="Far & near", slug="far-and-near", description="Travel collection")
-    db.session.add_all([category, collection])
+    db.session.add(category)
+    db.session.flush()
+    collection = BookCollection(
+        name="Far & near",
+        slug="far-and-near",
+        description="Travel collection",
+        category_id=category.id,
+    )
+    db.session.add(collection)
     db.session.flush()
     product = BookProduct(
         category_id=category.id,
@@ -114,6 +141,7 @@ def seed_catalog():
 def test_public_catalog_only_returns_active_records_with_search_filters_and_pagination(app, client):
     with app.app_context():
         category, collection, product, template = seed_catalog()
+        category_id = category.id
 
     response = client.get("/api/v1/books?search=alpine&category=travel&style=minimal&bookType=BASIC&minPrice=40&maxPrice=45&page=1&perPage=1")
     assert response.status_code == 200
@@ -126,8 +154,26 @@ def test_public_catalog_only_returns_active_records_with_search_filters_and_pagi
     templates = client.get("/api/v1/templates")
     assert [item["slug"] for item in categories.json["items"]] == ["travel"]
     assert [item["slug"] for item in collections.json["items"]] == ["far-and-near"]
+    assert collections.json["items"][0]["categoryId"] == category_id
+    assert collections.json["items"][0]["categoryName"] == "Travel"
     assert [item["slug"] for item in templates.json["items"]] == ["travel-journal"]
     assert client.get("/api/v1/templates/hidden-template").status_code == 404
+
+
+def test_inactive_collection_details_are_hidden_without_hiding_public_books(app, client):
+    with app.app_context():
+        category, collection, product, _ = seed_catalog()
+        collection.is_active = False
+        db.session.commit()
+        product_slug = product.slug
+
+    books = client.get("/api/v1/books?search=alpine")
+    assert books.status_code == 200
+    assert [item["slug"] for item in books.json["items"]] == ["our-alpine-journey"]
+    assert books.json["items"][0]["collection"] == ""
+    assert books.json["items"][0]["collectionSlug"] == ""
+    assert client.get("/api/v1/collections").json["items"] == []
+    assert client.get(f"/api/v1/books/{product_slug}").json["book"]["collection"] == ""
 
 
 def test_book_details_resolves_persisted_gallery_keys_without_expanding_catalog_list(app, client):
@@ -158,9 +204,9 @@ def test_book_details_resolves_persisted_gallery_keys_without_expanding_catalog_
     assert details.json["book"]["designTemplateId"] == design_template_id
     assert [item["label"] for item in gallery] == ["Cover", "Preview 1", "Preview 2"]
     assert [item["image"] for item in gallery] == [
-        "https://storage.example.test/catalog/test-cover.jpg?signature=test",
-        "https://storage.example.test/catalog/test-page-1.jpg?signature=test",
-        "https://storage.example.test/catalog/test-page-2.jpg?signature=test",
+        "https://storage.example.test/public/catalog/test-cover.jpg",
+        "https://storage.example.test/public/catalog/test-page-1.jpg",
+        "https://storage.example.test/public/catalog/test-page-2.jpg",
     ]
 
     listing = client.get("/api/v1/books")
@@ -223,6 +269,81 @@ def test_projects_are_user_scoped_and_use_optimistic_versioning(app):
     assert bob.get("/api/v1/projects").json["items"] == []
 
 
+def test_product_projects_require_its_published_master_design(app):
+    customer, headers = authenticated_client(app, "published-design-customer@example.test")
+    with app.app_context():
+        _, _, product, template = seed_catalog()
+        product_id = product.id
+        template_id = template.id
+
+    no_design_id = customer.post(
+        "/api/v1/projects",
+        json={"title": "Missing master", "pageCount": 1, "productId": product_id},
+        headers=headers,
+    )
+    assert no_design_id.status_code == 400
+
+    generic_template = customer.post(
+        "/api/v1/projects",
+        json={"title": "Mismatched master", "pageCount": 1, "productId": product_id, "templateId": template_id},
+        headers=headers,
+    )
+    assert generic_template.status_code == 400
+
+    with app.app_context():
+        master = db.session.get(BookTemplate, template_id)
+        master.product_id = product_id
+        db.session.commit()
+
+    unpublished_design = customer.post(
+        "/api/v1/projects",
+        json={"title": "Unpublished master", "pageCount": 1, "productId": product_id, "templateId": template_id},
+        headers=headers,
+    )
+    assert unpublished_design.status_code == 400
+
+    with app.app_context():
+        master = db.session.get(BookTemplate, template_id)
+        master_document = project_document("master-owned")
+        master_document["pages"][1]["elements"] = [{
+            "id": "master-text-element",
+            "type": "text",
+            "text": "A master design remains untouched.",
+            "x": 0.1,
+            "y": 0.2,
+            "width": 0.8,
+            "height": 0.1,
+        }]
+        master.published_design_document = master_document
+        master.published_version = master.version
+        db.session.commit()
+
+    created = customer.post(
+        "/api/v1/projects",
+        json={"title": "Independent copy", "pageCount": 1, "productId": product_id, "templateId": template_id},
+        headers=headers,
+    )
+    assert created.status_code == 201, created.get_json()
+    assert created.json["project"]["document"]["metadata"]["id"] == created.json["project"]["id"]
+    first_document = created.json["project"]["document"]
+    second = customer.post(
+        "/api/v1/projects",
+        json={"title": "Second independent copy", "pageCount": 1, "productId": product_id, "templateId": template_id},
+        headers=headers,
+    )
+    assert second.status_code == 201, second.get_json()
+    second_document = second.json["project"]["document"]
+    assert set(first_document["pageOrder"]).isdisjoint(second_document["pageOrder"])
+    assert first_document["cover"]["pageId"] != second_document["cover"]["pageId"]
+    first_element_id = first_document["pages"][1]["elements"][0]["id"]
+    second_element_id = second_document["pages"][1]["elements"][0]["id"]
+    assert first_element_id != second_element_id
+
+    with app.app_context():
+        master = db.session.get(BookTemplate, template_id)
+        assert master.published_design_document["pages"][1]["elements"][0]["id"] == "master-text-element"
+
+
 def test_project_pages_assets_and_revisions_are_owned_and_round_trip(app):
     app.extensions["asset_storage"] = FakeAssetStorage()
     alice, headers = authenticated_client(app, "alice@example.test")
@@ -253,7 +374,7 @@ def test_project_pages_assets_and_revisions_are_owned_and_round_trip(app):
     storage = app.extensions["asset_storage"]
     upload = alice.post(
         f"/api/v1/projects/{project_id}/assets",
-        data={"assetId": "asset-one", "file": (io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"png bytes"), "memory.png", "image/png")},
+        data={"assetId": "asset-one", "file": (io.BytesIO(valid_png()), "memory.png", "image/png")},
         headers={**headers, "If-Match": '"2"'},
         content_type="multipart/form-data",
     )
@@ -315,6 +436,69 @@ def test_project_pages_assets_and_revisions_are_owned_and_round_trip(app):
         assert db.session.scalar(db.select(ProjectRevision).where(ProjectRevision.id == revision_id)) is not None
 
 
+def test_duplicated_project_owns_copied_assets_and_survives_source_deletion(app):
+    app.extensions["asset_storage"] = FakeAssetStorage()
+    owner, headers = authenticated_client(app, "duplicate-owner@example.test")
+    other_user, _ = authenticated_client(app, "duplicate-other@example.test")
+    created = owner.post(
+        "/api/v1/projects",
+        json={"title": "Source project", "pageCount": 1, "document": project_document(title="Source project")},
+        headers=headers,
+    )
+    project_id = created.json["project"]["id"]
+    uploaded = owner.post(
+        f"/api/v1/projects/{project_id}/assets",
+        data={"assetId": "source-asset", "file": (io.BytesIO(valid_png()), "source.png", "image/png")},
+        headers={**headers, "If-Match": '"1"'},
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 201
+    document = created.json["project"]["document"]
+    asset = uploaded.json["asset"]
+    document["assets"].append(asset)
+    document["pages"][1]["elements"].append({
+        "id": "source-photo",
+        "type": "image",
+        "assetId": asset["id"],
+        "src": asset["src"],
+        "x": 0.1,
+        "y": 0.1,
+        "width": 0.8,
+        "height": 0.8,
+    })
+    saved = owner.patch(
+        f"/api/v1/projects/{project_id}",
+        json={"document": document},
+        headers={**headers, "If-Match": '"2"'},
+    )
+    assert saved.status_code == 200
+
+    duplicated = owner.post(f"/api/v1/projects/{project_id}/duplicate", headers=headers)
+    assert duplicated.status_code == 201, duplicated.get_json()
+    duplicate = duplicated.json["project"]
+    duplicate_asset = duplicate["document"]["assets"][0]
+    assert duplicate["id"] != project_id
+    assert duplicate_asset["id"] != asset["id"]
+    assert duplicate["document"]["pages"][1]["elements"][0]["assetId"] == duplicate_asset["id"]
+    storage = app.extensions["asset_storage"]
+    with app.app_context():
+        original_record = db.session.get(ProjectAsset, asset["id"])
+        duplicate_record = db.session.get(ProjectAsset, duplicate_asset["id"])
+        assert original_record.storage_key != duplicate_record.storage_key
+        original_key = original_record.storage_key
+        duplicate_key = duplicate_record.storage_key
+    assert storage.objects[original_key] == storage.objects[duplicate_key]
+    assert other_user.get(f"/api/v1/projects/{duplicate['id']}").status_code == 404
+
+    deleted = owner.delete(
+        f"/api/v1/projects/{project_id}",
+        headers={**headers, "If-Match": '"3"'},
+    )
+    assert deleted.status_code == 204
+    assert duplicate_key in storage.objects
+    assert owner.get(f"/api/v1/projects/{duplicate['id']}").status_code == 200
+
+
 def test_project_asset_upload_rejects_unsupported_mime_and_delete_checks_usage(app):
     app.extensions["asset_storage"] = FakeAssetStorage()
     client, headers = authenticated_client(app, "asset@example.test")
@@ -333,7 +517,7 @@ def test_project_asset_upload_rejects_unsupported_mime_and_delete_checks_usage(a
     assert unsupported.status_code == 400
     assert client.post(
         f"/api/v1/projects/{project_id}/assets",
-        data={"file": (io.BytesIO(b"\xff\xd8\xff" + b"image"), "image.jpg", "image/jpeg")},
+        data={"file": (io.BytesIO(valid_jpeg()), "image.jpg", "image/jpeg")},
         headers={**headers, "If-Match": '"1"'},
         content_type="multipart/form-data",
     ).status_code == 201
@@ -353,7 +537,7 @@ def test_local_project_asset_download_requires_its_owner(app, tmp_path):
     project_id = created.json["project"]["id"]
     uploaded = owner.post(
         f"/api/v1/projects/{project_id}/assets",
-        data={"file": (io.BytesIO(b"\x89PNG\r\n\x1a\nprivate image bytes"), "private.png", "image/png")},
+        data={"file": (io.BytesIO(valid_png()), "private.png", "image/png")},
         headers={**owner_headers, "If-Match": '"1"'},
         content_type="multipart/form-data",
     )
@@ -365,7 +549,7 @@ def test_local_project_asset_download_requires_its_owner(app, tmp_path):
     assert other_user.get(asset_path).status_code == 404
     retrieved = owner.get(asset_path)
     assert retrieved.status_code == 200
-    assert retrieved.data == b"\x89PNG\r\n\x1a\nprivate image bytes"
+    Image.open(io.BytesIO(retrieved.data)).verify()
     assert retrieved.mimetype == "image/png"
 
 
@@ -382,7 +566,7 @@ def test_reopening_project_refreshes_expired_local_asset_url(app, tmp_path):
     project_id = created.json["project"]["id"]
     uploaded = owner.post(
         f"/api/v1/projects/{project_id}/assets",
-        data={"file": (io.BytesIO(b"\x89PNG\r\n\x1a\nrefresh image bytes"), "refresh.png", "image/png")},
+        data={"file": (io.BytesIO(valid_png()), "refresh.png", "image/png")},
         headers={**headers, "If-Match": '"1"'},
         content_type="multipart/form-data",
     )
@@ -409,7 +593,7 @@ def test_reopening_project_refreshes_expired_local_asset_url(app, tmp_path):
     assert refreshed_path != original_path
     refreshed = owner.get(refreshed_path)
     assert refreshed.status_code == 200
-    assert refreshed.data == b"\x89PNG\r\n\x1a\nrefresh image bytes"
+    Image.open(io.BytesIO(refreshed.data)).verify()
 
 
 def test_project_deletion_is_soft_and_assets_do_not_leak_to_other_users(app):

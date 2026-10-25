@@ -1,15 +1,16 @@
-import { useMemo, useState } from "react";
-import { ArrowDownToLine, ArrowLeft, ArrowRight, Bell, Camera, Check, Clock3, Download, FileText, Filter, Mail, MapPin, PackageCheck, Plus, Search, Settings, ShieldCheck, Trash2, UserRound } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { ArrowLeft, ArrowRight, Bell, Check, Clock3, Download, FileText, Filter, Mail, MapPin, PackageCheck, Plus, Search, Settings, Trash2, UserRound } from "lucide-react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { useAuth } from "../../features/auth/AuthContext.jsx";
 import { useDashboard } from "../../features/dashboard/DashboardContext.jsx";
-import { DashboardEmptyState, DashboardPageHeading, DownloadRow, OrderRow, ProjectCard } from "../../features/dashboard/DashboardUI.jsx";
+import { DashboardEmptyState, DashboardPageHeading, OrderRow, ProjectCard } from "../../features/dashboard/DashboardUI.jsx";
 import { PdfDownloadDetails, PdfDownloadHistory } from "../public/PdfPurchase/PdfPurchase.jsx";
+import { apiRequest } from "../../services/apiClient.js";
 
 const titles = {
   projects: ["Your library", "My projects", "All your ideas, drafts, and finished books in one place."],
   recent: ["Your workspace", "Recent projects", "Pick up a story you have been shaping lately."],
-  drafts: ["Still in progress", "Saved drafts", "Your unfinished stories are safely waiting here in this demo."],
+  drafts: ["Still in progress", "Saved drafts", "Your unfinished stories are safely waiting here."],
   completed: ["Ready to keep", "Completed books", "The stories you have brought to life."],
   downloads: ["Your digital library", "Downloads", "Purchased PDFs and your recent download activity."],
   orders: ["Made with care", "Orders", "Follow each printed book from checkout to your doorstep."],
@@ -45,6 +46,7 @@ function Projects({ section, data, updateProject, duplicateProject, deleteProjec
   const [sort, setSort] = useState("recent");
   const [view, setView] = useState("grid");
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
   const base = section === "drafts" ? data.projects.filter((item) => item.status === "draft") : section === "completed" ? data.projects.filter((item) => item.status === "completed") : section === "recent" ? [...data.projects].sort((a, b) => (a.updated === "Today" ? -1 : b.updated === "Today" ? 1 : 0)).slice(0, 3) : data.projects;
   const projects = useMemo(() => {
     const filtered = base.filter((project) => project.title.toLowerCase().includes(search.toLowerCase()) && (statusFilter === "all" || project.status === statusFilter));
@@ -60,15 +62,16 @@ function Projects({ section, data, updateProject, duplicateProject, deleteProjec
       <div className="dashboard-view-switch" role="group" aria-label="Project display"><button type="button" className={view === "grid" ? "active" : ""} onClick={() => setView("grid")}>Grid</button><button type="button" className={view === "list" ? "active" : ""} onClick={() => setView("list")}>List</button></div>
     </div>
     {projects.length ? <div className={`dashboard-project-grid${view === "list" ? " is-list" : ""}`}>{projects.map((project) => <ProjectCard key={project.id} project={project} compact={view === "list"} onRename={(id, title) => updateProject(id, { title })} onDuplicate={duplicateProject} onDelete={(id) => setConfirmDelete(id)} />)}</div> : <DashboardEmptyState icon={Search} title={search ? "No matching projects." : section === "drafts" ? "No saved drafts yet." : section === "completed" ? "Your first finished book is waiting." : "Your project library is ready."} description={search ? "Try a different title or clear your filters." : "Explore the designs and make your next story your own."} action={<Link className="button button-outline" to="/books">Explore designs</Link>} />}
-    {confirmDelete ? <div className="dashboard-confirm-backdrop" role="presentation" onClick={() => setConfirmDelete(null)}><div className="dashboard-confirm" role="dialog" aria-modal="true" aria-labelledby="delete-project-title" onClick={(event) => event.stopPropagation()}><span className="dashboard-confirm-icon"><Trash2 size={20} /></span><h2 id="delete-project-title">Delete this project?</h2><p>This removes the project from the current in-memory demo workspace.</p><div><button className="button button-outline" type="button" onClick={() => setConfirmDelete(null)}>Keep project</button><button className="button button-dark" type="button" onClick={() => { deleteProject(confirmDelete); setConfirmDelete(null); }}>Delete project</button></div></div></div> : null}
+    {confirmDelete ? <div className="dashboard-confirm-backdrop" role="presentation" onClick={() => { if (!deleting) setConfirmDelete(null); }}><div className="dashboard-confirm" role="dialog" aria-modal="true" aria-labelledby="delete-project-title" onClick={(event) => event.stopPropagation()}><span className="dashboard-confirm-icon"><Trash2 size={20} /></span><h2 id="delete-project-title">Delete this project?</h2><p>This removes the saved project from your account. Shared designs and copied projects are not removed.</p><div><button className="button button-outline" type="button" disabled={deleting} onClick={() => setConfirmDelete(null)}>Keep project</button><button className="button button-dark" type="button" disabled={deleting} onClick={async () => { setDeleting(true); try { if (await deleteProject(confirmDelete)) setConfirmDelete(null); } finally { setDeleting(false); } }}>{deleting ? "Deleting…" : "Delete project"}</button></div></div></div> : null}
   </div>;
 }
 
 function Orders({ orders }) {
   const [filter, setFilter] = useState("All orders");
+  const filters = ["All orders", ...new Set(orders.map((order) => order.status))];
   const shown = filter === "All orders" ? orders : orders.filter((order) => order.status === filter);
   return <div className="dashboard-page"><DashboardPageHeading eyebrow={titles.orders[0]} title={titles.orders[1]} description={titles.orders[2]} action={<Link className="button button-outline" to="/print/orders">Print order history <ArrowRight size={14} /></Link>} />
-    <div className="dashboard-tab-row">{["All orders", "In production", "Delivered"].map((item) => <button className={filter === item ? "active" : ""} key={item} type="button" onClick={() => setFilter(item)}>{item}</button>)}</div>
+    <div className="dashboard-tab-row">{filters.map((item) => <button className={filter === item ? "active" : ""} key={item} type="button" onClick={() => setFilter(item)}>{item}</button>)}</div>
     <div className="dashboard-order-list">{shown.map((order) => <OrderRow key={order.id} order={order} />)}</div>
     {!shown.length ? <DashboardEmptyState icon={PackageCheck} title="No orders in this view." description="Your printed books and order updates will be collected here." action={<Link className="button button-outline" to="/books">Explore books</Link>} /> : null}
   </div>;
@@ -76,28 +79,14 @@ function Orders({ orders }) {
 
 function OrderDetails({ data, id, tracking }) {
   const order = data.orders.find((item) => item.id === id);
-  if (!order) return <div className="dashboard-page"><DashboardEmptyState icon={PackageCheck} title="Order not found." description="This order is not available in this demo workspace." action={<Link to="/dashboard/orders">Back to orders</Link>} /></div>;
+  if (!order) return <div className="dashboard-page"><DashboardEmptyState icon={PackageCheck} title="Order not found." description="This order is not available in your account." action={<Link to="/dashboard/orders">Back to orders</Link>} /></div>;
   return <div className="dashboard-page">
     <DashboardPageHeading eyebrow={tracking ? "A keepsake is on its way" : `Order ${order.id}`} title={tracking ? "Order tracking" : "Order details"} description={order.title} action={<Link className="button button-outline" to="/dashboard/orders"><ArrowLeft size={15} /> All orders</Link>} />
     <div className="dashboard-detail-card"><div className="dashboard-order-hero"><img src={order.image} alt="" /><div><span className="dashboard-card-eyebrow">{order.id}</span><h2>{order.title}</h2><p>Placed {order.date} · {order.total}</p><span className="dashboard-status status-in-production">{order.status}</span></div></div>
-      <div className="dashboard-detail-grid"><div><span>Payment</span><strong>{order.payment}</strong></div><div><span>Production</span><strong>{order.status}</strong></div><div><span>Delivery</span><strong>{order.status === "Delivered" ? "Delivered" : "Estimated after production"}</strong></div></div>
-      <div className="dashboard-order-timeline"><div className="is-complete"><span><Check size={14} /></span><div><strong>Order placed</strong><small>{order.date}</small></div></div><div className="is-current"><span><Clock3 size={14} /></span><div><strong>{order.status === "Delivered" ? "Delivered to your home" : "Carefully in production"}</strong><small>{order.tracking}</small></div></div><div><span><MapPin size={14} /></span><div><strong>On its way home</strong><small>Tracking information appears when your order ships.</small></div></div></div>
+      <div className="dashboard-detail-grid"><div><span>Payment</span><strong>{order.payment}</strong></div><div><span>Production status</span><strong>{order.status}</strong></div>{order.deliveryEstimate ? <div><span>Estimated delivery</span><strong>{order.deliveryEstimate}</strong></div> : null}{order.tracking ? <div><span>Tracking reference</span><strong>{order.tracking}</strong></div> : null}</div>
+      {!order.tracking && order.status === "Shipped" ? <p className="dashboard-info-note">A tracking reference has not been provided yet.</p> : null}
     </div>
   </div>;
-}
-
-function Downloads({ downloads }) {
-  const [history, setHistory] = useState([]);
-  function download(item) { setHistory((current) => [item.id, ...current]); window.alert("This is a demo download. Real PDF files will be provided when a backend is connected."); }
-  return <div className="dashboard-page"><DashboardPageHeading eyebrow={titles.downloads[0]} title={titles.downloads[1]} description={titles.downloads[2]} />
-    {downloads.length ? <><div className="dashboard-download-list">{downloads.map((item) => <DownloadRow key={item.id} item={item} onDownload={download} />)}</div><section className="dashboard-section-block dashboard-download-history"><div className="dashboard-section-heading"><div><span className="eyebrow">Your activity</span><h2>Download history</h2></div></div>{history.length ? history.map((id) => <p key={id} className="dashboard-history-line"><Check size={14} /> Download requested for {id} · just now</p>) : <p>Your download activity will appear here.</p>}</section></> : <DashboardEmptyState icon={Download} title="Your library is waiting." description="Purchased PDFs and their generation status will show here." action={<Link className="button button-outline" to="/books">Explore books</Link>} />}
-  </div>;
-}
-
-function DownloadDetails({ data, id }) {
-  const item = data.downloads.find((entry) => entry.id === id);
-  if (!item) return <div className="dashboard-page"><DashboardEmptyState icon={Download} title="Download not found." description="This file is not available in this demo workspace." action={<Link to="/dashboard/downloads">Back to downloads</Link>} /></div>;
-  return <div className="dashboard-page"><DashboardPageHeading eyebrow={`PDF ${item.id}`} title="Download details" description={item.title} action={<Link className="button button-outline" to="/dashboard/downloads"><ArrowLeft size={15} /> Downloads</Link>} /><div className="dashboard-detail-card dashboard-download-detail"><img src={item.image} alt="" /><div><span className={`dashboard-status status-${item.status.toLowerCase()}`}>{item.status}</span><h2>{item.title}</h2><p>Requested {item.date}</p><p>File size · {item.size}</p>{item.status === "Ready" ? <button className="button button-dark" type="button" onClick={() => window.alert("This demo PDF is not an actual downloadable file.")}><ArrowDownToLine size={15} /> Download PDF</button> : <p className="dashboard-info-note"><Clock3 size={15} /> Your PDF is being prepared in this demo.</p>}</div></div></div>;
 }
 
 function Notifications({ notifications, onChange }) {
@@ -114,50 +103,101 @@ function Notifications({ notifications, onChange }) {
 function Profile({ data, updateProfile, email }) {
   const [saved, setSaved] = useState(false);
   const profile = data.profile;
-  function submit(event) { event.preventDefault(); const form = new FormData(event.currentTarget); updateProfile({ name: String(form.get("name")).trim(), phone: String(form.get("phone")).trim() }); setSaved(true); window.setTimeout(() => setSaved(false), 2500); }
-  function uploadPhoto(event) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
-    if (!file.type.startsWith("image/") || file.size > 5 * 1024 * 1024) {
-      window.alert("Choose an image smaller than 5 MB.");
-      return;
+  async function submit(event) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const success = await updateProfile({
+      name: String(form.get("name")).trim(),
+      phone: String(form.get("phone")).trim(),
+    });
+    if (success) {
+      setSaved(true);
+      window.setTimeout(() => setSaved(false), 2500);
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === "string") updateProfile({ photo: reader.result });
-    };
-    reader.onerror = () => window.alert("We couldn’t read that image. Please choose another file.");
-    reader.readAsDataURL(file);
   }
   return <div className="dashboard-page"><DashboardPageHeading eyebrow={titles.profile[0]} title={titles.profile[1]} description={titles.profile[2]} />
-    <form className="dashboard-form-card" onSubmit={submit}><div className="dashboard-profile-photo"><span className="dashboard-avatar dashboard-avatar-large">{profile.photo ? <img src={profile.photo} alt="" /> : profile.name.slice(0, 1).toUpperCase()}</span><div><strong>Profile photo</strong><p>Images are held in this browser session only.</p><label className="button button-outline dashboard-photo-upload"><Camera size={14} /> Upload photo<input className="dashboard-visually-hidden" type="file" accept="image/*" onChange={uploadPhoto} /></label></div></div>
+    <form className="dashboard-form-card" onSubmit={submit}><div className="dashboard-profile-photo"><span className="dashboard-avatar dashboard-avatar-large">{profile.name.slice(0, 1).toUpperCase()}</span><div><strong>Account profile</strong><p>Your name and phone number are saved to your account.</p></div></div>
       <div className="dashboard-form-grid"><label>Full name<input name="name" defaultValue={profile.name} required maxLength={80} /></label><label>Email address<input value={email} type="email" disabled /><small>Email changes require account verification.</small></label><label>Phone number<input name="phone" type="tel" defaultValue={profile.phone} placeholder="Add a phone number" /></label></div>
-      <div className="dashboard-form-footer"><Link to="/forgot-password">Change password <ArrowRight size={14} /></Link><button className="button button-dark" type="submit">{saved ? <><Check size={15} /> Saved in this preview</> : "Save profile"}</button></div>
+      <div className="dashboard-form-footer"><Link to="/forgot-password">Change password <ArrowRight size={14} /></Link><button className="button button-dark" type="submit">{saved ? <><Check size={15} /> Saved</> : "Save profile"}</button></div>
     </form>
-    <section className="dashboard-section-block"><div className="dashboard-section-heading"><div><span className="eyebrow">Preferences</span><h2>Notification preferences</h2></div></div>{[["emailUpdates", "Design inspiration", "Occasional notes and ideas for your next book."], ["orderUpdates", "Order updates", "Important updates about your purchases."]].map(([key, label, note]) => <label className="dashboard-setting-row" key={key}><span><strong>{label}</strong><small>{note}</small></span><input type="checkbox" checked={profile[key]} onChange={(event) => updateProfile({ [key]: event.target.checked })} /></label>)}</section>
   </div>;
 }
 
 function SettingsPage({ data, updateSettings }) {
-  const items = [["orderEmails", "Order updates", "Receive email when your book moves through production."], ["productNews", "News & inspiration", "Occasional updates about new designs and ideas."], ["twoStep", "Two-step verification", "Add another layer after real authentication is connected."]];
+  const items = [["orderEmails", "Order updates", "Receive email when your book moves through production."], ["productNews", "News & inspiration", "Occasional updates about new designs and ideas."]];
   return <div className="dashboard-page"><DashboardPageHeading eyebrow={titles.settings[0]} title={titles.settings[1]} description={titles.settings[2]} />
     <section className="dashboard-form-card"><div className="dashboard-section-heading"><div><span className="eyebrow">Your preferences</span><h2>Privacy & notifications</h2></div><Settings size={20} /></div>{items.map(([key, title, description]) => <label className="dashboard-setting-row" key={key}><span><strong>{title}</strong><small>{description}</small></span><input type="checkbox" checked={data.settings[key]} onChange={(event) => updateSettings({ [key]: event.target.checked })} /></label>)}</section>
-    <div className="dashboard-info-note"><ShieldCheck size={17} /> These preview settings are only held in memory. Account security features need backend authentication.</div>
+    <div className="dashboard-info-note"><Settings size={17} /> These preferences are saved to your account.</div>
   </div>;
 }
 
-function Billing({ billing }) {
+function Billing() {
+  const [payments, setPayments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    apiRequest("/payments/history").then(({ data }) => {
+      if (!Array.isArray(data?.items)) throw new Error("Payment history returned an invalid response.");
+      if (active) setPayments(data.items);
+    }).catch((failure) => {
+      if (active) setError(failure instanceof Error ? failure.message : "Payment history could not be loaded.");
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [reloadKey]);
+
+  async function requestRefund(payment) {
+    const amount = window.prompt(`Enter the refund amount in ${payment.currency}:`, payment.amount);
+    if (amount === null) return;
+    const reason = window.prompt("Why are you requesting a refund?");
+    if (reason === null) return;
+    setError("");
+    setMessage("");
+    try {
+      await apiRequest(`/payments/${encodeURIComponent(payment.id)}/refund-requests`, {
+        method: "POST",
+        body: { amount, reason },
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      });
+      setMessage("Your refund request was submitted for review.");
+      setReloadKey((key) => key + 1);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "The refund request could not be submitted.");
+    }
+  }
+
   return <div className="dashboard-page"><DashboardPageHeading eyebrow={titles.billing[0]} title={titles.billing[1]} description={titles.billing[2]} />
-    {billing.length ? <div className="dashboard-billing-table-wrap"><table className="dashboard-billing-table"><thead><tr><th>Invoice</th><th>Date</th><th>Description</th><th>Amount</th><th>Status</th><th></th></tr></thead><tbody>{billing.map((item) => <tr key={item.id}><td><strong>{item.id}</strong></td><td>{item.date}</td><td>{item.description}</td><td>{item.amount}</td><td><span className="dashboard-status status-ready">{item.status}</span></td><td><button className="dashboard-text-link" type="button" onClick={() => window.alert("Invoice download will be available with billing integration.")}><FileText size={14} /> Invoice</button></td></tr>)}</tbody></table></div> : <DashboardEmptyState icon={FileText} title="No billing history yet." description="Receipts for your orders will appear here." />}
+    {message ? <p className="dashboard-info-note" role="status">{message}</p> : null}
+    {error ? <p className="dashboard-info-note" role="alert">{error}</p> : null}
+    {loading ? <p className="dashboard-info-note">Loading your payment history…</p> : payments.length ? <div className="dashboard-billing-table-wrap"><table className="dashboard-billing-table"><thead><tr><th>Transaction</th><th>Date</th><th>Gateway / method</th><th>Amount</th><th>Status</th><th>Refund</th></tr></thead><tbody>{payments.map((payment) => {
+      const refunds = payment.refunds ?? [];
+      const refundPending = refunds.some((refund) => ["requested", "pending", "manual_required", "processing"].includes(refund.status));
+      return <tr key={payment.id}><td><strong>{payment.providerPaymentId || payment.id}</strong></td><td>{new Date(payment.createdAt).toLocaleDateString()}</td><td>{payment.provider}{payment.paymentMethod ? ` · ${payment.paymentMethod}` : ""}</td><td>{new Intl.NumberFormat(undefined, { style: "currency", currency: payment.currency }).format(Number(payment.amount))}</td><td><span className="dashboard-status status-ready">{payment.status.replaceAll("_", " ")}</span></td><td>{refundPending ? refunds.map((refund) => refund.status.replaceAll("_", " ")).join(", ") : ["successful", "partially_refunded"].includes(payment.status) ? <button className="dashboard-text-link" type="button" onClick={() => requestRefund(payment)}>Request refund</button> : refunds.length ? refunds.map((refund) => refund.status.replaceAll("_", " ")).join(", ") : "—"}</td></tr>;
+    })}</tbody></table></div> : !loading ? <DashboardEmptyState icon={FileText} title="No billing history yet." description="Verified payments and refund status will appear here." /> : null}
   </div>;
 }
 
 function Addresses({ addresses, addAddress, deleteAddress }) {
   const [adding, setAdding] = useState(false);
-  function submit(event) { event.preventDefault(); const form = new FormData(event.currentTarget); addAddress({ name: String(form.get("name")), line: String(form.get("line")), city: String(form.get("city")), postal: String(form.get("postal")) }); setAdding(false); }
+  async function submit(event) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const saved = await addAddress({
+      name: String(form.get("name")),
+      line: String(form.get("line")),
+      city: String(form.get("city")),
+      postal: String(form.get("postal")),
+      countryCode: String(form.get("countryCode")),
+    });
+    if (saved) setAdding(false);
+  }
   return <div className="dashboard-page"><DashboardPageHeading eyebrow={titles.addresses[0]} title={titles.addresses[1]} description={titles.addresses[2]} action={!adding ? <button className="button button-dark" type="button" onClick={() => setAdding(true)}><Plus size={15} /> Add address</button> : null} />
-    {adding ? <form className="dashboard-form-card dashboard-address-form" onSubmit={submit}><h2>New delivery address</h2><div className="dashboard-form-grid"><label>Recipient<input name="name" required /></label><label>Street address<input name="line" required /></label><label>City<input name="city" required /></label><label>Postal code<input name="postal" required /></label></div><div className="dashboard-form-footer"><button className="button button-outline" type="button" onClick={() => setAdding(false)}>Cancel</button><button className="button button-dark" type="submit">Save address</button></div></form> : null}
+    {adding ? <form className="dashboard-form-card dashboard-address-form" onSubmit={submit}><h2>New delivery address</h2><div className="dashboard-form-grid"><label>Recipient<input name="name" required maxLength={160} /></label><label>Street address<input name="line" required maxLength={200} /></label><label>City<input name="city" required maxLength={120} /></label><label>Postal code<input name="postal" required maxLength={30} /></label><label>Country code<input name="countryCode" defaultValue="PK" required minLength={2} maxLength={2} /></label></div><div className="dashboard-form-footer"><button className="button button-outline" type="button" onClick={() => setAdding(false)}>Cancel</button><button className="button button-dark" type="submit">Save address</button></div></form> : null}
     {addresses.length ? <div className="dashboard-address-list">{addresses.map((address) => <article className="dashboard-address-card" key={address.id}><MapPin size={18} /><div><strong>{address.name}</strong><p>{address.line}<br />{address.city} {address.postal}</p></div><button className="dashboard-icon-button" type="button" aria-label={`Delete address for ${address.name}`} onClick={() => deleteAddress(address.id)}><Trash2 size={16} /></button></article>)}</div> : !adding ? <DashboardEmptyState icon={MapPin} title="No saved addresses yet." description="Save a delivery address for a future printed book." action={<button className="button button-outline" type="button" onClick={() => setAdding(true)}><Plus size={15} /> Add your first address</button>} /> : null}
   </div>;
 }

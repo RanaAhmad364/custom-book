@@ -5,20 +5,28 @@ import {
   AlignCenter, AlignLeft, AlignRight, ArrowLeft, ArrowDown, ArrowUp, BookOpen,
   Check, ChevronDown, ChevronRight, Circle, Cloud, CloudOff, Copy, Eye, FileImage,
   HelpCircle, ImagePlus, LayoutTemplate, LoaderCircle, Menu, Minus, Paintbrush,
-  Plus, Redo2, Shapes, Trash2, Type, Undo2, Upload, X,
+  Plus, Redo2, Save, Send, Shapes, Trash2, Type, Undo2, Upload, X,
 } from "lucide-react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useAuth } from "../../../features/auth/AuthContext.jsx";
 import { projectService } from "../../../services/projectService.js";
+import {
+  getAdminBookDesign, publishAdminBookDesign, saveAdminBookDesign,
+  unpublishAdminBookDesign, uploadAdminDesignAsset,
+} from "../../../features/admin/adminService.js";
 import { ErrorState } from "../../../components/common/ErrorState.jsx";
 import { LoadingState } from "../../../components/common/LoadingState.jsx";
 import EditorCanvas from "../../../features/bookEditor/EditorCanvas.jsx";
+import { refreshAssetSources } from "../../../features/bookEditor/assetPreview.js";
+import { getPageThumbnailSize } from "../../../features/bookEditor/pageThumbnail.js";
+import { createSaveQueue } from "../../../features/bookEditor/saveQueue.js";
 import {
   cloneDocument, createPage, createPhotoElement, createShapeElement, createTextElement,
   duplicatePageRecord, formatBytes, pageLayouts, removePage, reorderPageIds,
 } from "../../../features/bookEditor/editorDocument.js";
+import { getPageLabel, getPagePosition } from "../../../features/bookEditor/pageNavigation.js";
 import CoverDesigner from "../../../features/bookEditor/CoverDesigner.jsx";
-import BookPreview from "../../../features/bookEditor/BookPreview.jsx";
+import BookPreview, { PageArtwork } from "../../../features/bookEditor/BookPreview.jsx";
 import BookReview from "../../../features/bookEditor/BookReview.jsx";
 import "./BookEditor.css";
 
@@ -39,21 +47,20 @@ function GridIcon(props) {
 }
 
 const colorSwatches = ["#fffdf9", "#f4eee5", "#e8ece5", "#d7e4dc", "#eadccf", "#e8e1ec", "#26352e", "#193f36"];
-
-function pageLabel(page, document) {
-  if (page.type === "cover") return "Cover";
-  const pageNumber = document?.pageOrder.indexOf(page.id);
-  return pageNumber > 0 ? `Page ${pageNumber}` : page.label;
-}
+const editorImageTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
 
 function SidebarPanel({
-  panel, document, page, inputRef, onAddText, onAddShape, onAddPhoto, onUpload,
+  panel, document, page, activePageId, setActivePageId, setSelectedId, setMobilePanel, inputRef, onAddText, onAddShape, onAddPhoto, onUpload,
   onApplyLayout, onBackground, onReorderPage, onAddPage, onDuplicatePage, onDeletePage, onClose,
 }) {
   const readyAssets = document.assets.filter((asset) => asset.src);
   const [dragPage, setDragPage] = useState(null);
+  const pageRefs = useRef(new Map());
+  useEffect(() => {
+    pageRefs.current.get(activePageId)?.scrollIntoView({ block: "nearest" });
+  }, [activePageId, document.pageOrder.length]);
   if (!panel) return null;
-  return <aside className="editor-side-panel">
+  return <aside className={`editor-side-panel${panel === "pages" ? " editor-pages-panel" : ""}`}>
     <header className="editor-panel-heading"><div><span className="eyebrow">Studio tools</span><h2>{tools.find((tool) => tool.id === panel)?.label ?? "Pages"}</h2></div><button className="editor-panel-close" type="button" onClick={onClose} aria-label="Close tools panel"><X size={17} /></button></header>
     {panel === "templates" ? <div className="editor-panel-content">
       <p className="editor-panel-note">Keep your original setup. Apply a layout to this page when you’re ready to begin.</p>
@@ -61,7 +68,7 @@ function SidebarPanel({
       {document.book.template ? <div className="editor-template-current"><span className="eyebrow">Selected at setup</span><strong>{document.book.template.title}</strong><small>{document.book.template.category} · ready to customize</small></div> : null}
     </div> : null}
     {panel === "layouts" ? <div className="editor-panel-content">
-      <p className="editor-panel-note">Choose a composition for <strong>{pageLabel(page, document)}</strong>. Existing content is never removed without confirmation.</p>
+      <p className="editor-panel-note">Choose a composition for <strong>{getPageLabel(page, document)}</strong>. Existing content is never removed without confirmation.</p>
       <div className="editor-layout-list">{pageLayouts.map((layout, index) => <button className="editor-layout-card" type="button" key={layout.id} onClick={() => onApplyLayout(layout)}>
         <span className={`editor-layout-schematic layout-${layout.id}`}>{layout.slots.map((slot, slotIndex) => <i key={slotIndex} style={{ left: `${slot.x * 100}%`, top: `${slot.y * 100}%`, width: `${slot.width * 100}%`, height: `${slot.height * 100}%` }} />)}</span>
         <span><strong>{layout.name}</strong><small>{layout.description}</small></span>
@@ -91,19 +98,36 @@ function SidebarPanel({
       <label className="editor-field-label">Custom color<input type="color" value={page.background?.color ?? "#fffdf9"} onChange={(event) => onBackground(event.target.value)} /></label>
       {document.book.template ? <div className="editor-template-current"><span className="eyebrow">Your template</span><strong>{document.book.template.title}</strong><small>Page colors and text remain fully editable.</small></div> : null}
     </div> : null}
-    {panel === "pages" ? <div className="editor-panel-content">
-      <p className="editor-panel-note">Arrange the pages in your book. Drag a page to change its order.</p>
-      <div className="editor-pages-list">{document.pageOrder.map((id, index) => {
+    {panel === "pages" ? <div className="editor-panel-content-pages">
+        <p className="editor-panel-note">Arrange the pages in your book. Drag a page to change its order.</p>
+        <div className="editor-pages-list">{document.pageOrder.map((id, index) => {
         const item = document.pages.find((candidate) => candidate.id === id);
         if (!item) return null;
-        return <div className="editor-page-row" key={id} draggable onDragStart={() => setDragPage(id)} onDragOver={(event) => event.preventDefault()} onDrop={() => { if (dragPage && dragPage !== id) onReorderPage(dragPage, id); setDragPage(null); }}>
-          <span className="editor-page-number">{item.type === "cover" ? "C" : index}</span><span>{pageLabel(item, document)}</span><div><button type="button" aria-label={`Move ${pageLabel(item, document)} earlier`} disabled={index === 0} onClick={() => onReorderPage(id, document.pageOrder[index - 1])}><ArrowUp size={14} /></button><button type="button" aria-label={`Move ${pageLabel(item, document)} later`} disabled={index === document.pageOrder.length - 1} onClick={() => onReorderPage(id, document.pageOrder[index + 1])}><ArrowDown size={14} /></button></div>
+        const label = getPageLabel(item, document);
+        return <div
+          className={`editor-page-row${activePageId === id ? " active" : ""}`}
+          key={id}
+          ref={(element) => {
+            if (element) pageRefs.current.set(id, element);
+            else pageRefs.current.delete(id);
+          }}
+          draggable
+          onDragStart={() => setDragPage(id)}
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={() => { if (dragPage && dragPage !== id) onReorderPage(dragPage, id); setDragPage(null); }}
+        >
+          <button className="editor-page-select" type="button" onClick={() => { setActivePageId(id); setSelectedId(null); setMobilePanel(false); }} aria-current={activePageId === id ? "page" : undefined} aria-label={`Open ${label}`}>
+            <span className="editor-page-number">{item.type === "cover" ? "C" : label.replace("Page ", "")}</span><span>{label}</span>
+          </button>
+          <div><button type="button" aria-label={`Move ${label} earlier`} disabled={index === 0} onClick={() => onReorderPage(id, document.pageOrder[index - 1])}><ArrowUp size={14} /></button><button type="button" aria-label={`Move ${label} later`} disabled={index === document.pageOrder.length - 1} onClick={() => onReorderPage(id, document.pageOrder[index + 2] ?? null)}><ArrowDown size={14} /></button></div>
         </div>;
       })}</div>
-      <button className="editor-upload-inline" type="button" onClick={onAddPage}><Plus size={16} /> Add a page</button>
-      <button className="editor-upload-inline" type="button" onClick={() => onDuplicatePage(page.id)}><Copy size={15} /> Duplicate this page</button>
-      {page.type !== "cover" ? <button className="editor-danger-action" type="button" onClick={() => onDeletePage(page.id)}><Trash2 size={15} /> Delete this page</button> : null}
-    </div> : null}
+        <div className="editor-page-actions">
+          <button className="editor-upload-inline" type="button" onClick={onAddPage}><Plus size={16} /> Add a page</button>
+          <button className="editor-upload-inline" type="button" onClick={() => onDuplicatePage(page.id)}><Copy size={15} /> Duplicate this page</button>
+          {page.type !== "cover" ? <button className="editor-danger-action" type="button" onClick={() => onDeletePage(page.id)}><Trash2 size={15} /> Delete this page</button> : null}
+        </div>
+      </div> : null}
   </aside>;
 }
 
@@ -165,10 +189,22 @@ function mergeRecovery(saved, recovery) {
   };
 }
 
-export default function CreationEditor() {
-  const { projectId } = useParams();
+export default function CreationEditor({ adminMode = false }) {
+  const { projectId, bookId } = useParams();
+  const targetId = adminMode ? bookId : projectId;
+  return <CreationEditorSession key={`${adminMode ? "admin" : "project"}:${targetId}`} adminMode={adminMode} />;
+}
+
+function CreationEditorSession({ adminMode }) {
+  const { projectId, bookId } = useParams();
+  const [searchParams] = useSearchParams();
+  const previewOnly = adminMode && searchParams.get("preview") === "1";
+  const targetId = adminMode ? bookId : projectId;
   const { user } = useAuth();
-  const query = useQuery({ queryKey: ["created-project", user.email, projectId], queryFn: () => projectService.getProject(user.email, projectId) });
+  const query = useQuery({
+    queryKey: adminMode ? ["admin-book-design", bookId] : ["created-project", user.email, projectId],
+    queryFn: () => adminMode ? getAdminBookDesign(bookId) : projectService.getProject(user.email, projectId),
+  });
   const [document, setDocument] = useState(null);
   const documentRef = useRef(null);
   const [activePageId, setActivePageId] = useState(null);
@@ -184,6 +220,8 @@ export default function CreationEditor() {
   const [mobilePanel, setMobilePanel] = useState(false);
   const [saveStatus, setSaveStatus] = useState("Saved");
   const [saveError, setSaveError] = useState("");
+  const [bookPublished, setBookPublished] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   const [recoveryNotice, setRecoveryNotice] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const fileInputRef = useRef(null);
@@ -191,19 +229,34 @@ export default function CreationEditor() {
   const undoStack = useRef([]);
   const redoStack = useRef([]);
   const clipboard = useRef(null);
+  const thumbnailRefs = useRef(new Map());
+  const assetRefreshRef = useRef(null);
+  const dirtyRef = useRef(false);
+  const saveQueueRef = useRef(null);
+  if (!saveQueueRef.current) saveQueueRef.current = createSaveQueue();
 
   useEffect(() => {
     if (!query.data?.document) return;
     let active = true;
     const projectDocument = query.data.document;
+    if (adminMode) {
+      dirtyRef.current = false;
+      documentRef.current = projectDocument;
+      setDocument(projectDocument);
+      setActivePageId(projectDocument.pageOrder[0]);
+      setBookPublished(Boolean(query.data.published));
+      setPreview(previewOnly);
+      return () => { active = false; };
+    }
     try {
-      const recovery = projectService.getRecovery(user.email, projectId);
+      const recovery = projectService.getRecovery(user.email, targetId);
       if (recovery && new Date(recovery.metadata.updatedAt) > new Date(projectDocument.metadata.updatedAt)) {
         const recovered = mergeRecovery(projectDocument, recovery);
         if (active) {
           documentRef.current = recovered;
           setDocument(recovered);
           setActivePageId(recovered.pageOrder[0]);
+          dirtyRef.current = true;
           setRecoveryNotice(true);
           setSaveStatus("Unsaved changes recovered");
         }
@@ -219,10 +272,14 @@ export default function CreationEditor() {
       setActivePageId(projectDocument.pageOrder[0]);
     }
     return () => { active = false; };
-  }, [query.data, projectId, user.email]);
+  }, [adminMode, previewOnly, query.data, targetId, user.email]);
 
   const page = useMemo(() => document?.pages.find((item) => item.id === activePageId) ?? document?.pages[0], [document, activePageId]);
   const selectedElement = page?.elements.find((element) => element.id === selectedId) ?? null;
+
+  useEffect(() => {
+    thumbnailRefs.current.get(activePageId)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activePageId, document?.pageOrder.length]);
 
   const commit = useCallback((next, history = true) => {
     if (!next) return;
@@ -232,62 +289,150 @@ export default function CreationEditor() {
       redoStack.current = [];
     }
     documentRef.current = next;
+    dirtyRef.current = true;
     setDocument(next);
     setSaveStatus("Unsaved changes");
     setSaveError("");
   }, []);
 
-  useEffect(() => {
-    if (!document || !query.data) return undefined;
-    setSaveStatus("Saving");
-    const snapshot = cloneDocument(document);
-    const timer = window.setTimeout(async () => {
+  const refreshAssetUrls = useCallback((assetId, failedSource) => {
+    if (!assetId || assetRefreshRef.current) return assetRefreshRef.current;
+    const activeSource = documentRef.current?.assets?.find((asset) => asset.id === assetId)?.src;
+    if (activeSource && activeSource !== failedSource) return Promise.resolve();
+
+    const request = (async () => {
       try {
-        let recoveryWarning = "";
-        try {
-          projectService.saveRecovery(user.email, projectId, snapshot);
-        } catch (failure) {
-          recoveryWarning = failure instanceof Error ? `Local recovery copy unavailable: ${failure.message}` : "Local recovery copy unavailable.";
+        const refreshed = adminMode
+          ? await getAdminBookDesign(targetId)
+          : await projectService.getProject(user.email, targetId);
+        const latest = documentRef.current;
+        const next = refreshAssetSources(latest, refreshed.document);
+        if (next !== latest) {
+          documentRef.current = next;
+          setDocument(next);
+          setRenderToken((value) => value + 1);
+        } else if (latest?.assets?.find((asset) => asset.id === assetId)?.src === failedSource) {
+          setSaveError("A page image could not be loaded. Its secure preview link could not be refreshed; reload the editor or sign in again.");
         }
-        await projectService.saveDocument(user.email, projectId, snapshot);
-        if (documentRef.current?.metadata.updatedAt === snapshot.metadata.updatedAt) {
-          if (!recoveryWarning) {
-            try { projectService.clearRecovery(user.email, projectId); } catch (failure) {
-              recoveryWarning = failure instanceof Error ? `The project is saved, but its recovery copy could not be cleared: ${failure.message}` : "The project is saved, but its recovery copy could not be cleared.";
+      } catch {
+        setSaveError("A page image could not be loaded. Its secure preview link could not be refreshed; reload the editor or sign in again.");
+      } finally {
+        assetRefreshRef.current = null;
+      }
+    })();
+    assetRefreshRef.current = request;
+    return request;
+  }, [adminMode, targetId, user.email]);
+
+  const saveNow = useCallback((providedSnapshot) => {
+    const snapshot = providedSnapshot ?? (documentRef.current ? cloneDocument(documentRef.current) : null);
+    if (!snapshot) return Promise.resolve(false);
+    if (!providedSnapshot && !dirtyRef.current) return Promise.resolve(true);
+    const snapshotKey = JSON.stringify(snapshot);
+    let recoveryWarning = "";
+    if (!adminMode) {
+      try {
+        projectService.saveRecovery(user.email, targetId, snapshot);
+      } catch (failure) {
+        recoveryWarning = failure instanceof Error
+          ? `Local recovery copy unavailable: ${failure.message}`
+          : "Local recovery copy unavailable.";
+      }
+    }
+    const queuedSave = saveQueueRef.current(snapshotKey, async () => {
+      setSaveStatus("Saving");
+      try {
+        if (!adminMode) {
+          const savedProject = await projectService.saveDocument(user.email, targetId, snapshot);
+          const latest = documentRef.current;
+          const refreshed = refreshAssetSources(latest, savedProject.document);
+          if (refreshed !== latest) {
+            documentRef.current = refreshed;
+            setDocument(refreshed);
+            setRenderToken((value) => value + 1);
+          }
+        } else {
+          const savedDesign = await saveAdminBookDesign(targetId, snapshot);
+          const latest = documentRef.current;
+          if (latest?.metadata.updatedAt === snapshot.metadata.updatedAt) {
+            documentRef.current = savedDesign.document;
+            setDocument(savedDesign.document);
+            setRenderToken((value) => value + 1);
+          } else {
+            const refreshed = refreshAssetSources(latest, savedDesign.document);
+            if (refreshed !== latest) {
+              documentRef.current = refreshed;
+              setDocument(refreshed);
+              setRenderToken((value) => value + 1);
             }
           }
+        }
+
+        if (documentRef.current?.metadata.updatedAt === snapshot.metadata.updatedAt) {
+          if (!adminMode && !recoveryWarning) {
+            try {
+              projectService.clearRecovery(user.email, targetId);
+            } catch (failure) {
+              recoveryWarning = failure instanceof Error
+                ? `The project is saved, but its recovery copy could not be cleared: ${failure.message}`
+                : "The project is saved, but its recovery copy could not be cleared.";
+            }
+          }
+          dirtyRef.current = false;
           setSaveStatus(navigator.onLine ? "Saved" : "Offline");
         }
         setSaveError(recoveryWarning);
+        return true;
       } catch (failure) {
         setSaveStatus("Save failed");
-        setSaveError(failure instanceof Error ? failure.message : "This change could not be saved. Your recovery copy is kept in this browser.");
-        try {
-          projectService.saveRecovery(user.email, projectId, snapshot);
-        } catch (recoveryFailure) {
-          setSaveError(`${failure instanceof Error ? failure.message : "The project could not be saved."} ${recoveryFailure instanceof Error ? recoveryFailure.message : ""}`.trim());
+        const message = failure instanceof Error ? failure.message : "This change could not be saved.";
+        setSaveError(adminMode ? message : `${message} Your recovery copy is kept in this browser.`);
+        if (!adminMode) {
+          try {
+            projectService.saveRecovery(user.email, targetId, snapshot);
+          } catch (recoveryFailure) {
+            setSaveError(`${message} ${recoveryFailure instanceof Error ? recoveryFailure.message : ""}`.trim());
+          }
         }
+        return false;
       }
-    }, 650);
+    });
+    return queuedSave;
+  }, [adminMode, targetId, user.email]);
+
+  useEffect(() => {
+    if (!document || !query.data) return undefined;
+    if (!dirtyRef.current) return undefined;
+    setSaveStatus("Saving");
+    const snapshot = cloneDocument(document);
+    const timer = window.setTimeout(() => { void saveNow(snapshot); }, 650);
     return () => window.clearTimeout(timer);
-  }, [document, projectId, query.data, user.email]);
+  }, [adminMode, document, query.data, saveNow]);
 
   useEffect(() => () => {
     const latest = documentRef.current;
-    if (latest && query.data) {
-      projectService.saveDocument(user.email, projectId, cloneDocument(latest)).catch((saveFailure) => {
+    if (latest && query.data && (!adminMode || dirtyRef.current)) {
+      saveNow(cloneDocument(latest)).catch((saveFailure) => {
         try {
-          projectService.saveRecovery(user.email, projectId, latest);
-          console.warn("Editor document save failed during navigation; a recovery copy was kept.", saveFailure);
+          if (!adminMode) projectService.saveRecovery(user.email, targetId, latest);
+          console.warn("Editor document save failed during navigation.", saveFailure);
         } catch (failure) {
-          console.error("Could not persist the editor document or its recovery copy while leaving the editor.", { saveFailure, recoveryFailure: failure });
+          console.error("Could not preserve the editor document while leaving the editor.", { saveFailure, recoveryFailure: failure });
         }
       });
     }
-  }, [projectId, query.data, user.email]);
+  }, [adminMode, query.data, saveNow, targetId]);
 
   useEffect(() => {
-    const onOnline = () => { if (documentRef.current) setSaveStatus("Saved"); };
+    const onOnline = () => {
+      if (!documentRef.current) return;
+      if (dirtyRef.current) {
+        setSaveStatus("Unsaved changes");
+        void saveNow();
+      } else {
+        setSaveStatus("Saved");
+      }
+    };
     const onOffline = () => setSaveStatus("Offline");
     window.addEventListener("online", onOnline);
     window.addEventListener("offline", onOffline);
@@ -295,13 +440,14 @@ export default function CreationEditor() {
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOffline);
     };
-  }, []);
+  }, [saveNow]);
 
   const undo = useCallback(() => {
     const previous = undoStack.current.pop();
     if (!previous || !documentRef.current) return;
     redoStack.current.push(cloneDocument(documentRef.current));
     documentRef.current = previous;
+    dirtyRef.current = true;
     setDocument(previous);
     setSelectedId(null);
     setRenderToken((value) => value + 1);
@@ -312,6 +458,7 @@ export default function CreationEditor() {
     if (!next || !documentRef.current) return;
     undoStack.current.push(cloneDocument(documentRef.current));
     documentRef.current = next;
+    dirtyRef.current = true;
     setDocument(next);
     setSelectedId(null);
     setRenderToken((value) => value + 1);
@@ -320,6 +467,7 @@ export default function CreationEditor() {
 
   useEffect(() => {
     const handleKeyDown = (event) => {
+      if (previewOnly) return;
       const target = event.target;
       const typing = target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
       const modifier = event.ctrlKey || event.metaKey;
@@ -353,25 +501,7 @@ export default function CreationEditor() {
       if (event.key === "Delete" || event.key === "Backspace") { if (selectedId) { event.preventDefault(); deleteSelected(); } }
       if (modifier && event.key.toLowerCase() === "s") {
         event.preventDefault();
-        if (documentRef.current) {
-          setSaveStatus("Saving");
-          const snapshot = cloneDocument(documentRef.current);
-          projectService.saveDocument(user.email, projectId, snapshot).then(() => {
-            try {
-              projectService.clearRecovery(user.email, projectId);
-              setSaveError("");
-            } catch (failure) {
-              setSaveError(failure instanceof Error ? failure.message : "The project was saved, but its recovery copy could not be cleared.");
-            }
-            if (documentRef.current?.metadata.updatedAt === snapshot.metadata.updatedAt) setSaveStatus(navigator.onLine ? "Saved" : "Offline");
-          }).catch((failure) => {
-            setSaveStatus("Save failed");
-            setSaveError(failure instanceof Error ? failure.message : "The project could not be saved.");
-            try { projectService.saveRecovery(user.email, projectId, snapshot); } catch (recoveryFailure) {
-              setSaveError(`${failure instanceof Error ? failure.message : "The project could not be saved."} ${recoveryFailure instanceof Error ? recoveryFailure.message : ""}`.trim());
-            }
-          });
-        }
+        void saveNow();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -381,18 +511,29 @@ export default function CreationEditor() {
   useEffect(() => {
     if (!document?.metadata.title) return undefined;
     const onBeforeUnload = (event) => {
-      if (saveStatus === "Saving" || saveStatus === "Unsaved changes" || saveStatus === "Save failed") {
+      if (dirtyRef.current || saveStatus === "Saving" || saveStatus === "Unsaved changes" || saveStatus === "Save failed") {
+        if (!adminMode && documentRef.current) {
+          try {
+            projectService.saveRecovery(user.email, targetId, cloneDocument(documentRef.current));
+          } catch (failure) {
+            console.error("Could not preserve the editor document before leaving.", failure);
+            setSaveError(failure instanceof Error ? failure.message : "The local recovery copy could not be saved.");
+          }
+        }
         event.preventDefault();
         event.returnValue = "";
       }
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [document?.metadata.title, saveStatus]);
+  }, [adminMode, document?.metadata.title, saveStatus, targetId, user.email]);
 
-  if (query.isPending || (query.data && !document)) return <main className="page-shell"><LoadingState /></main>;
+  if (query.isPending) return <main className="page-shell"><LoadingState /></main>;
   if (query.isError) return <main className="page-shell"><ErrorState onRetry={query.refetch} /></main>;
   if (!query.data) return <main className="page-shell not-found"><span className="eyebrow">Your workspace</span><h1>We couldn’t find<br /><em>that project.</em></h1><Link className="button button-dark" to="/dashboard/projects">Go to my projects <ChevronRight size={15} /></Link></main>;
+  if (!query.data.document) return <main className="page-shell not-found" role="alert"><span className="eyebrow">Your workspace</span><h1>This book isn’t<br /><em>ready to edit.</em></h1><p>This project has no saved book document yet. Return to your projects or try loading it again.</p><button className="button button-outline" type="button" onClick={() => query.refetch()}>Try again</button><Link className="button button-dark" to="/dashboard/projects">Go to my projects <ChevronRight size={15} /></Link></main>;
+  if (!document) return <main className="page-shell"><LoadingState /></main>;
+  const thumbnailSize = getPageThumbnailSize(document.book.size, 42, 44);
 
   function updatePage(pageId, updater, history = true) {
     const next = cloneDocument(documentRef.current);
@@ -441,15 +582,25 @@ export default function CreationEditor() {
     setPanel("photos");
   }
 
-  function addUploadedFiles(fileList) {
+  async function addUploadedFiles(fileList) {
     const files = Array.from(fileList ?? []);
-    files.forEach((file) => {
-      if (!file.type.startsWith("image/")) { setSaveError(`${file.name} is not a supported image.`); return; }
+    for (const file of files) {
+      if (!editorImageTypes.has(file.type.toLowerCase())) { setSaveError(`${file.name} is not a supported image.`); return; }
       if (file.size > 15 * 1024 * 1024) { setSaveError(`${file.name} is larger than 15 MB.`); return; }
-      const reader = new FileReader();
-      reader.onload = () => {
-          if (typeof reader.result !== "string") { setSaveError(`Could not read ${file.name}.`); return; }
-        const asset = { id: crypto.randomUUID(), name: file.name, mimeType: file.type, size: file.size, width: null, height: null, src: reader.result };
+      try {
+        const asset = adminMode
+          ? await uploadAdminDesignAsset(file).then((uploaded) => ({
+            id: crypto.randomUUID(),
+            assetKey: uploaded.assetKey,
+            name: uploaded.filename,
+            mimeType: uploaded.mimeType,
+            size: uploaded.size,
+            checksum: uploaded.checksum,
+            width: uploaded.width,
+            height: uploaded.height,
+            src: uploaded.url,
+          }))
+          : await projectService.uploadAsset(user.email, targetId, file);
         const next = cloneDocument(documentRef.current);
         next.assets.push(asset);
         next.metadata.updatedAt = new Date().toISOString();
@@ -460,10 +611,10 @@ export default function CreationEditor() {
         setRenderToken((value) => value + 1);
         setPanel("photos");
         setSaveError("");
-      };
-      reader.onerror = () => setSaveError(`Could not read ${file.name}. Please try again.`);
-      reader.readAsDataURL(file);
-    });
+      } catch (failure) {
+        setSaveError(failure instanceof Error ? `Could not upload ${file.name}: ${failure.message}` : `Could not upload ${file.name}. Please try again.`);
+      }
+    }
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
@@ -623,32 +774,62 @@ export default function CreationEditor() {
 
   function fitZoom() { setZoom(75); }
 
+  async function toggleBookPublication() {
+    if (!adminMode || dirtyRef.current || saveStatus !== "Saved") return;
+    setPublishing(true);
+    setSaveError("");
+    try {
+      if (bookPublished) {
+        await unpublishAdminBookDesign(targetId);
+        setBookPublished(false);
+      } else {
+        await publishAdminBookDesign(targetId);
+        setBookPublished(true);
+      }
+    } catch (failure) {
+      setSaveError(failure instanceof Error ? failure.message : "Book publication could not be changed.");
+    } finally {
+      setPublishing(false);
+    }
+  }
+
   const statusIcon = saveStatus === "Saving" ? <LoaderCircle className="editor-spin" size={14} /> : saveStatus === "Offline" ? <CloudOff size={14} /> : saveStatus === "Save failed" ? <CloudOff size={14} /> : <Check size={14} />;
 
-  return <main className={`book-editor${mobilePanel ? " mobile-panel-open" : ""}${mobilePanel && panel === "properties" ? " mobile-properties-open" : ""}${preview ? " is-preview" : ""}`}>
+  return <main className={`book-editor${recoveryNotice || saveError ? " has-notices" : ""}${mobilePanel ? " mobile-panel-open" : ""}${mobilePanel && panel === "properties" ? " mobile-properties-open" : ""}${preview ? " is-preview" : ""}`}>
     <header className="editor-topbar">
-      <Link to="/dashboard/projects" className="editor-back" aria-label="Back to projects"><ArrowLeft size={17} /><span>Projects</span></Link>
-      <div className="editor-project-title"><BookOpen size={17} /><input aria-label="Project name" value={document.metadata.title} onChange={(event) => changeTitle(event.target.value)} /><ChevronDown size={13} /></div>
+      <Link to={adminMode ? "/admin/books" : "/dashboard/projects"} className="editor-back" aria-label={adminMode ? "Back to books" : "Back to projects"}><ArrowLeft size={17} /><span>{adminMode ? "Books" : "Projects"}</span></Link>
+      <div className="editor-project-title"><BookOpen size={17} /><input aria-label="Project name" value={document.metadata.title} readOnly={previewOnly} onChange={(event) => changeTitle(event.target.value)} /><ChevronDown size={13} /></div>
       <span className={`editor-save-status status-${saveStatus.toLowerCase().replaceAll(" ", "-")}`}>{statusIcon}<span>{saveStatus}</span></span>
       <div className="editor-topbar-divider" />
-      <div className="editor-history-actions"><button type="button" disabled={!undoStack.current.length} onClick={undo} aria-label="Undo"><Undo2 size={17} /></button><button type="button" disabled={!redoStack.current.length} onClick={redo} aria-label="Redo"><Redo2 size={17} /></button></div>
+      {!previewOnly ? <div className="editor-history-actions"><button type="button" disabled={!undoStack.current.length} onClick={undo} aria-label="Undo"><Undo2 size={17} /></button><button type="button" disabled={!redoStack.current.length} onClick={redo} aria-label="Redo"><Redo2 size={17} /></button></div> : null}
       <div className="editor-topbar-spacer" />
-      <button type="button" className={`editor-top-icon${guides ? " active" : ""}`} onClick={() => setGuides((value) => !value)} aria-label="Toggle safe margin guides"><span className="editor-guide-icon" /></button>
-      <button type="button" className="editor-preview-button" onClick={() => setCoverDesignerOpen(true)}><BookOpen size={15} />Cover</button>
-      <button type="button" className="editor-preview-button" onClick={() => setBookReviewOpen(true)}><Check size={15} />Final review</button>
-      <button type="button" className={`editor-preview-button${preview ? " active" : ""}`} onClick={() => { setPreview(false); setBookPreviewOpen(true); }}><Eye size={15} />Full preview</button>
+      {adminMode && !previewOnly ? <>
+        <button type="button" className="editor-preview-button" disabled={!dirtyRef.current || saveStatus === "Saving" || publishing}
+          onClick={() => { void saveNow(); }}><Save size={15} />Save Draft</button>
+        <button type="button" className="editor-preview-button" disabled={dirtyRef.current || saveStatus !== "Saved" || publishing}
+          onClick={() => { void toggleBookPublication(); }}>
+          {publishing ? <LoaderCircle size={15} className="editor-spin" /> : <Send size={15} />}
+          {bookPublished ? "Unpublish design" : "Publish design"}
+        </button>
+      </> : null}
+      {!previewOnly ? <button type="button" className={`editor-top-icon${guides ? " active" : ""}`} onClick={() => setGuides((value) => !value)} aria-label="Toggle safe margin guides"><span className="editor-guide-icon" /></button> : null}
+      {!previewOnly ? <button type="button" className="editor-preview-button" onClick={() => setCoverDesignerOpen(true)}><BookOpen size={15} />Cover</button> : null}
+      {!previewOnly ? <button type="button" className="editor-preview-button" onClick={() => setBookReviewOpen(true)}><Check size={15} />Final review</button> : null}
+      <button type="button" className={`editor-preview-button${preview ? " active" : ""}`} onClick={() => { if (!previewOnly) setPreview(false); setBookPreviewOpen(true); }}><Eye size={15} />Full preview</button>
       <button type="button" className="editor-top-icon" onClick={() => setHelpOpen(true)} aria-label="Editor help"><HelpCircle size={17} /></button>
     </header>
-    {recoveryNotice ? <div className="editor-recovery-notice" role="status"><Cloud size={15} /> An unsaved local version was recovered. It will be saved with your next changes.<button type="button" onClick={() => setRecoveryNotice(false)} aria-label="Dismiss recovery notice"><X size={14} /></button></div> : null}
-    {saveError ? <div className="editor-error-notice" role="alert"><CloudOff size={15} />{saveError}<button type="button" onClick={() => setSaveError("")} aria-label="Dismiss save message"><X size={14} /></button></div> : null}
+    {recoveryNotice || saveError ? <div className="editor-notices">
+      {recoveryNotice ? <div className="editor-recovery-notice" role="status"><Cloud size={15} /> An unsaved local version was recovered. It will be saved with your next changes.<button type="button" onClick={() => setRecoveryNotice(false)} aria-label="Dismiss recovery notice"><X size={14} /></button></div> : null}
+      {saveError ? <div className="editor-error-notice" role="alert"><CloudOff size={15} />{saveError}<button type="button" onClick={() => setSaveError("")} aria-label="Dismiss save message"><X size={14} /></button></div> : null}
+    </div> : null}
     <div className="editor-workspace">
-      <nav className="editor-toolbar" aria-label="Editor tools">{tools.map(({ id, label, Icon }) => <button type="button" key={id} className={panel === id ? "active" : ""} onClick={() => { setPanel(id); setMobilePanel(true); }} aria-label={label}><Icon size={19} /><span>{label}</span></button>)}{selectedElement ? <button type="button" className="editor-mobile-properties-button" onClick={() => { setPanel("properties"); setMobilePanel(true); }} aria-label="Selected item properties"><Paintbrush size={19} /><span>Edit</span></button> : null}</nav>
-      {!preview && panel !== "properties" ? <SidebarPanel panel={panel} document={document} page={page} inputRef={fileInputRef} onAddText={addText} onAddShape={addShape} onAddPhoto={addPhoto} onUpload={addUploadedFiles} onApplyLayout={applyLayout} onBackground={changeBackground} onReorderPage={reorderPage} onAddPage={addPage} onDuplicatePage={duplicatePage} onDeletePage={deletePage} onClose={() => setMobilePanel(false)} /> : null}
+      {!previewOnly ? <nav className="editor-toolbar" aria-label="Editor tools">{tools.map(({ id, label, Icon }) => <button type="button" key={id} className={panel === id ? "active" : ""} onClick={() => { setPanel(id); setMobilePanel(true); }} aria-label={label}><Icon size={19} /><span>{label}</span></button>)}{selectedElement ? <button type="button" className="editor-mobile-properties-button" onClick={() => { setPanel("properties"); setMobilePanel(true); }} aria-label="Selected item properties"><Paintbrush size={19} /><span>Edit</span></button> : null}</nav> : null}
+      {!preview && panel !== "properties" ? <SidebarPanel panel={panel} document={document} page={page} activePageId={activePageId} setActivePageId={setActivePageId} setSelectedId={setSelectedId} setMobilePanel={setMobilePanel} inputRef={fileInputRef} onAddText={addText} onAddShape={addShape} onAddPhoto={addPhoto} onUpload={addUploadedFiles} onApplyLayout={applyLayout} onBackground={changeBackground} onReorderPage={reorderPage} onAddPage={addPage} onDuplicatePage={duplicatePage} onDeletePage={deletePage} onClose={() => setMobilePanel(false)} /> : null}
       <section className="editor-stage">
-        <div className="editor-stage-topline"><span>{pageLabel(page, document)} <small>· {document.book.size.width} × {document.book.size.height} in</small></span><button className="editor-mobile-pages-button" type="button" onClick={() => { setPanel("pages"); setMobilePanel(true); }}>Pages</button><button className="editor-mobile-panel-close" type="button" onClick={() => setMobilePanel(false)}><X size={17} /> Close</button><span className="editor-page-counter">{document.pageOrder.indexOf(page.id) + 1} <i>of</i> {document.pageOrder.length}</span></div>
+        <div className="editor-stage-topline"><span>{getPageLabel(page, document)} <small>· {document.book.size.width} × {document.book.size.height} in</small></span><button className="editor-mobile-pages-button" type="button" onClick={() => { setPanel("pages"); setMobilePanel(true); }}>Pages</button><button className="editor-mobile-panel-close" type="button" onClick={() => setMobilePanel(false)}><X size={17} /> Close</button><span className="editor-page-counter">{getPagePosition(page, document)}</span></div>
         <div className="editor-canvas-scroll">
           <div className="editor-canvas-mat" style={{ width: `${zoom}%`, maxWidth: "760px" }}>
-            <EditorCanvas document={document} page={page} activePageId={activePageId} pageTitle={pageLabel(page, document)} onElementsChange={(elements, pageId, history) => updatePage(pageId, (target) => { target.elements = elements; }, history)} onSelectionChange={setSelectedId} onCanvasError={(failure) => setSaveError(`The page preview could not be rendered: ${failure.message}`)} canvasApi={canvasApi} renderToken={renderToken} guides={guides && !preview} zoom={100} selectedId={selectedId} preview={preview} />
+            <EditorCanvas document={document} page={page} activePageId={activePageId} pageTitle={getPageLabel(page, document)} onElementsChange={(elements, pageId, history) => updatePage(pageId, (target) => { target.elements = elements; }, history)} onSelectionChange={setSelectedId} onCanvasError={(failure) => setSaveError(`The page preview could not be rendered: ${failure.message}`)} canvasApi={canvasApi} renderToken={renderToken} guides={guides && !preview} zoom={100} selectedId={selectedId} preview={preview} />
           </div>
         </div>
         <div className="editor-zoom-controls"><button type="button" onClick={() => setZoom((value) => Math.max(35, value - 10))} aria-label="Zoom out"><Minus size={14} /></button><span>{zoom}%</span><button type="button" onClick={() => setZoom((value) => Math.min(100, value + 10))} aria-label="Zoom in"><Plus size={14} /></button><i /><button type="button" onClick={fitZoom}>Fit</button><button type="button" onClick={() => setZoom(100)}>100%</button></div>
@@ -656,20 +837,48 @@ export default function CreationEditor() {
       {!preview ? <ElementInspector element={selectedElement} pageHeight={Math.round(760 * (document.book.size.height / document.book.size.width))} onChange={updateSelected} onDelete={deleteSelected} onDuplicate={duplicateSelected} onShowPhotos={() => { setPanel("photos"); setMobilePanel(true); }} onClose={() => setMobilePanel(false)} assets={document.assets.filter((asset) => asset.src)} /> : null}
     </div>
     <footer className="editor-page-strip">
-      <div className="editor-strip-label"><span className="eyebrow">Your book</span><button type="button" onClick={addPage}><Plus size={14} /> Add page</button></div>
-      <div className="editor-thumbnails">{document.pageOrder.map((id, index) => {
-        const item = document.pages.find((candidate) => candidate.id === id);
-        if (!item) return null;
-        const image = item.elements.find((element) => element.type === "image");
-        return <button type="button" key={id} className={`editor-page-thumb${activePageId === id ? " active" : ""}`} onClick={() => { setActivePageId(id); setSelectedId(null); setMobilePanel(false); }} aria-label={`Open ${pageLabel(item, document)}`}>
-          <span className="editor-thumb-preview" style={{ backgroundColor: item.background?.color ?? "#fffdf9" }}>{image?.src ? <img src={image.src} alt="" /> : item.elements.some((element) => element.type === "text") ? <span className="editor-thumb-text">Aa</span> : <BookOpen size={18} />}</span><small>{item.type === "cover" ? "Cover" : index}</small>
-        </button>;
-      })}</div>
+      <div className="editor-strip-label"><span className="eyebrow">Your book</span><small>{document.pageOrder.filter((id) => document.pages.find((item) => item.id === id)?.type !== "cover").length} interior pages</small></div>
+      <div className="editor-timeline">
+        <div className="editor-thumbnails" role="group" aria-label="Book page thumbnails">
+          {document.pageOrder.map((id) => {
+          const item = document.pages.find((candidate) => candidate.id === id);
+          if (!item) return null;
+          return <button
+            type="button"
+            key={id}
+            ref={(element) => {
+              if (element) thumbnailRefs.current.set(id, element);
+              else thumbnailRefs.current.delete(id);
+            }}
+            className={`editor-page-thumb${activePageId === id ? " active" : ""}`}
+            onClick={() => { setActivePageId(id); setSelectedId(null); setMobilePanel(false); }}
+            aria-label={`Open ${getPageLabel(item, document)}`}
+            aria-current={activePageId === id ? "page" : undefined}
+            title={getPageLabel(item, document)}
+          >
+            <span className="editor-thumb-frame">
+              <PageArtwork
+                page={item}
+                previewWidth={thumbnailSize.width}
+                previewHeight={thumbnailSize.height}
+                className="editor-thumb-preview"
+                imageLoading="lazy"
+                style={thumbnailSize}
+                onAssetError={refreshAssetUrls}
+                emptyPlaceholder
+              />
+            </span>
+            <small>{getPageLabel(item, document)}</small>
+          </button>;
+          })}
+        </div>
+        {!previewOnly ? <button className="editor-add-page-button" type="button" onClick={addPage}><Plus size={17} /><span>Add page</span></button> : null}
+      </div>
     </footer>
-    <input ref={fileInputRef} className="editor-visually-hidden" type="file" accept="image/*" multiple onChange={(event) => addUploadedFiles(event.target.files)} />
+    <input ref={fileInputRef} className="editor-visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={(event) => addUploadedFiles(event.target.files)} />
     {helpOpen ? <div className="editor-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}><section className="editor-help-dialog" role="dialog" aria-modal="true" aria-labelledby="editor-help-title"><button className="editor-help-close" type="button" onClick={() => setHelpOpen(false)} aria-label="Close help"><X size={17} /></button><span className="eyebrow">A few helpful things</span><h2 id="editor-help-title">Made for your memories.</h2><p>Drag objects to move them, and use the corners to resize. Your work is saved automatically on this device.</p><ul><li><kbd>Delete</kbd> removes the selected item</li><li><kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>Z</kbd> undo</li><li><kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>D</kbd> duplicate</li><li><kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>S</kbd> save now</li></ul><button className="button button-dark" type="button" onClick={() => setHelpOpen(false)}>Back to my book</button></section></div> : null}
     {coverDesignerOpen ? <CoverDesigner document={document} onChange={changeCover} onClose={() => setCoverDesignerOpen(false)} /> : null}
-    {bookPreviewOpen ? <BookPreview document={document} initialPageId={activePageId} onClose={() => setBookPreviewOpen(false)} onEditPage={navigateFromPreview} onContinueReview={() => { setBookPreviewOpen(false); setBookReviewOpen(true); }} /> : null}
-    {bookReviewOpen ? <BookReview document={document} onClose={() => setBookReviewOpen(false)} onGoToPage={navigateToReviewedPage} /> : null}
+    {bookPreviewOpen ? <BookPreview document={document} initialPageId={activePageId} onClose={() => setBookPreviewOpen(false)} onEditPage={navigateFromPreview} onContinueReview={() => { setBookPreviewOpen(false); setBookReviewOpen(true); }} onAssetError={refreshAssetUrls} /> : null}
+    {bookReviewOpen ? <BookReview document={document} onClose={() => setBookReviewOpen(false)} onGoToPage={navigateToReviewedPage} adminMode={adminMode} /> : null}
   </main>;
 }

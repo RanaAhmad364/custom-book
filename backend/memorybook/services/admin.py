@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import copy
+import re
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
 from flask import request
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from werkzeug.exceptions import NotFound
 
 from memorybook.errors import ConflictError, ServiceUnavailableError, ValidationError
 from memorybook.extensions import db
 from memorybook.integrations.asset_storage import get_asset_storage
+from memorybook.integrations.image_validation import validate_and_sanitize_image
 from memorybook.integrations.email import send_email
 from memorybook.models import (
     AdminActivityLog,
@@ -48,7 +50,6 @@ from memorybook.models import (
     UserProject,
 )
 from memorybook.schemas.catalog_projects import AssetMetadataSchema, ProjectDocumentSchema
-from memorybook.services.catalog_projects import _valid_image_signature
 from memorybook.services.catalog_projects import serialize_book, serialize_category, serialize_collection, serialize_template
 from memorybook.services.notifications import queue_order_event
 
@@ -175,8 +176,8 @@ def _validated_book_design(document: object, template: BookTemplate) -> dict:
         mime_type = asset.get("mimeType")
         size = asset.get("size")
         checksum = asset.get("checksum")
-        if not isinstance(key, str) or not key.startswith("catalog/") or len(key) > 1024:
-            raise ValidationError("Design images must reference persisted catalog asset keys.", {"assets": "invalid_key"})
+        if not isinstance(key, str) or not key.startswith(("catalog/", "admin-design/")) or len(key) > 1024:
+            raise ValidationError("Design images must reference persisted image assets.", {"assets": "invalid_key"})
         AssetMetadataSchema.load(filename, mime_type, size)
         if not isinstance(checksum, str) or len(checksum) != 64 or any(character not in "0123456789abcdef" for character in checksum.lower()):
             raise ValidationError("Design image checksums are invalid.", {"assets": "invalid_checksum"})
@@ -236,12 +237,9 @@ def publish_book_design(product_id: str, expected_version: int | None = None) ->
     document = _validated_book_design(template.design_document, template)
     if not document["pages"] or not any(page.get("elements") for page in document["pages"]):
         raise ValidationError("Add at least one designed page element before publishing.", {"design": "incomplete"})
-    if not book.title.strip() or not book.description.strip() or not book.category_id:
-        raise ValidationError("Complete the book product details before publishing.", {"product": "incomplete"})
     template.published_design_document = copy.deepcopy(document)
     template.published_version = template.version
     template.is_active = True
-    book.is_active = True
     _commit("book.design_published", "book_product", book.id, {
         "templateId": template.id,
         "templateVersion": template.published_version,
@@ -256,10 +254,14 @@ def unpublish_book_design(product_id: str) -> dict:
     book = db.session.get(BookProduct, product_id)
     if book is None or book.deleted_at is not None:
         raise NotFound("Book product was not found.")
+    if book.is_active:
+        raise ConflictError(
+            "Unpublish the product before unpublishing its master design.",
+            {"product": "published"},
+        )
     templates = db.session.scalars(
         select(BookTemplate).where(BookTemplate.product_id == book.id, BookTemplate.deleted_at.is_(None))
     ).all()
-    book.is_active = False
     for template in templates:
         template.is_active = False
     _commit("book.design_unpublished", "book_product", book.id)
@@ -349,37 +351,45 @@ def _page_params(args) -> tuple[int, int]:
         raise ValidationError("Pagination values must be integers.", {"pagination": "invalid"}) from failure
 
 
-def upload_catalog_asset(file, owner: User) -> dict:
+def _upload_admin_image(file, owner: User, namespace: str) -> dict:
     file.stream.seek(0, 2)
     byte_size = file.stream.tell()
     file.stream.seek(0)
     metadata = AssetMetadataSchema.load(file.filename, file.mimetype, byte_size)
-    signature = file.stream.read(16)
-    file.stream.seek(0)
-    if not _valid_image_signature(metadata["mime_type"], signature):
-        raise ValidationError("The image contents do not match the selected file type.", {"file": "invalid_content"})
-    digest = hashlib.sha256()
-    for block in iter(lambda: file.stream.read(1024 * 1024), b""):
-        digest.update(block)
-    file.stream.seek(0)
-    key = f"catalog/{owner.id}/{uuid4().hex}"
+    image, width, height = validate_and_sanitize_image(file.stream, metadata["mime_type"])
+    metadata["byte_size"] = image.getbuffer().nbytes
+    digest = hashlib.sha256(image.getbuffer()).hexdigest()
+    key = f"{namespace}/{owner.id}/{uuid4().hex}"
     storage = get_asset_storage()
-    storage.upload(key, file.stream, metadata["mime_type"])
-    _commit("catalog_asset.uploaded", "catalog_asset", owner.id, {
+    storage.upload(key, image, metadata["mime_type"])
+    event = "catalog_asset.uploaded" if namespace == "catalog" else "admin_design_asset.uploaded"
+    _commit(event, "catalog_asset" if namespace == "catalog" else "admin_design_asset", owner.id, {
         "assetKey": key,
         "filename": metadata["filename"],
         "mimeType": metadata["mime_type"],
         "size": metadata["byte_size"],
-        "checksum": digest.hexdigest(),
+        "checksum": digest,
+        "width": width,
+        "height": height,
     })
     return {
         "assetKey": key,
-        "url": storage.download_url(key),
+        "url": storage.public_download_url(key) if namespace == "catalog" else storage.private_download_url(key),
         "filename": metadata["filename"],
         "mimeType": metadata["mime_type"],
         "size": metadata["byte_size"],
-        "checksum": digest.hexdigest(),
+        "checksum": digest,
+        "width": width,
+        "height": height,
     }
+
+
+def upload_catalog_asset(file, owner: User) -> dict:
+    return _upload_admin_image(file, owner, "catalog")
+
+
+def upload_admin_design_asset(file, owner: User) -> dict:
+    return _upload_admin_image(file, owner, "admin-design")
 
 
 def _template_document(template: BookTemplate) -> dict:
@@ -576,15 +586,29 @@ def _collection_by_id(collection_id: str | None):
 
 
 def _product_dict(book: BookProduct) -> dict:
+    master_design = db.session.scalar(
+        select(BookTemplate)
+        .where(BookTemplate.product_id == book.id, BookTemplate.deleted_at.is_(None))
+        .order_by(BookTemplate.updated_at.desc())
+        .limit(1)
+    )
     return {
         **serialize_book(book),
         "isPublished": book.is_active,
         "coverAssetKey": book.cover_asset_key,
         "adminMetadata": book.admin_metadata or {},
+        "masterDesignStatus": (
+            "published"
+            if master_design and master_design.is_active and master_design.published_design_document
+            else "draft" if master_design and master_design.design_document
+            else "not_started"
+        ),
+        "masterDesignVersion": master_design.version if master_design else None,
+        "publishedDesignVersion": master_design.published_version if master_design else None,
     }
 
 
-def _validate_product_metadata(value: dict) -> dict:
+def _validate_product_metadata(value: dict, previous: dict | None = None) -> dict:
     metadata = dict(value)
     for field, model in (
         ("sizeOptions", BookSize),
@@ -605,8 +629,19 @@ def _validate_product_metadata(value: dict) -> dict:
         metadata["pageCountOptions"] = [_positive_int(item, "pageCountOptions") for item in page_counts]
     if "printingTiers" in metadata:
         tiers = metadata["printingTiers"]
-        if not isinstance(tiers, list) or any(item not in {"LIGHT", "BASIC", "PREMIUM"} for item in tiers):
+        if not isinstance(tiers, list) or len(tiers) > 20 or any(not isinstance(item, str) or not item.strip() for item in tiers):
             raise ValidationError("printingTiers contains an unsupported tier.", {"printingTiers": "invalid"})
+        if len(set(tiers)) != len(tiers):
+            raise ValidationError("printingTiers cannot contain duplicates.", {"printingTiers": "duplicate"})
+        unavailable = set(tiers) - set((previous or {}).get("printingTiers", []))
+        found = set(db.session.scalars(
+            select(PricingTier.code).where(
+                PricingTier.code.in_(unavailable),
+                PricingTier.is_active.is_(True),
+            )
+        ).all()) if unavailable else set()
+        if found != unavailable:
+            raise ValidationError("printingTiers contains an inactive or unavailable tier.", {"printingTiers": "unavailable"})
     if "previewImageKeys" in metadata:
         image_keys = metadata["previewImageKeys"]
         if not isinstance(image_keys, list) or len(image_keys) > 12 or any(
@@ -633,6 +668,8 @@ def list_products(args) -> dict:
     query = select(BookProduct).where(BookProduct.deleted_at.is_(None)).order_by(BookProduct.updated_at.desc())
     if args.get("published") in {"true", "false"}:
         query = query.where(BookProduct.is_active.is_(args.get("published") == "true"))
+    if args.get("categoryId"):
+        query = query.where(BookProduct.category_id == args["categoryId"])
     search = args.get("search", "").strip()[:120]
     if search:
         query = query.where(BookProduct.title.ilike(f"%{search}%"))
@@ -648,7 +685,22 @@ def save_product(data: dict, product_id: str | None = None) -> dict:
     category = _category_by_id(data.get("categoryId", item.category_id))
     if category is None:
         raise ValidationError("categoryId is required.", {"categoryId": "required"})
+    if not category.is_active and category.id != item.category_id:
+        raise ValidationError("Choose an active category for a book product.", {"categoryId": "inactive"})
     collection = _collection_by_id(data.get("collectionId", item.collection_id))
+    if collection is not None:
+        if collection.category_id is None:
+            raise ValidationError(
+                "The selected collection has no resolved category. Assign a category to it before using it for a book.",
+                {"collectionId": "unresolved_category"},
+            )
+        if collection.category_id != category.id:
+            raise ValidationError(
+                "The selected collection does not belong to the chosen category.",
+                {"collectionId": "category_mismatch"},
+            )
+        if not collection.is_active and collection.id != item.collection_id:
+            raise ValidationError("Choose an active collection.", {"collectionId": "inactive"})
     if "title" in data:
         item.title = _text(data, "title", required=True, maximum=200)
     elif not product_id:
@@ -669,6 +721,15 @@ def save_product(data: dict, product_id: str | None = None) -> dict:
             value = _text(data, source, required=source == "description", maximum=maximum)
             if source == "currency" and value and (len(value) != 3 or not value.isalpha()):
                 raise ValidationError("currency must be a three-letter code.", {"currency": "invalid"})
+            if source == "currency" and value and product_id and value.upper() != item.currency.upper():
+                variants = db.session.scalars(
+                    select(BookVariant).where(BookVariant.product_id == item.id)
+                ).all()
+                if any(variant.currency.upper() != value.upper() for variant in variants):
+                    raise ConflictError(
+                        "The product currency cannot change while its variants use a different currency.",
+                        {"currency": "variant_mismatch"},
+                    )
             setattr(item, target, value.upper() if source == "currency" and value else value)
     for source, target in (("pageCountMin", "page_count_min"), ("pageCountMax", "page_count_max")):
         if source in data:
@@ -682,7 +743,18 @@ def save_product(data: dict, product_id: str | None = None) -> dict:
             raise ValidationError("featured must be a boolean.", {"featured": "invalid"})
         item.is_featured = data["featured"]
     if "adminMetadata" in data:
-        item.admin_metadata = _validate_product_metadata(_body_dict(data["adminMetadata"], "adminMetadata"))
+        previous_metadata = item.admin_metadata or {}
+        submitted_metadata = _body_dict(data["adminMetadata"], "adminMetadata")
+        metadata = {**previous_metadata, **submitted_metadata}
+        if "dimensions" in submitted_metadata and isinstance(submitted_metadata["dimensions"], dict):
+            metadata["dimensions"] = {
+                **previous_metadata.get("dimensions", {}),
+                **submitted_metadata["dimensions"],
+            }
+        item.admin_metadata = _validate_product_metadata(
+            metadata,
+            previous_metadata,
+        )
     if not product_id:
         item.is_active = False
     db.session.add(item)
@@ -696,12 +768,91 @@ def set_product_published(product_id: str, published: bool) -> dict:
     if item is None or item.deleted_at is not None:
         raise NotFound("Book product was not found.")
     if published:
-        return publish_book_design(product_id)["product"]
-    templates = db.session.scalars(
-        select(BookTemplate).where(BookTemplate.product_id == item.id, BookTemplate.deleted_at.is_(None))
-    ).all()
-    for template in templates:
-        template.is_active = False
+        master_design = db.session.scalar(
+            select(BookTemplate).where(
+                BookTemplate.product_id == item.id,
+                BookTemplate.is_active.is_(True),
+                BookTemplate.deleted_at.is_(None),
+                BookTemplate.published_design_document.is_not(None),
+            )
+        )
+        if master_design is None:
+            raise ValidationError("Publish the master design before publishing the product.", {"design": "required"})
+        category = _category_by_id(item.category_id)
+        if not item.title.strip():
+            raise ValidationError("A product title is required before publishing.", {"title": "required"})
+        if not item.slug.strip():
+            raise ValidationError("A product slug is required before publishing.", {"slug": "required"})
+        if not item.description.strip():
+            raise ValidationError("A product description is required before publishing.", {"description": "required"})
+        if not category.is_active:
+            raise ValidationError("Activate the product category before publishing.", {"categoryId": "inactive"})
+        if item.collection_id:
+            collection = _collection_by_id(item.collection_id)
+            if not collection.is_active or collection.category_id != category.id:
+                raise ValidationError("The product collection must be active and assigned to its category.", {"collectionId": "invalid"})
+        if not item.cover_asset_key or not item.cover_asset_key.startswith("catalog/"):
+            raise ValidationError("Add a catalog cover image before publishing.", {"coverAssetKey": "required"})
+        if not item.page_count_min or not item.page_count_max or item.page_count_min > item.page_count_max:
+            raise ValidationError("Set a valid minimum and maximum page count before publishing.", {"pageCount": "invalid_range"})
+        metadata = item.admin_metadata or {}
+        page_count_options = metadata.get("pageCountOptions")
+        if not page_count_options or any(
+            not isinstance(page_count, int) or isinstance(page_count, bool)
+            or page_count < item.page_count_min or page_count > item.page_count_max
+            for page_count in page_count_options
+        ):
+            raise ValidationError("Configure page-count options within the product page range.", {"pageCountOptions": "invalid"})
+        if not metadata.get("productionDays"):
+            raise ValidationError("Set a production estimate before publishing.", {"productionDays": "required"})
+        if not metadata.get("sizeOptions") or not metadata.get("coverOptions") or not metadata.get("paperOptions"):
+            raise ValidationError("Configure size, cover, and paper options before publishing.", {"variants": "required"})
+        variants = db.session.scalars(
+            select(BookVariant)
+            .join(BookSize, BookVariant.size_id == BookSize.id)
+            .join(CoverType, BookVariant.cover_type_id == CoverType.id)
+            .join(PaperType, BookVariant.paper_type_id == PaperType.id)
+            .where(
+                BookVariant.product_id == item.id,
+                BookVariant.is_active.is_(True),
+                BookSize.is_active.is_(True),
+                CoverType.is_active.is_(True),
+                PaperType.is_active.is_(True),
+                BookVariant.size_id.in_(metadata["sizeOptions"]),
+                BookVariant.cover_type_id.in_(metadata["coverOptions"]),
+                BookVariant.paper_type_id.in_(metadata["paperOptions"]),
+                BookVariant.currency == item.currency,
+            )
+        ).all()
+        if not variants:
+            raise ValidationError("Add at least one active, compatible product variant using the product currency.", {"variants": "required"})
+        tiers = metadata.get("printingTiers", [])
+        active_tiers = db.session.scalars(
+            select(PricingTier).where(
+                PricingTier.is_active.is_(True),
+                PricingTier.code.in_(tiers),
+                PricingTier.currency == item.currency,
+            )
+        ).all() if tiers else []
+        covered_tiers = db.session.scalars(
+            select(PricingTier.id)
+            .join(PagePricing, PagePricing.tier_id == PricingTier.id)
+            .where(
+                PricingTier.id.in_([tier.id for tier in active_tiers]),
+                PagePricing.minimum_pages <= item.page_count_min,
+                PagePricing.maximum_pages >= item.page_count_max,
+            )
+            .distinct()
+        ).all() if active_tiers else []
+        if not covered_tiers:
+            raise ValidationError("Configure active printing tiers and page pricing that cover the product page range.", {"printingTiers": "unavailable"})
+        if not db.session.scalar(
+            select(ShippingRate.id).where(
+                ShippingRate.is_active.is_(True),
+                ShippingRate.currency == item.currency,
+            ).limit(1)
+        ):
+            raise ValidationError("Configure at least one active shipping rate in the product currency.", {"shipping": "required"})
     item.is_active = published
     _commit("book.published" if published else "book.unpublished", "book_product", item.id)
     return _product_dict(item)
@@ -720,8 +871,49 @@ def _save_simple_catalog(model, data: dict, object_id: str | None, kind: str) ->
     item = db.session.get(model, object_id) if object_id else model()
     if object_id and (item is None or item.deleted_at is not None):
         raise NotFound(f"{kind.title()} was not found.")
-    name = _text(data, "name", required=not object_id, maximum=160)
-    slug = _text(data, "slug", required=not object_id, maximum=180)
+    if kind == "collection":
+        if not object_id and not data.get("categoryId"):
+            raise ValidationError("categoryId is required for a new collection.", {"categoryId": "required"})
+        if "categoryId" in data:
+            category_id = _text(data, "categoryId", required=not object_id, maximum=36)
+            current_category_id = item.category_id if object_id else None
+            if category_id:
+                if category_id != current_category_id:
+                    category = _category_by_id(category_id)
+                    if not category.is_active:
+                        raise ValidationError(
+                            "Choose an active category for a collection.",
+                            {"categoryId": "inactive"},
+                        )
+                    mismatched_products = 0
+                    if object_id:
+                        mismatched_products = db.session.scalar(
+                            select(func.count(BookProduct.id)).where(
+                                BookProduct.collection_id == item.id,
+                                BookProduct.category_id != category_id,
+                            )
+                        ) or 0
+                    if mismatched_products:
+                        raise ConflictError(
+                            "This collection category cannot change while books assigned to it use another category.",
+                            {"books": mismatched_products},
+                        )
+                item.category_id = category_id
+            elif current_category_id:
+                raise ValidationError("A collection category cannot be cleared.", {"categoryId": "required"})
+    name_limit = 120 if kind == "category" else 160
+    slug_limit = 140 if kind == "category" else 180
+    name = _text(data, "name", required=not object_id or (kind == "category" and "name" in data), maximum=name_limit)
+    slug = _text(data, "slug", required=not object_id or (kind == "category" and "slug" in data), maximum=slug_limit)
+    previous_slug = item.slug if kind == "category" and object_id else None
+    if kind == "category" and slug is not None:
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
+            raise ValidationError("Category slug must use lowercase letters, numbers, and single hyphens.", {"slug": "invalid"})
+        duplicate_query = select(BookCategory.id).where(BookCategory.slug == slug)
+        if object_id:
+            duplicate_query = duplicate_query.where(BookCategory.id != item.id)
+        if db.session.scalar(duplicate_query) is not None:
+            raise ConflictError("A category with this slug already exists.", {"slug": "duplicate"})
     if name is not None:
         item.name = name
     if slug is not None:
@@ -731,12 +923,24 @@ def _save_simple_catalog(model, data: dict, object_id: str | None, kind: str) ->
         ("eyebrow", "eyebrow", 120),
     ):
         if field in data and hasattr(item, attr):
-            setattr(item, attr, _text(data, field, maximum=max_length))
+            value = _text(data, field, maximum=max_length)
+            if kind == "category" and field == "heroAssetKey" and value and not (
+                value.startswith("catalog/") or value.startswith(("https://", "http://"))
+            ):
+                raise ValidationError("Category images must use a catalog asset key or an external HTTP URL.", {"heroAssetKey": "invalid"})
+            setattr(item, attr, value)
     if "sortOrder" in data and hasattr(item, "sort_order"):
         try:
-            item.sort_order = int(data["sortOrder"])
+            sort_order = int(data["sortOrder"])
         except (ValueError, TypeError) as failure:
             raise ValidationError("sortOrder must be an integer.", {"sortOrder": "invalid"}) from failure
+        if (
+            isinstance(data["sortOrder"], bool)
+            or isinstance(data["sortOrder"], float) and not data["sortOrder"].is_integer()
+            or sort_order < 0
+        ):
+            raise ValidationError("sortOrder must be a non-negative integer.", {"sortOrder": "invalid"})
+        item.sort_order = sort_order
     if "recommendedLayouts" in data and hasattr(item, "recommended_layouts"):
         if not isinstance(data["recommendedLayouts"], list):
             raise ValidationError("recommendedLayouts must be a list.", {"recommendedLayouts": "invalid"})
@@ -748,7 +952,30 @@ def _save_simple_catalog(model, data: dict, object_id: str | None, kind: str) ->
     if "isPublished" in data and hasattr(item, "is_active"):
         if not isinstance(data["isPublished"], bool):
             raise ValidationError("isPublished must be a boolean.", {"isPublished": "invalid"})
+        if kind == "category" and not data["isPublished"]:
+            published_count = db.session.scalar(
+                select(func.count(BookProduct.id)).where(
+                    BookProduct.category_id == item.id,
+                    BookProduct.is_active.is_(True),
+                    BookProduct.deleted_at.is_(None),
+                )
+            ) or 0
+            if published_count:
+                raise ConflictError(
+                    f"This category cannot be deactivated because {published_count} published book"
+                    f"{'s' if published_count != 1 else ''} use it.",
+                    {"publishedBooks": published_count},
+                )
         item.is_active = data["isPublished"]
+    if kind == "category" and previous_slug and slug and previous_slug != slug:
+        collections = db.session.scalars(select(BookCollection)).all()
+        for collection in collections:
+            related = collection.related_categories
+            if isinstance(related, list) and previous_slug in related:
+                collection.related_categories = [
+                    slug if category_slug == previous_slug else category_slug
+                    for category_slug in related
+                ]
     db.session.add(item)
     db.session.flush()
     _commit(f"{kind}.saved", kind, item.id)
@@ -771,6 +998,52 @@ def list_simple_catalog(model, kind: str, args) -> dict:
         query = query.where(model.is_active.is_(args.get("published") == "true"))
     result = _paginate(query, page, per_page)
     result["items"] = [_simple_dict(item, kind) for item in result["items"]]
+    if kind == "category" and result["items"]:
+        visible_ids = {item["id"] for item in result["items"]}
+        product_rows = db.session.execute(
+            select(
+                BookProduct.category_id,
+                func.count(BookProduct.id),
+                func.sum(case((
+                    BookProduct.is_active.is_(True) & BookProduct.deleted_at.is_(None),
+                    1,
+                ), else_=0)),
+                func.sum(case((BookProduct.deleted_at.is_(None), 1), else_=0)),
+            )
+            .where(BookProduct.category_id.in_(visible_ids))
+            .group_by(BookProduct.category_id)
+        ).all()
+        product_counts = {
+            category_id: (int(total), int(published or 0), int(visible or 0))
+            for category_id, total, published, visible in product_rows
+        }
+        category_keys = {
+            key: item["id"]
+            for item in result["items"]
+            for key in (item["id"], item["slug"])
+        }
+        collection_counts = {category_id: 0 for category_id in visible_ids}
+        collection_rows = db.session.execute(
+            select(BookCollection.id, BookCollection.category_id, BookCollection.related_categories)
+        ).all()
+        for _, relational_category_id, related_categories in collection_rows:
+            referenced_category_ids = {relational_category_id} if relational_category_id in visible_ids else set()
+            if not isinstance(related_categories, list):
+                related_categories = []
+            for related_category in {key for key in related_categories if isinstance(key, str)}:
+                category_id = category_keys.get(related_category)
+                if category_id is not None:
+                    referenced_category_ids.add(category_id)
+            for category_id in referenced_category_ids:
+                collection_counts[category_id] += 1
+        for item in result["items"]:
+            total, published, visible = product_counts.get(item["id"], (0, 0, 0))
+            item.update({
+                "bookCount": total,
+                "publishedBookCount": published,
+                "draftBookCount": visible - published,
+                "collectionCount": collection_counts[item["id"]],
+            })
     return result
 
 
@@ -782,6 +1055,27 @@ def delete_simple_catalog(model, kind: str, object_id: str) -> None:
     item = db.session.get(model, object_id)
     if item is None or item.deleted_at is not None:
         raise NotFound(f"{kind.title()} was not found.")
+    if kind == "category":
+        product_count = db.session.scalar(
+            select(func.count(BookProduct.id)).where(BookProduct.category_id == item.id)
+        ) or 0
+        collection_ids = set(db.session.scalars(
+            select(BookCollection.id).where(BookCollection.category_id == item.id)
+        ).all())
+        for collection_id, related_categories in db.session.execute(
+            select(BookCollection.id, BookCollection.related_categories)
+        ).all():
+            if isinstance(related_categories, list) and any(
+                isinstance(category_key, str) and category_key in {item.slug, item.id}
+                for category_key in related_categories
+            ):
+                collection_ids.add(collection_id)
+        collection_count = len(collection_ids)
+        if product_count or collection_count:
+            raise ConflictError(
+                "This category cannot be deleted while products or collections reference it.",
+                {"books": product_count, "collections": collection_count},
+            )
     item.deleted_at = datetime.now(UTC)
     item.is_active = False
     _commit(f"{kind}.deleted", kind, item.id)
@@ -1104,15 +1398,176 @@ def list_pricing() -> dict:
     ).all()
     return {
         "tiers": [{"id": x.id, "code": x.code, "name": x.name, "description": x.description, "basePrice": str(x.base_price), "currency": x.currency, "active": x.is_active} for x in tiers],
-        "pagePricing": [{"id": x.id, "tierId": x.tier_id, "minimumPages": x.minimum_pages, "maximumPages": x.maximum_pages, "pricePerPage": str(x.price_per_page)} for x in page_pricing],
+        "pagePricing": [{
+            "id": x.id,
+            "tierId": x.tier_id,
+            "tierCode": db.session.get(PricingTier, x.tier_id).code,
+            "minimumPages": x.minimum_pages,
+            "maximumPages": x.maximum_pages,
+            "pricePerPage": str(x.price_per_page),
+        } for x in page_pricing],
         "rules": [{"id": x.id, "code": x.code, "name": x.name, "type": x.adjustment_type, "amount": str(x.amount), "active": x.is_active} for x in rules],
-        "shipping": [{"id": x.id, "countryCode": x.country_code, "regionCode": x.region_code, "serviceCode": x.service_code, "serviceName": x.service_name, "price": str(x.price), "currency": x.currency, "active": x.is_active} for x in shipping],
+        "shipping": [{
+            "id": x.id,
+            "countryCode": x.country_code,
+            "regionCode": x.region_code,
+            "serviceCode": x.service_code,
+            "serviceName": x.service_name,
+            "price": str(x.price),
+            "currency": x.currency,
+            "estimatedDaysMin": x.estimated_days_min,
+            "estimatedDaysMax": x.estimated_days_max,
+            "active": x.is_active,
+        } for x in shipping],
         "sizes": [{"id": x.id, "code": x.code, "name": x.name, "widthMm": str(x.width_mm), "heightMm": str(x.height_mm), "active": x.is_active} for x in sizes],
         "covers": [{"id": x.id, "name": x.name, "description": x.description, "active": x.is_active} for x in covers],
         "papers": [{"id": x.id, "name": x.name, "description": x.description, "weightGsm": x.weight_gsm, "active": x.is_active} for x in papers],
         "discounts": [{"id": x.id, "code": x.code, "type": x.discount_type, "value": str(x.value), "currency": x.currency, "active": x.is_active, "maximumUses": x.maximum_uses, "usesCount": x.uses_count} for x in discounts],
-        "variants": [{"id": row[0].id, "productId": row[0].product_id, "book": row[1], "size": row[2], "cover": row[3], "paper": row[4], "basePrice": str(row[0].base_price), "active": row[0].is_active, "kind": "variant"} for row in variants],
+        "variants": [{
+            "id": row[0].id,
+            "productId": row[0].product_id,
+            "sku": row[0].sku,
+            "sizeId": row[0].size_id,
+            "coverTypeId": row[0].cover_type_id,
+            "paperTypeId": row[0].paper_type_id,
+            "book": row[1],
+            "size": row[2],
+            "cover": row[3],
+            "paper": row[4],
+            "basePrice": str(row[0].base_price),
+            "currency": row[0].currency,
+            "active": row[0].is_active,
+            "kind": "variant",
+        } for row in variants],
     }
+
+
+def _pricing_currency(value, field: str = "currency") -> str:
+    currency = _text({"value": value}, "value", required=True, maximum=3).upper()
+    if not re.fullmatch(r"[A-Z]{3}", currency):
+        raise ValidationError(f"{field} must be a three-letter currency code.", {field: "invalid"})
+    return currency
+
+
+def _validate_page_pricing_range(tier_id: str, minimum: int, maximum: int, *, item_id: str | None = None) -> None:
+    query = select(PagePricing.id).where(
+        PagePricing.tier_id == tier_id,
+        PagePricing.minimum_pages <= maximum,
+        PagePricing.maximum_pages >= minimum,
+    )
+    if item_id:
+        query = query.where(PagePricing.id != item_id)
+    if db.session.scalar(query) is not None:
+        raise ConflictError(
+            "Page pricing ranges for the same tier cannot overlap.",
+            {"tierId": "overlapping_range"},
+        )
+
+
+def create_pricing(kind: str, data: dict) -> dict:
+    if not isinstance(data, dict):
+        raise ValidationError("Pricing data must be an object.")
+    active = data.get("active", True)
+    if not isinstance(active, bool):
+        raise ValidationError("active must be a boolean.", {"active": "invalid"})
+    if kind == "tier":
+        code = _text(data, "code", required=True, maximum=40).upper()
+        if not re.fullmatch(r"[A-Z0-9_-]+", code):
+            raise ValidationError("Tier code may contain uppercase letters, numbers, underscores, and hyphens.", {"code": "invalid"})
+        if db.session.scalar(select(PricingTier.id).where(PricingTier.code == code)):
+            raise ConflictError("A pricing tier with this code already exists.", {"code": "duplicate"})
+        item = PricingTier(
+            code=code,
+            name=_text(data, "name", required=True, maximum=100),
+            description=_text(data, "description", maximum=5000),
+            base_price=_money(data.get("basePrice"), "basePrice"),
+            currency=_pricing_currency(data.get("currency", "USD")),
+            is_active=active,
+        )
+    elif kind == "pagePricing":
+        tier_id = _text(data, "tierId", required=True, maximum=36)
+        tier = db.session.get(PricingTier, tier_id)
+        if tier is None or not tier.is_active:
+            raise ValidationError("Choose an active pricing tier.", {"tierId": "not_found"})
+        minimum = _positive_int(data.get("minimumPages"), "minimumPages")
+        maximum = _positive_int(data.get("maximumPages"), "maximumPages")
+        if maximum < minimum:
+            raise ValidationError("Maximum pages must be greater than or equal to minimum pages.", {"pages": "invalid_range"})
+        _validate_page_pricing_range(tier.id, minimum, maximum)
+        item = PagePricing(
+            tier_id=tier.id,
+            minimum_pages=minimum,
+            maximum_pages=maximum,
+            price_per_page=_money(data.get("pricePerPage"), "pricePerPage"),
+        )
+    elif kind == "shipping":
+        country = _text(data, "countryCode", required=True, maximum=2).upper()
+        if not re.fullmatch(r"[A-Z]{2}", country):
+            raise ValidationError("Country code must contain two letters.", {"countryCode": "invalid"})
+        region = _text(data, "regionCode", maximum=20)
+        service_code = _text(data, "serviceCode", required=True, maximum=40)
+        if db.session.scalar(select(ShippingRate.id).where(
+            ShippingRate.country_code == country,
+            ShippingRate.region_code == region if region is not None else ShippingRate.region_code.is_(None),
+            ShippingRate.service_code == service_code,
+        )):
+            raise ConflictError("A shipping service already exists for this destination.", {"serviceCode": "duplicate"})
+        minimum_days = _positive_int(data.get("estimatedDaysMin"), "estimatedDaysMin", optional=True)
+        maximum_days = _positive_int(data.get("estimatedDaysMax"), "estimatedDaysMax", optional=True)
+        if minimum_days and maximum_days and maximum_days < minimum_days:
+            raise ValidationError("Maximum delivery days must be at least the minimum.", {"estimatedDaysMax": "invalid_range"})
+        item = ShippingRate(
+            country_code=country,
+            region_code=region,
+            service_code=service_code,
+            service_name=_text(data, "serviceName", required=True, maximum=100),
+            price=_money(data.get("price"), "price"),
+            currency=_pricing_currency(data.get("currency", "USD")),
+            estimated_days_min=minimum_days,
+            estimated_days_max=maximum_days,
+            is_active=active,
+        )
+    elif kind == "size":
+        code = _text(data, "code", required=True, maximum=40)
+        if db.session.scalar(select(BookSize.id).where(BookSize.code == code)):
+            raise ConflictError("A book size with this code already exists.", {"code": "duplicate"})
+        width = _money(data.get("widthMm"), "widthMm")
+        height = _money(data.get("heightMm"), "heightMm")
+        if width <= 0 or height <= 0:
+            raise ValidationError("Book dimensions must be greater than zero.", {"dimensions": "invalid"})
+        item = BookSize(
+            code=code,
+            name=_text(data, "name", required=True, maximum=100),
+            width_mm=width,
+            height_mm=height,
+            is_active=active,
+        )
+    elif kind == "cover":
+        name = _text(data, "name", required=True, maximum=100)
+        if db.session.scalar(select(CoverType.id).where(CoverType.name == name)):
+            raise ConflictError("A cover type with this name already exists.", {"name": "duplicate"})
+        item = CoverType(
+            name=name,
+            description=_text(data, "description", maximum=500),
+            is_active=active,
+        )
+    elif kind == "paper":
+        name = _text(data, "name", required=True, maximum=100)
+        if db.session.scalar(select(PaperType.id).where(PaperType.name == name)):
+            raise ConflictError("A paper type with this name already exists.", {"name": "duplicate"})
+        item = PaperType(
+            name=name,
+            description=_text(data, "description", maximum=500),
+            weight_gsm=_positive_int(data.get("weightGsm"), "weightGsm", optional=True),
+            is_active=active,
+        )
+    else:
+        raise ValidationError("Pricing resource type is not supported.", {"type": "invalid"})
+
+    db.session.add(item)
+    db.session.flush()
+    _commit("pricing.created", kind, item.id)
+    return {"id": item.id, "kind": kind, "active": getattr(item, "is_active", True)}
 
 
 def update_pricing(kind: str, item_id: str, data: dict) -> dict:
@@ -1134,16 +1589,67 @@ def update_pricing(kind: str, item_id: str, data: dict) -> dict:
     if item is None:
         raise NotFound("Pricing record was not found.")
     if kind == "tier":
+        if "code" in data:
+            code = _text(data, "code", required=True, maximum=40).upper()
+            if not re.fullmatch(r"[A-Z0-9_-]+", code):
+                raise ValidationError("Tier code may contain uppercase letters, numbers, underscores, and hyphens.", {"code": "invalid"})
+            if db.session.scalar(select(PricingTier.id).where(PricingTier.code == code, PricingTier.id != item.id)):
+                raise ConflictError("A pricing tier with this code already exists.", {"code": "duplicate"})
+            item.code = code
         if "basePrice" in data:
             item.base_price = _money(data["basePrice"], "basePrice")
         if "name" in data:
             item.name = _text(data, "name", required=True, maximum=100)
+        if "description" in data:
+            item.description = _text(data, "description", maximum=5000)
+        if "currency" in data:
+            item.currency = _pricing_currency(data["currency"])
     elif kind == "shipping":
         if "price" in data:
             item.price = _money(data["price"], "price")
         if "serviceName" in data:
             item.service_name = _text(data, "serviceName", required=True, maximum=100)
+        if "countryCode" in data:
+            country = _text(data, "countryCode", required=True, maximum=2).upper()
+            if not re.fullmatch(r"[A-Z]{2}", country):
+                raise ValidationError("Country code must contain two letters.", {"countryCode": "invalid"})
+            item.country_code = country
+        if "regionCode" in data:
+            item.region_code = _text(data, "regionCode", maximum=20)
+        if "serviceCode" in data:
+            item.service_code = _text(data, "serviceCode", required=True, maximum=40)
+        if "currency" in data:
+            item.currency = _pricing_currency(data["currency"])
+        if "estimatedDaysMin" in data:
+            item.estimated_days_min = _positive_int(data["estimatedDaysMin"], "estimatedDaysMin", optional=True)
+        if "estimatedDaysMax" in data:
+            item.estimated_days_max = _positive_int(data["estimatedDaysMax"], "estimatedDaysMax", optional=True)
+        if item.estimated_days_min and item.estimated_days_max and item.estimated_days_max < item.estimated_days_min:
+            raise ValidationError("Maximum delivery days must be at least the minimum.", {"estimatedDaysMax": "invalid_range"})
+        region_condition = (
+            ShippingRate.region_code == item.region_code
+            if item.region_code is not None
+            else ShippingRate.region_code.is_(None)
+        )
+        duplicate_query = select(ShippingRate.id).where(
+            ShippingRate.country_code == item.country_code,
+            region_condition,
+            ShippingRate.service_code == item.service_code,
+            ShippingRate.id != item.id,
+        )
+        if db.session.scalar(duplicate_query) is not None:
+            raise ConflictError(
+                "A shipping service already exists for this destination.",
+                {"serviceCode": "duplicate"},
+            )
     elif kind == "size":
+        if "code" in data:
+            code = _text(data, "code", required=True, maximum=40)
+            if db.session.scalar(select(BookSize.id).where(BookSize.code == code, BookSize.id != item.id)):
+                raise ConflictError("A book size with this code already exists.", {"code": "duplicate"})
+            item.code = code
+        if "name" in data:
+            item.name = _text(data, "name", required=True, maximum=100)
         for field, attr in (("widthMm", "width_mm"), ("heightMm", "height_mm")):
             if field in data:
                 value = _money(data[field], field)
@@ -1151,6 +1657,12 @@ def update_pricing(kind: str, item_id: str, data: dict) -> dict:
                     raise ValidationError(f"{field} must be greater than zero.", {field: "invalid"})
                 setattr(item, attr, value)
     elif kind == "pagePricing":
+        if "tierId" in data:
+            tier_id = _text(data, "tierId", required=True, maximum=36)
+            tier = db.session.get(PricingTier, tier_id)
+            if tier is None or not tier.is_active:
+                raise ValidationError("Choose an active pricing tier.", {"tierId": "not_found"})
+            item.tier_id = tier.id
         for field, attr in (("minimumPages", "minimum_pages"), ("maximumPages", "maximum_pages")):
             if field in data:
                 setattr(item, attr, _positive_int(data[field], field))
@@ -1158,6 +1670,12 @@ def update_pricing(kind: str, item_id: str, data: dict) -> dict:
             item.price_per_page = _money(data["pricePerPage"], "pricePerPage")
         if item.maximum_pages < item.minimum_pages:
             raise ValidationError("Maximum pages must be greater than or equal to minimum pages.", {"pages": "invalid_range"})
+        _validate_page_pricing_range(
+            item.tier_id,
+            item.minimum_pages,
+            item.maximum_pages,
+            item_id=item.id,
+        )
     elif kind == "rule":
         if "name" in data:
             item.name = _text(data, "name", required=True, maximum=160)
@@ -1184,6 +1702,28 @@ def update_pricing(kind: str, item_id: str, data: dict) -> dict:
     elif kind == "variant":
         if "basePrice" in data:
             item.base_price = _money(data["basePrice"], "basePrice")
+        if "currency" in data:
+            currency = _pricing_currency(data["currency"])
+            product = db.session.get(BookProduct, item.product_id)
+            if product is None or currency != product.currency.upper():
+                raise ValidationError("Variant currency must match its book product.", {"currency": "mismatch"})
+            item.currency = currency
+    elif kind == "cover":
+        if "name" in data:
+            name = _text(data, "name", required=True, maximum=100)
+            if db.session.scalar(select(CoverType.id).where(CoverType.name == name, CoverType.id != item.id)):
+                raise ConflictError("A cover type with this name already exists.", {"name": "duplicate"})
+            item.name = name
+    elif kind == "paper":
+        if "name" in data:
+            name = _text(data, "name", required=True, maximum=100)
+            if db.session.scalar(select(PaperType.id).where(PaperType.name == name, PaperType.id != item.id)):
+                raise ConflictError("A paper type with this name already exists.", {"name": "duplicate"})
+            item.name = name
+        if "weightGsm" in data:
+            item.weight_gsm = _positive_int(data["weightGsm"], "weightGsm", optional=True)
+    if kind in {"cover", "paper"} and "description" in data:
+        item.description = _text(data, "description", maximum=500)
     elif "description" in data and hasattr(item, "description"):
         item.description = _text(data, "description", maximum=500)
     if "active" in data:
@@ -1192,6 +1732,16 @@ def update_pricing(kind: str, item_id: str, data: dict) -> dict:
         item.is_active = data["active"]
     _commit("pricing.updated", kind, item.id, {"fields": sorted(data)})
     return {"id": item.id, "active": item.is_active}
+
+
+def delete_pricing(kind: str, item_id: str) -> None:
+    if kind != "pagePricing":
+        raise ValidationError("Only page-pricing bands can be deleted; deactivate other pricing records instead.", {"type": "unsupported"})
+    item = db.session.get(PagePricing, item_id)
+    if item is None:
+        raise NotFound("Pricing record was not found.")
+    db.session.delete(item)
+    _commit("pricing.deleted", kind, item.id)
 
 
 def create_variant(data: dict) -> dict:
@@ -1204,8 +1754,39 @@ def create_variant(data: dict) -> dict:
     size = db.session.get(BookSize, size_id)
     cover = db.session.get(CoverType, cover_id)
     paper = db.session.get(PaperType, paper_id)
-    if product is None or product.deleted_at is not None or size is None or cover is None or paper is None:
+    if (
+        product is None or product.deleted_at is not None
+        or size is None or not size.is_active
+        or cover is None or not cover.is_active
+        or paper is None or not paper.is_active
+    ):
         raise ValidationError("Product, size, cover, and paper options must exist.", {"variant": "invalid_reference"})
+    metadata = product.admin_metadata or {}
+    for field, identifier in (
+        ("sizeOptions", size.id),
+        ("coverOptions", cover.id),
+        ("paperOptions", paper.id),
+    ):
+        configured = metadata.get(field)
+        if isinstance(configured, list) and configured and identifier not in configured:
+            raise ValidationError(
+                "The selected option is not enabled for this book product.",
+                {field: "incompatible"},
+            )
+    currency = _pricing_currency(data.get("currency", product.currency))
+    if currency != product.currency.upper():
+        raise ValidationError("Variant currency must match its book product.", {"currency": "mismatch"})
+    sku = _text(data, "sku", required=True, maximum=80)
+    if db.session.scalar(select(BookVariant.id).where(BookVariant.sku == sku)):
+        raise ConflictError("A variant with this SKU already exists.", {"sku": "duplicate"})
+    duplicate = db.session.scalar(select(BookVariant.id).where(
+        BookVariant.product_id == product.id,
+        BookVariant.size_id == size.id,
+        BookVariant.cover_type_id == cover.id,
+        BookVariant.paper_type_id == paper.id,
+    ))
+    if duplicate:
+        raise ConflictError("This product, size, cover, and paper combination already exists.", {"variant": "duplicate"})
     variant = BookVariant(
         product_id=product.id,
         size_id=size.id,
@@ -1213,11 +1794,18 @@ def create_variant(data: dict) -> dict:
         paper_type_id=paper.id,
         sku=sku,
         base_price=_money(data.get("basePrice"), "basePrice"),
+        currency=currency,
     )
     db.session.add(variant)
     db.session.flush()
     _commit("pricing.variant_created", "book_variant", variant.id)
-    return {"id": variant.id, "productId": product.id, "basePrice": str(variant.base_price), "active": variant.is_active}
+    return {
+        "id": variant.id,
+        "productId": product.id,
+        "basePrice": str(variant.base_price),
+        "currency": variant.currency,
+        "active": variant.is_active,
+    }
 
 
 def list_support(args) -> dict:

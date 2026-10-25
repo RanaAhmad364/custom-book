@@ -1,29 +1,14 @@
-const API_ROOT = "/api/pdf";
-const paymentStates = new Set(["pending", "successful", "failed"]);
+import { apiRequest } from "./apiClient.js";
+import { paymentMethodService } from "./paymentMethodService.js";
+
+const API_ROOT = "/pdf";
+const paymentStates = new Set(["pending", "successful", "failed", "partially_refunded", "refunded"]);
 const generationStates = new Set(["queued", "generating", "ready", "failed", "not_started"]);
 
 async function request(path, options = {}) {
-  let response;
-  try {
-    response = await fetch(`${API_ROOT}${path}`, {
-      credentials: "include",
-      ...options,
-      headers: {
-        Accept: "application/json",
-        ...(options.body ? { "Content-Type": "application/json" } : {}),
-        ...options.headers,
-      },
-    });
-  } catch (failure) {
-    throw new Error(failure instanceof Error ? `PDF service is unavailable: ${failure.message}` : "PDF service is unavailable.");
-  }
-
-  const body = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(body?.message || `PDF service request failed (${response.status}).`);
-  }
-  if (!body || typeof body !== "object") throw new Error("PDF service returned an invalid response.");
-  return body;
+  const { data } = await apiRequest(`${API_ROOT}${path}`, options);
+  if (!data || typeof data !== "object") throw new Error("PDF service returned an invalid response.");
+  return data;
 }
 
 function normalizeOffer(offer) {
@@ -62,6 +47,7 @@ export function normalizePdfOrder(order) {
   const checkoutUrl = order.paymentStatus === "pending" ? normalizeDownloadUrl(order.checkoutUrl) : null;
   return {
     ...order,
+    bookTitle: order.bookTitle ?? order.title ?? "MemoryBook PDF",
     amount: order.amount !== null && order.amount !== undefined && order.amount !== "" && Number.isFinite(Number(order.amount))
       ? Number(order.amount)
       : null,
@@ -74,8 +60,8 @@ export function normalizePdfOrder(order) {
 export function canDownloadPdf(order) {
   return order?.paymentStatus === "successful"
     && order?.generationStatus === "ready"
-    && typeof order.downloadUrl === "string"
-    && order.downloadUrl.length > 0;
+    && typeof order.downloadId === "string"
+    && order.downloadId.length > 0;
 }
 
 export const pdfOrderService = {
@@ -84,10 +70,18 @@ export const pdfOrderService = {
     return normalizeOffer(offer);
   },
 
-  async createOrder(projectId) {
+  async getPaymentMethods(currency) {
+    return paymentMethodService.list(currency);
+  },
+
+  async createOrder(projectId, paymentMethod) {
     const order = await request("/orders", {
       method: "POST",
-      body: JSON.stringify({ projectId }),
+      body: {
+        projectId,
+        provider: paymentMethod?.provider,
+        paymentMethod: paymentMethod?.method,
+      },
       headers: { "Idempotency-Key": crypto.randomUUID() },
     });
     return normalizePdfOrder(order);
@@ -101,11 +95,23 @@ export const pdfOrderService = {
   async listDownloads() {
     const result = await request("/downloads");
     if (!Array.isArray(result.items)) throw new Error("PDF service returned an invalid download history.");
-    return result.items.map(normalizePdfOrder);
+    return result.items;
   },
 
   async getDownload(downloadId) {
-    const order = await request(`/downloads/${encodeURIComponent(downloadId)}`);
-    return normalizePdfOrder(order);
+    const result = await request(`/downloads/${encodeURIComponent(downloadId)}`);
+    const download = result.download;
+    if (!download || typeof download.id !== "string" || typeof download.url !== "string") {
+      throw new Error("PDF service returned an invalid secure download.");
+    }
+    const url = normalizeDownloadUrl(download.url);
+    if (!url) throw new Error("PDF service returned an unsafe download URL.");
+    return { ...download, url };
+  },
+
+  async listOrders() {
+    const result = await request("/orders");
+    if (!Array.isArray(result.items)) throw new Error("PDF service returned an invalid order history.");
+    return result.items.map(normalizePdfOrder);
   },
 };

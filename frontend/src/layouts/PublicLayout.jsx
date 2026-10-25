@@ -5,11 +5,12 @@ import { Header } from "../components/layout/Header.jsx";
 export default function PublicLayout({ children }) {
   const { pathname } = useLocation();
   const fullScreenEditor = pathname.startsWith("/create/design/");
+  const adminWorkspace = pathname.startsWith("/admin");
   return (
     <>
-      {!fullScreenEditor ? <Header /> : null}
+      {!fullScreenEditor && !adminWorkspace ? <Header /> : null}
       {children}
-      {!fullScreenEditor ? <Footer /> : null}
+      {!fullScreenEditor && !adminWorkspace ? <Footer /> : null}
     </>
   );
 }

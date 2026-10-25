@@ -5,6 +5,7 @@ import { catalogService } from "../../../services/catalog.js";
 import { DemoNotice } from "../../../components/common/DemoNotice.jsx";
 import { ErrorState } from "../../../components/common/ErrorState.jsx";
 import { LoadingState } from "../../../components/common/LoadingState.jsx";
+import { SafeImage } from "../../../components/common/SafeImage.jsx";
 
 function CategoriesPage() {
   const { data: categories = [], isPending, isError, refetch } = useQuery({
@@ -32,7 +33,7 @@ function CategoriesPage() {
               key={category.slug}
               to={`/categories/${category.slug}`}
             >
-              <img src={category.image} alt={category.imageAlt} loading="lazy" />
+              <SafeImage src={category.image} alt={category.imageAlt || category.name} />
               <span className="discovery-category-number">{category.name}</span>
               <div>
                 <h2>{category.name}</h2>

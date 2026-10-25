@@ -1,42 +1,55 @@
+import { lazy, Suspense } from "react";
 import { Route, Routes } from "react-router-dom";
-import Home from "../pages/public/Home/Home.jsx";
-import ExploreBooks from "../pages/public/ExploreBooks/ExploreBooks.jsx";
-import Categories from "../pages/public/Categories/Categories.jsx";
-import CategoryDetails from "../pages/public/Categories/CategoryDetails.jsx";
-import Collections from "../pages/public/Collections/Collections.jsx";
-import CollectionDetails from "../pages/public/Collections/CollectionDetails.jsx";
-import BookDetails from "../pages/public/BookDetails/BookDetails.jsx";
-import CreateBook from "../pages/public/BookCreation/CreateBook.jsx";
-import TemplateSelection from "../pages/public/BookCreation/TemplateSelection.jsx";
-import BookSetup from "../pages/public/BookCreation/BookSetup.jsx";
-import PhotoUpload from "../pages/public/BookCreation/PhotoUpload.jsx";
-import CreationEditor from "../pages/public/BookCreation/CreationEditor.jsx";
-import Pricing from "../pages/public/Pricing/Pricing.jsx";
-import FAQ from "../pages/public/FAQ/FAQ.jsx";
-import HowItWorks from "../pages/public/HowItWorks/HowItWorks.jsx";
-import About from "../pages/public/About/About.jsx";
-import Contact from "../pages/public/Contact/Contact.jsx";
-import HelpCenter from "../pages/public/HelpCenter/HelpCenter.jsx";
-import PolicyPage from "../pages/public/Policies/PolicyPage.jsx";
-import NotFound from "../pages/public/NotFound/NotFound.jsx";
-import Login from "../pages/auth/Login.jsx";
-import Register from "../pages/auth/Register.jsx";
-import ForgotPassword from "../pages/auth/ForgotPassword.jsx";
-import ResetPassword from "../pages/auth/ResetPassword.jsx";
-import OtpVerification from "../pages/auth/OtpVerification.jsx";
-import EmailVerified from "../pages/auth/EmailVerified.jsx";
-import SessionExpired from "../pages/auth/SessionExpired.jsx";
-import Unauthorized from "../pages/auth/Unauthorized.jsx";
-import Account from "../pages/auth/Account.jsx";
-import ProtectedRoute from "../features/auth/ProtectedRoute.jsx";
-import DashboardLayout from "../features/dashboard/DashboardLayout.jsx";
-import DashboardHome from "../pages/dashboard/DashboardHome.jsx";
-import DashboardSection from "../pages/dashboard/DashboardSection.jsx";
-import { PdfServiceDetails, PdfOrderSummary, PdfCheckout, PdfOrderProcessing, PdfDownloadHistory, PdfDownloadDetails } from "../pages/public/PdfPurchase/PdfPurchase.jsx";
-import { PrintOrderFlow, PrintOrderHistory, PrintOrderResult } from "../pages/public/PrintOrder/PrintOrder.jsx";
+
+const Home = lazy(() => import("../pages/public/Home/Home.jsx"));
+const ExploreBooks = lazy(() => import("../pages/public/ExploreBooks/ExploreBooks.jsx"));
+const Categories = lazy(() => import("../pages/public/Categories/Categories.jsx"));
+const CategoryDetails = lazy(() => import("../pages/public/Categories/CategoryDetails.jsx"));
+const Collections = lazy(() => import("../pages/public/Collections/Collections.jsx"));
+const CollectionDetails = lazy(() => import("../pages/public/Collections/CollectionDetails.jsx"));
+const BookDetails = lazy(() => import("../pages/public/BookDetails/BookDetails.jsx"));
+const CreateBook = lazy(() => import("../pages/public/BookCreation/CreateBook.jsx"));
+const TemplateSelection = lazy(() => import("../pages/public/BookCreation/TemplateSelection.jsx"));
+const BookSetup = lazy(() => import("../pages/public/BookCreation/BookSetup.jsx"));
+const PhotoUpload = lazy(() => import("../pages/public/BookCreation/PhotoUpload.jsx"));
+const CreationEditor = lazy(() => import("../pages/public/BookCreation/CreationEditor.jsx"));
+const Pricing = lazy(() => import("../pages/public/Pricing/Pricing.jsx"));
+const FAQ = lazy(() => import("../pages/public/FAQ/FAQ.jsx"));
+const HowItWorks = lazy(() => import("../pages/public/HowItWorks/HowItWorks.jsx"));
+const About = lazy(() => import("../pages/public/About/About.jsx"));
+const Contact = lazy(() => import("../pages/public/Contact/Contact.jsx"));
+const HelpCenter = lazy(() => import("../pages/public/HelpCenter/HelpCenter.jsx"));
+const PolicyPage = lazy(() => import("../pages/public/Policies/PolicyPage.jsx"));
+const NotFound = lazy(() => import("../pages/public/NotFound/NotFound.jsx"));
+const Login = lazy(() => import("../pages/auth/Login.jsx"));
+const Register = lazy(() => import("../pages/auth/Register.jsx"));
+const ForgotPassword = lazy(() => import("../pages/auth/ForgotPassword.jsx"));
+const ResetPassword = lazy(() => import("../pages/auth/ResetPassword.jsx"));
+const OtpVerification = lazy(() => import("../pages/auth/OtpVerification.jsx"));
+const EmailVerified = lazy(() => import("../pages/auth/EmailVerified.jsx"));
+const SessionExpired = lazy(() => import("../pages/auth/SessionExpired.jsx"));
+const Unauthorized = lazy(() => import("../pages/auth/Unauthorized.jsx"));
+const Account = lazy(() => import("../pages/auth/Account.jsx"));
+const ProtectedRoute = lazy(() => import("../features/auth/ProtectedRoute.jsx"));
+const DashboardLayout = lazy(() => import("../features/dashboard/DashboardLayout.jsx"));
+const DashboardHome = lazy(() => import("../pages/dashboard/DashboardHome.jsx"));
+const DashboardSection = lazy(() => import("../pages/dashboard/DashboardSection.jsx"));
+const PdfServiceDetails = lazy(() => import("../pages/public/PdfPurchase/PdfPurchase.jsx").then((module) => ({ default: module.PdfServiceDetails })));
+const PdfOrderSummary = lazy(() => import("../pages/public/PdfPurchase/PdfPurchase.jsx").then((module) => ({ default: module.PdfOrderSummary })));
+const PdfCheckout = lazy(() => import("../pages/public/PdfPurchase/PdfPurchase.jsx").then((module) => ({ default: module.PdfCheckout })));
+const PdfOrderProcessing = lazy(() => import("../pages/public/PdfPurchase/PdfPurchase.jsx").then((module) => ({ default: module.PdfOrderProcessing })));
+const PdfDownloadHistory = lazy(() => import("../pages/public/PdfPurchase/PdfPurchase.jsx").then((module) => ({ default: module.PdfDownloadHistory })));
+const PdfDownloadDetails = lazy(() => import("../pages/public/PdfPurchase/PdfPurchase.jsx").then((module) => ({ default: module.PdfDownloadDetails })));
+const PrintOrderFlow = lazy(() => import("../pages/public/PrintOrder/PrintOrder.jsx").then((module) => ({ default: module.PrintOrderFlow })));
+const PrintOrderHistory = lazy(() => import("../pages/public/PrintOrder/PrintOrder.jsx").then((module) => ({ default: module.PrintOrderHistory })));
+const PrintOrderResult = lazy(() => import("../pages/public/PrintOrder/PrintOrder.jsx").then((module) => ({ default: module.PrintOrderResult })));
+const AdminRoute = lazy(() => import("../features/admin/AdminRoute.jsx"));
+const AdminLayout = lazy(() => import("../features/admin/AdminLayout.jsx"));
+const AdminSection = lazy(() => import("../features/admin/AdminSection.jsx"));
 
 export default function AppRoutes() {
   return (
+    <Suspense fallback={<div className="route-loading" role="status">Loading MemoryBook…</div>}>
     <Routes>
       <Route path="/" element={<Home />} />
       <Route path="/books" element={<ExploreBooks />} />
@@ -68,6 +81,13 @@ export default function AppRoutes() {
       <Route path="/email-verified" element={<EmailVerified />} />
       <Route path="/session-expired" element={<SessionExpired />} />
       <Route path="/unauthorized" element={<Unauthorized />} />
+      <Route element={<AdminRoute />}>
+        <Route path="/admin/books/:bookId/design" element={<CreationEditor adminMode />} />
+        <Route path="/admin" element={<AdminLayout />}>
+          <Route index element={<AdminSection />} />
+          <Route path=":section" element={<AdminSection />} />
+        </Route>
+      </Route>
       <Route element={<ProtectedRoute />}>
         <Route path="/account" element={<Account />} />
         <Route path="/create/design/:projectId" element={<CreationEditor />} />
@@ -101,5 +121,6 @@ export default function AppRoutes() {
       </Route>
       <Route path="*" element={<NotFound />} />
     </Routes>
+    </Suspense>
   );
 }

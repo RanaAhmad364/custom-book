@@ -1,5 +1,6 @@
 import io
 import re
+import base64
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -34,6 +35,16 @@ class MemoryStorage:
 
     def download_url(self, key):
         return f"https://storage.example.test/{key}?signature=private"
+
+    def private_download_url(self, key):
+        token = base64.urlsafe_b64encode(key.encode()).decode().rstrip("=")
+        return f"/api/v1/assets/private/{token}"
+
+    def download_token(self, token):
+        return base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode()
+
+    def content_type(self, key):
+        return self.objects[key][1]
 
 
 def make_image(size=(3000, 3000), color=(174, 83, 51)):
@@ -307,13 +318,18 @@ def test_pdf_generation_requires_payment_is_idempotent_and_download_is_owner_sco
     entitlement_id = downloads.json["items"][0]["id"]
     link = client.get(f"/api/v1/pdf/downloads/{entitlement_id}")
     assert link.status_code == 200
-    assert link.json["download"]["url"].startswith("https://storage.example.test/generated/pdf/")
+    assert link.json["download"]["url"].startswith("/api/v1/assets/private/")
     assert link.json["download"]["checksumSha256"]
+    private_pdf = client.get(link.json["download"]["url"])
+    assert private_pdf.status_code == 200
+    assert private_pdf.mimetype == "application/pdf"
+    assert private_pdf.headers["Cache-Control"] == "private, no-store"
     with app.app_context():
         assert db.session.scalar(db.select(DownloadEntitlement).where(DownloadEntitlement.id == entitlement_id)).download_count == 1
         assert db.session.scalar(db.select(db.func.count()).select_from(DownloadHistory)) == 1
         assert db.session.scalar(db.select(PdfJob).where(PdfJob.id == job_id)).status == "ready"
 
     other_client, _ = authenticated_client(app, "other-reader@example.test")
+    assert other_client.get(link.json["download"]["url"]).status_code == 404
     assert other_client.get(f"/api/v1/pdf/jobs/{job_id}").status_code == 404
     assert other_client.get(f"/api/v1/pdf/downloads/{entitlement_id}").status_code == 404

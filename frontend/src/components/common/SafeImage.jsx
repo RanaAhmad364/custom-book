@@ -4,7 +4,7 @@ import { BookOpen } from "lucide-react";
 export function SafeImage({ src, alt, className = "", loading = "lazy" }) {
   const [failed, setFailed] = useState(false);
 
-  if (failed) {
+  if (!src || failed) {
     return (
       <div className={`image-fallback ${className}`} role="img" aria-label={alt}>
         <BookOpen size={24} strokeWidth={1.4} />

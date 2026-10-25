@@ -1,0 +1,1 @@
+import{r as l,j as e,B as n}from"./index-D6sXrhyn.js";function m({src:r,alt:a,className:s="",loading:t="lazy"}){const[i,o]=l.useState(!1);return!r||i?e.jsx("div",{className:`image-fallback ${s}`,role:"img","aria-label":a,children:e.jsx(n,{size:24,strokeWidth:1.4})}):e.jsx("img",{className:s,src:r,alt:a,loading:t,onError:()=>o(!0)})}export{m as S};

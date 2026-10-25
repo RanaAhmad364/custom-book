@@ -322,12 +322,15 @@ def _register_cli_commands(app: Flask) -> None:
             "admin.test@memorybook.local",
             "user1.test@memorybook.local",
             "user2.test@memorybook.local",
+            "demo.customer.1@memorybook.local",
+            "demo.customer.2@memorybook.local",
+            "demo.customer.3@memorybook.local",
         }
         normalized_email = email.strip().lower()
         if app.config.get("ENVIRONMENT") != "development":
             raise click.ClickException("Test-account password resets are available only in development.")
         if normalized_email not in allowed:
-            raise click.ClickException("This command only resets the three documented local test accounts.")
+            raise click.ClickException("This command only resets documented local test accounts in development.")
         password = click.prompt("New development password", hide_input=True, confirmation_prompt=True)
         if len(password) < 16 or len(password) > 256:
             raise click.ClickException("Use a password between 16 and 256 characters.")
@@ -349,64 +352,45 @@ def _register_cli_commands(app: Flask) -> None:
         click.echo(f"Password reset for {normalized_email}.")
 
     @app.cli.command("seed-demo-catalog")
-    def seed_demo_catalog() -> None:
-        """Add missing development-only catalog sample records."""
-        from decimal import Decimal
+    @click.option("--apply", "apply_changes", is_flag=True, help="Write demo records and local original artwork.")
+    @click.option(
+        "--confirm-local-database",
+        is_flag=True,
+        help="Confirm the loopback PostgreSQL database is a dedicated non-production development database.",
+    )
+    def seed_demo_catalog(apply_changes: bool, confirm_local_database: bool) -> None:
+        """Preview or add the repeatable development-only demo catalog."""
+        import json
 
-        from memorybook.models import BookCategory, BookCollection, BookProduct, BookTemplate
+        from memorybook.demo_catalog import (
+            preview_demo_catalog,
+            seed_demo_catalog as apply_demo_catalog,
+            seed_environment_error,
+            seed_schema_error,
+        )
 
-        if app.config.get("ENVIRONMENT") != "development":
-            raise click.ClickException("Catalog sample data can only be added in development.")
-
+        error = seed_environment_error(
+            app,
+            confirm_local_database,
+            require_confirmation=apply_changes,
+        )
+        if error:
+            raise click.ClickException(error)
         with app.app_context():
-            category = db.session.scalar(select(BookCategory).where(BookCategory.slug == "travel"))
-            if category is None:
-                category = BookCategory(
-                    name="Travel",
-                    slug="travel",
-                    description="Development sample category; replace with approved catalog content.",
-                    style="Editorial",
-                )
-                db.session.add(category)
-                db.session.flush()
-
-            collection = db.session.scalar(select(BookCollection).where(BookCollection.slug == "far-and-near"))
-            if collection is None:
-                collection = BookCollection(
-                    name="Far & near",
-                    slug="far-and-near",
-                    description="Development sample collection; replace with approved catalog content.",
-                    related_categories=["Travel"],
-                )
-                db.session.add(collection)
-                db.session.flush()
-
-            if db.session.scalar(select(BookProduct.id).where(BookProduct.slug == "development-travel-book")) is None:
-                db.session.add(BookProduct(
-                    category_id=category.id,
-                    collection_id=collection.id,
-                    title="Development travel book",
-                    slug="development-travel-book",
-                    description="Development sample product; replace its copy and price before launch.",
-                    style="Editorial",
-                    occasion="Travel",
-                    book_type="BASIC",
-                    page_count_min=24,
-                    page_count_max=80,
-                    starting_price=Decimal("6500.00"),
-                    currency="PKR",
-                    is_featured=True,
-                    is_active=True,
-                ))
-
-            if db.session.scalar(select(BookTemplate.id).where(BookTemplate.slug == "development-travel-template")) is None:
-                db.session.add(BookTemplate(
-                    category_id=category.id,
-                    name="Development travel template",
-                    slug="development-travel-template",
-                    description="Development sample template; replace with approved template content.",
-                    is_active=True,
-                ))
-
-            db.session.commit()
-        click.echo("Development catalog samples ensured; existing records were not changed.")
+            if not apply_changes:
+                preview = preview_demo_catalog()
+                click.echo("Dry run only; no records or assets were written.")
+                click.echo(json.dumps(preview, indent=2))
+                click.echo("Pass --apply to seed; local PostgreSQL also requires --confirm-local-database.")
+                return
+            schema_error = seed_schema_error(app)
+            if schema_error:
+                raise click.ClickException(schema_error)
+            try:
+                with app.test_request_context("/dev/seed-demo-catalog"):
+                    summary = apply_demo_catalog()
+            except ValueError as failure:
+                db.session.rollback()
+                raise click.ClickException(str(failure)) from failure
+        click.echo("Demo catalog seed completed and verified.")
+        click.echo(json.dumps(summary, indent=2))

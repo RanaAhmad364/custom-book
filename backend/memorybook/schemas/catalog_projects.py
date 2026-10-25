@@ -4,6 +4,7 @@ from decimal import Decimal, InvalidOperation
 from math import isfinite
 
 from memorybook.errors import ValidationError
+from werkzeug.utils import secure_filename
 
 MAX_PROJECT_DOCUMENT_BYTES = 1_500_000
 
@@ -222,7 +223,10 @@ class AssetMetadataSchema:
             raise ValidationError("Unsupported image type.", {"mimeType": "unsupported"})
         if isinstance(byte_size, bool) or not isinstance(byte_size, int) or not 0 < byte_size <= cls.MAX_BYTES:
             raise ValidationError("Image size must be between 1 byte and 15 MB.", {"size": "invalid"})
-        return {"filename": filename.strip(), "mime_type": mime_type, "byte_size": byte_size}
+        safe_filename = secure_filename(filename.strip())[:255]
+        if not safe_filename:
+            raise ValidationError("Asset filename must contain safe filename characters.", {"filename": "invalid"})
+        return {"filename": safe_filename, "mime_type": mime_type, "byte_size": byte_size}
 
 
 class CatalogQuerySchema:

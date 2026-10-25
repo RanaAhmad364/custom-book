@@ -1,10 +1,55 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ChevronLeft, ChevronRight, Expand, Minimize, X } from "lucide-react";
+import { ArrowLeft, ChevronLeft, ChevronRight, Expand, ImageOff, Minimize, X } from "lucide-react";
 import { CoverArtwork } from "./CoverArtwork.jsx";
 
-function PageArtwork({ page, previewWidth, previewHeight, className = "" }) {
-  return <div className={`book-preview-page ${className}`} style={{ backgroundColor: page.background?.color ?? "#fffdf9" }}>
-    {(page.elements ?? []).map((element) => {
+function PageImage({ element, style, previewWidth, imageLoading, onAssetError }) {
+  const [status, setStatus] = useState(element.src ? "loading" : "missing");
+  useEffect(() => {
+    setStatus(element.src ? "loading" : "missing");
+  }, [element.src]);
+
+  return <span className={`book-preview-element book-preview-photo-frame${status === "loading" ? " is-loading" : ""}${status === "error" || status === "missing" ? " is-unavailable" : ""}`} style={{
+    ...style,
+    border: element.borderWidth ? `${element.borderWidth * previewWidth}px solid ${element.borderColor ?? "#fffdf9"}` : undefined,
+    borderRadius: element.borderRadius ? `${element.borderRadius * previewWidth}px` : undefined,
+    boxShadow: element.shadow ? "0 8px 18px rgba(28, 40, 34, .18)" : undefined,
+  }}>
+    {status === "loading" ? <span className="book-preview-image-skeleton" aria-hidden="true" /> : null}
+    {status === "error" || status === "missing" ? <span className="book-preview-image-fallback" aria-label={status === "missing" ? "Image unavailable" : "Image could not be loaded"}><ImageOff size={14} /></span> : null}
+    {element.src ? <img
+      className={`book-preview-photo${status === "loaded" ? " is-loaded" : ""}`}
+      style={{
+        objectFit: element.fit === "contain" ? "contain" : "cover",
+        objectPosition: `${(element.cropX ?? 0.5) * 100}% ${(element.cropY ?? 0.5) * 100}%`,
+        transform: `scale(${element.fit === "contain" ? 1 : element.zoom ?? 1})`,
+      }}
+      src={element.src}
+      alt={element.name ?? ""}
+      loading={imageLoading}
+      decoding="async"
+      onLoad={() => setStatus("loaded")}
+      onError={() => {
+        setStatus("error");
+        onAssetError?.(element.assetId, element.src);
+      }}
+    /> : null}
+  </span>;
+}
+
+export function PageArtwork({
+  page,
+  previewWidth,
+  previewHeight,
+  className = "",
+  imageLoading = "eager",
+  style = {},
+  onAssetError,
+  emptyPlaceholder = false,
+}) {
+  const elements = page.elements ?? [];
+  return <div className={`book-preview-page ${className}`} style={{ ...style, backgroundColor: page.background?.color ?? "#fffdf9" }}>
+    {emptyPlaceholder && elements.length === 0 ? <span className="editor-thumb-empty"><span>Empty page</span></span> : null}
+    {elements.map((element) => {
       const style = {
         left: `${element.x * 100}%`,
         top: `${element.y * 100}%`,
@@ -14,17 +59,7 @@ function PageArtwork({ page, previewWidth, previewHeight, className = "" }) {
         transform: `rotate(${element.rotation ?? 0}deg)`,
       };
       if (element.type === "image") {
-        return <span key={element.id} className="book-preview-element book-preview-photo-frame" style={{
-          ...style,
-          transform: `rotate(${element.rotation ?? 0}deg)`,
-          border: element.borderWidth ? `${element.borderWidth * previewWidth}px solid ${element.borderColor ?? "#fffdf9"}` : undefined,
-          borderRadius: element.borderRadius ? `${element.borderRadius * previewWidth}px` : undefined,
-          boxShadow: element.shadow ? "0 8px 18px rgba(28, 40, 34, .18)" : undefined,
-        }}><img className="book-preview-photo" style={{
-          objectFit: element.fit === "contain" ? "contain" : "cover",
-          objectPosition: `${(element.cropX ?? 0.5) * 100}% ${(element.cropY ?? 0.5) * 100}%`,
-          transform: `scale(${element.fit === "contain" ? 1 : element.zoom ?? 1})`,
-        }} src={element.src} alt={element.name ?? ""} /></span>;
+        return <PageImage key={element.id} element={element} style={style} previewWidth={previewWidth} imageLoading={imageLoading} onAssetError={onAssetError} />;
       }
       if (element.type === "text") {
         return <span key={element.id} className="book-preview-element book-preview-text" style={{
@@ -51,7 +86,7 @@ function PageArtwork({ page, previewWidth, previewHeight, className = "" }) {
   </div>;
 }
 
-export default function BookPreview({ document, initialPageId, onClose, onEditPage, onContinueReview }) {
+export default function BookPreview({ document, initialPageId, onClose, onEditPage, onContinueReview, onAssetError }) {
   const interiorPages = useMemo(() => document.pageOrder.map((id) => document.pages.find((page) => page.id === id)).filter((page) => page && page.type !== "cover"), [document]);
   const slides = useMemo(() => [
     { id: "cover-front", kind: "front", label: "Front cover" },
@@ -60,7 +95,7 @@ export default function BookPreview({ document, initialPageId, onClose, onEditPa
   ], [interiorPages]);
   const initialIndex = Math.max(0, slides.findIndex((slide) => slide.id === initialPageId));
   const [index, setIndex] = useState(initialIndex);
-  const [spread, setSpread] = useState(() => globalThis.window?.innerWidth > 600);
+  const [spread, setSpread] = useState(() => globalThis.window?.innerWidth > 760);
   const [zoom, setZoom] = useState(100);
   const [fullscreen, setFullscreen] = useState(false);
   const [fullscreenError, setFullscreenError] = useState("");
@@ -95,9 +130,10 @@ export default function BookPreview({ document, initialPageId, onClose, onEditPa
   }, []);
 
   useEffect(() => {
-    const mobile = window.matchMedia("(max-width: 600px)");
+    const mobile = window.matchMedia("(max-width: 760px)");
     const useSinglePageOnMobile = () => {
       if (mobile.matches) setSpread(false);
+      else setSpread((current) => current || window.innerWidth > 760);
     };
     useSinglePageOnMobile();
     mobile.addEventListener("change", useSinglePageOnMobile);
@@ -111,12 +147,17 @@ export default function BookPreview({ document, initialPageId, onClose, onEditPa
     ? slides.slice(spreadStart, spreadStart + 2)
     : [slides[index]];
   const visibleCount = Math.max(1, visibleSlides.length);
-  const fitPageHeight = canvasSize.width && canvasSize.height
-    ? Math.min(canvasSize.height - 30, (canvasSize.width - (visibleCount - 1) * 16) / (visibleCount * pageRatio))
-    : 0;
-  const pageHeight = Math.max(0, fitPageHeight * zoom / 100);
+  const availableWidth = canvasSize.width > 0 ? Math.max(220, canvasSize.width * (visibleCount > 1 ? 0.92 : 0.9)) : 420;
+  const availableHeight = canvasSize.height > 0 ? Math.max(220, canvasSize.height * 0.72) : 420;
+  const pageGap = visibleCount > 1 ? 16 : 0;
+  const maxPageWidth = visibleCount > 1 ? (availableWidth - (visibleCount - 1) * pageGap) / visibleCount : availableWidth;
+  const pageHeight = Math.min(availableHeight, maxPageWidth / pageRatio);
   const pageWidth = pageHeight * pageRatio;
-  const pageGap = Math.max(5, Math.min(18, pageWidth * 0.025));
+  const spreadWidth = visibleCount > 1 ? pageWidth * visibleCount + pageGap * (visibleCount - 1) : pageWidth;
+  const spreadScale = spreadWidth > availableWidth ? availableWidth / spreadWidth : 1;
+  const scaledPageHeight = Math.max(0, pageHeight * spreadScale * (zoom / 100));
+  const scaledPageWidth = Math.max(0, pageWidth * spreadScale * (zoom / 100));
+  const scaledSpreadWidth = visibleCount > 1 ? scaledPageWidth * visibleCount + pageGap * (zoom / 100) * (visibleCount - 1) : scaledPageWidth;
 
   const navigate = useCallback((nextIndex) => {
     setIndex(Math.min(slides.length - 1, Math.max(0, nextIndex)));
@@ -182,11 +223,11 @@ export default function BookPreview({ document, initialPageId, onClose, onEditPa
       <div className="book-preview-stage">
         <button className="book-preview-nav" type="button" disabled={index === 0} aria-label="Previous page" onClick={previous}><ChevronLeft size={22} /></button>
         <div className="book-preview-canvas" ref={canvasRef} onPointerDown={beginTouch} onPointerUp={endTouch} onPointerCancel={() => { touchStartRef.current = null; }} aria-label={spread && visibleSlides.length > 1 ? "Two-page book spread" : "Book page"}>
-          <div className={`book-preview-spread${visibleSlides.length > 1 ? " is-spread" : ""}`} style={{ width: `${visibleCount * pageWidth + (visibleCount - 1) * pageGap}px`, height: `${pageHeight + 22}px`, gap: `${pageGap}px` }}>
-            {visibleSlides.map((slide) => <div className="book-preview-sheet" style={{ width: `${pageWidth}px`, height: `${pageHeight + 22}px` }} key={slide.id}>
+          <div className={`book-preview-spread${visibleSlides.length > 1 ? " is-spread" : ""}`} style={{ width: `${scaledSpreadWidth}px`, height: `${scaledPageHeight + 22}px`, gap: `${pageGap * spreadScale}px` }}>
+            {visibleSlides.map((slide) => <div className="book-preview-sheet" style={{ width: `${scaledPageWidth}px`, height: `${scaledPageHeight + 22}px` }} key={slide.id}>
               {slide.kind === "front" || slide.kind === "back"
                 ? <CoverArtwork cover={document.cover} document={document} side={slide.kind} className="book-preview-cover-artwork" />
-                : <PageArtwork page={slide.page} previewWidth={pageWidth} previewHeight={pageHeight} />}
+                : <PageArtwork page={slide.page} previewWidth={scaledPageWidth} previewHeight={scaledPageHeight} onAssetError={onAssetError} />}
               <span>{slide.label}</span>
             </div>)}
           </div>

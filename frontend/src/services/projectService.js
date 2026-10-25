@@ -1,9 +1,6 @@
-const DATABASE_NAME = "memorybook-projects";
-const DATABASE_VERSION = 1;
-const STORE_NAME = "projects";
-const projectsByOwner = new Map();
-let databasePromise;
-let nextProjectNumber = 1;
+import { apiRequest } from "./apiClient.js";
+
+const projectVersions = new Map();
 
 function ownerKey(owner) {
   const normalized = owner?.trim().toLowerCase();
@@ -11,11 +8,57 @@ function ownerKey(owner) {
   return normalized;
 }
 
-function documentPages(selections) {
+function versionKey(owner, projectId) {
+  return `${ownerKey(owner)}::${projectId}`;
+}
+
+function rememberVersion(owner, project) {
+  if (Number.isInteger(project?.version)) projectVersions.set(versionKey(owner, project.id), project.version);
+}
+
+function projectShape(owner, record) {
+  rememberVersion(owner, record);
+  const document = record.document;
+  const book = document?.book ?? {};
+  const template = book.template ?? {};
+  const firstImage = document?.assets?.find((asset) => asset.src)?.src;
+  return {
+    ...record,
+    owner: ownerKey(owner),
+    image: firstImage || record.image || template.image || book.image || "",
+    category: record.category || template.category || "Custom",
+    pages: record.pageCount ?? book.pageCount ?? 0,
+    progress: record.status === "completed" ? 100 : document?.pages?.length ? 12 : 5,
+    updated: record.updatedAt ? new Date(record.updatedAt).toLocaleDateString() : "Just now",
+    createdAt: record.createdAt,
+  };
+}
+
+function projectPath(projectId) {
+  return `/projects/${encodeURIComponent(projectId)}`;
+}
+
+function databaseId(value) {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+    ? value
+    : undefined;
+}
+
+function expectedVersion(owner, projectId) {
+  const version = projectVersions.get(versionKey(owner, projectId));
+  if (!Number.isInteger(version)) throw new Error("The project version is unavailable. Reload the project before saving.");
+  return `"${version}"`;
+}
+
+function buildProjectDocument(project, selections, uploadedAssets = []) {
   const pageCount = Number(selections.pageCount) || 24;
-  const coverId = crypto.randomUUID();
-  return [
-    { id: coverId, type: "cover", label: "Cover", background: { color: "#e8ece5" }, layout: "cover", elements: [] },
+  const selectedTemplate = selections.template?.designTemplateId !== undefined
+    ? selections.template.designTemplateId
+      ? { ...selections.template, id: selections.template.designTemplateId }
+      : null
+    : selections.template;
+  const pages = [
+    { id: crypto.randomUUID(), type: "cover", label: "Cover", background: { color: "#e8ece5" }, layout: "cover", elements: [] },
     ...Array.from({ length: pageCount }, (_, index) => ({
       id: crypto.randomUUID(),
       type: "page",
@@ -25,47 +68,31 @@ function documentPages(selections) {
       elements: [],
     })),
   ];
-}
-
-function createProjectDocument(project, selections) {
   const size = selections.bookSize === "11 × 8.5 in"
     ? { width: 11, height: 8.5 }
     : selections.bookSize === "8 × 8 in"
       ? { width: 8, height: 8 }
       : { width: 10, height: 10 };
-  const pages = documentPages(selections);
+  const now = new Date().toISOString();
   return {
     schemaVersion: 1,
-    metadata: {
-      id: project.id,
-      owner: project.owner,
-      title: project.title,
-      createdAt: project.createdAt,
-      updatedAt: project.createdAt,
-    },
+    metadata: { id: project.id, owner: project.owner, title: project.title, createdAt: project.createdAt, updatedAt: now },
     book: {
       size,
-      pageCount: Number(selections.pageCount) || 24,
+      pageCount,
       coverType: selections.coverType,
       startingLayout: selections.startingLayout,
       startingOption: selections.startingOption,
-      template: selections.template ? {
-        id: selections.template.id,
-        title: selections.template.title,
-        category: selections.template.category,
-        image: selections.template.image,
+      template: selectedTemplate ? {
+        id: selectedTemplate.id,
+        title: selectedTemplate.title ?? selectedTemplate.name,
+        category: selectedTemplate.category,
+        image: selectedTemplate.image ?? selectedTemplate.previewImage,
       } : null,
     },
     pageOrder: pages.map((page) => page.id),
     pages,
-    assets: (selections.photos ?? []).map((photo) => ({
-      id: photo.id,
-      name: photo.name,
-      mimeType: photo.mimeType ?? "image/jpeg",
-      src: photo.preview,
-      width: photo.width ?? null,
-      height: photo.height ?? null,
-    })),
+    assets: uploadedAssets,
     styles: { fontFamily: "DM Sans", color: "#1d2824", background: "#fffdf9" },
     cover: {
       pageId: pages[0].id,
@@ -74,13 +101,8 @@ function createProjectDocument(project, selections) {
       design: {
         bleedInches: 0.125,
         front: {
-          title: project.title,
-          subtitle: "",
-          backgroundColor: "#e8ece5",
-          textColor: "#20352d",
-          fontFamily: "Georgia",
-          layout: "center",
-          photoAssetId: null,
+          title: project.title, subtitle: "", backgroundColor: "#e8ece5", textColor: "#20352d",
+          fontFamily: "Georgia", layout: "center", photoAssetId: null,
         },
         spine: { title: project.title, backgroundColor: "#e8ece5", textColor: "#20352d", fontFamily: "Georgia" },
         back: { title: project.title, description: "", backgroundColor: "#f4eee5", textColor: "#20352d", fontFamily: "Georgia" },
@@ -89,116 +111,109 @@ function createProjectDocument(project, selections) {
   };
 }
 
-function requestResult(request) {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("Could not access saved projects."));
-  });
+function recoveryKey(owner, projectId) {
+  return `memorybook-recovery:${versionKey(owner, projectId)}`;
 }
 
-function openDatabase() {
-  if (databasePromise) return databasePromise;
-  databasePromise = new Promise((resolve, reject) => {
-    if (!("indexedDB" in globalThis)) {
-      reject(new Error("This browser does not support local project storage."));
-      return;
-    }
-    const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
-    request.onupgradeneeded = () => {
-      const database = request.result;
-      if (!database.objectStoreNames.contains(STORE_NAME)) {
-        const store = database.createObjectStore(STORE_NAME, { keyPath: "key" });
-        store.createIndex("owner", "owner", { unique: false });
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("Could not open local project storage."));
-    request.onblocked = () => reject(new Error("Project storage is blocked by another open MemoryBook tab."));
-  });
-  return databasePromise;
+function responseProject(response, owner) {
+  const project = response.data?.project;
+  if (!project) throw new Error("The project service returned an invalid response.");
+  return projectShape(owner, project);
 }
 
-async function storeProject(project) {
-  const database = await openDatabase();
-  const transaction = database.transaction(STORE_NAME, "readwrite");
-  const completion = new Promise((resolve, reject) => {
-    transaction.oncomplete = resolve;
-    transaction.onerror = () => reject(transaction.error ?? new Error("Could not save the project locally."));
-    transaction.onabort = () => reject(transaction.error ?? new Error("The local project save was cancelled."));
+async function upload(owner, projectId, file, assetId) {
+  const body = new FormData();
+  body.append("file", file, file.name);
+  if (assetId) body.append("assetId", assetId);
+  const response = await apiRequest(`${projectPath(projectId)}/assets`, {
+    method: "POST",
+    body,
+    headers: { "If-Match": expectedVersion(owner, projectId) },
   });
-  transaction.objectStore(STORE_NAME).put({ ...project, key: `${project.owner}::${project.id}` });
-  await completion;
-  const ownerProjects = projectsByOwner.get(project.owner) ?? [];
-  projectsByOwner.set(project.owner, [project, ...ownerProjects.filter((item) => item.id !== project.id)]);
-}
-
-async function readProject(owner, projectId) {
-  const database = await openDatabase();
-  const record = await requestResult(database.transaction(STORE_NAME).objectStore(STORE_NAME).get(`${owner}::${projectId}`));
-  if (!record) return null;
-  const { key, ...project } = record;
-  return project;
+  if (Number.isInteger(response.data?.projectVersion)) {
+    projectVersions.set(versionKey(owner, projectId), response.data.projectVersion);
+  }
+  if (!response.data?.asset) throw new Error("The asset service returned an invalid response.");
+  return response.data.asset;
 }
 
 export const projectService = {
   async createProject(owner, selections) {
     const key = ownerKey(owner);
     if (!selections?.title?.trim()) throw new Error("Add a title before creating your book.");
-    await new Promise((resolve) => window.setTimeout(resolve, 180));
-    const project = {
-      ...selections,
-      id: `created-${Date.now()}-${nextProjectNumber++}`,
-      owner: key,
-      title: selections.title.trim(),
-      status: "draft",
-      progress: selections.photos?.length ? 12 : 5,
-      updated: "Just now",
-      createdAt: new Date().toISOString(),
-      image: selections.photos?.[0]?.preview || selections.template?.image || selections.book?.image || "https://images.unsplash.com/photo-1507842217343-583bb7270b66?auto=format&fit=crop&w=900&q=85",
-      category: selections.template?.category || "Custom",
-      pages: `${selections.pageCount} pages`,
-    };
-    project.document = createProjectDocument(project, selections);
-    await storeProject(project);
+    const { data } = await apiRequest("/projects", {
+      method: "POST",
+      body: {
+        title: selections.title.trim(),
+        pageCount: Number(selections.pageCount) || 24,
+        productId: databaseId(selections.book?.id),
+        templateId: databaseId(
+          selections.template?.designTemplateId !== undefined
+            ? selections.template.designTemplateId
+            : selections.template?.id,
+        ),
+      },
+    });
+    let project = responseProject({ data }, key);
+    const uploadedAssets = [];
+    for (const photo of selections.photos ?? []) {
+      if (!photo.file) throw new Error(`The original image for "${photo.name}" is unavailable. Please select it again.`);
+      const asset = await upload(key, project.id, photo.file, photo.id);
+      uploadedAssets.push(asset);
+    }
+    const document = project.document
+      ? {
+        ...structuredClone(project.document),
+        metadata: {
+          ...project.document.metadata,
+          title: project.title,
+          updatedAt: new Date().toISOString(),
+        },
+        assets: [...project.document.assets, ...uploadedAssets],
+      }
+      : buildProjectDocument(project, selections, uploadedAssets);
+    const saved = await apiRequest(projectPath(project.id), {
+      method: "PATCH",
+      body: { title: document.metadata.title, pageCount: document.book.pageCount, document },
+      headers: { "If-Match": expectedVersion(key, project.id) },
+    });
+    project = responseProject(saved, key);
     return project;
   },
 
-  async listProjects(owner) {
+  async listProjects(owner, filters = {}) {
     const key = ownerKey(owner);
-    const database = await openDatabase();
-    const records = await requestResult(database.transaction(STORE_NAME).objectStore(STORE_NAME).index("owner").getAll(key));
-    const projects = records.map(({ key: recordKey, ...project }) => project);
-    projectsByOwner.set(key, projects);
-    return projects;
+    const params = new URLSearchParams();
+    for (const [name, value] of Object.entries(filters)) {
+      if (value !== undefined && value !== null && value !== "") params.set(name, String(value));
+    }
+    const suffix = params.size ? `?${params.toString()}` : "";
+    const { data } = await apiRequest(`/projects${suffix}`);
+    if (!Array.isArray(data?.items)) throw new Error("The project service returned an invalid project list.");
+    return data.items.map((item) => projectShape(key, item));
   },
 
   async getProject(owner, projectId) {
     const key = ownerKey(owner);
-    const cached = projectsByOwner.get(key)?.find((project) => project.id === projectId);
-    return cached ?? readProject(key, projectId);
+    const { data } = await apiRequest(projectPath(projectId));
+    return responseProject({ data }, key);
   },
 
   async saveDocument(owner, projectId, document) {
     const key = ownerKey(owner);
-    const project = await readProject(key, projectId);
-    if (!project) throw new Error("This project could not be found in your local workspace.");
-    if (document.schemaVersion !== 1 || document.metadata?.id !== projectId || document.metadata?.owner !== key) {
+    if (document.schemaVersion !== 1 || document.metadata?.id !== projectId || document.metadata?.owner?.toLowerCase() !== key) {
       throw new Error("The project document is invalid or belongs to another account.");
     }
-    const saved = {
-      ...project,
-      title: document.metadata.title,
-      document,
-      updated: "Just now",
-      pages: `${document.book.pageCount} pages`,
-      image: document.assets.find((asset) => asset.id === document.pages[0]?.elements?.find((element) => element.type === "image")?.assetId)?.src ?? project.image,
-    };
-    await storeProject(saved);
-    return saved;
+    const { data } = await apiRequest(projectPath(projectId), {
+      method: "PATCH",
+      body: { title: document.metadata.title, pageCount: document.book.pageCount, document },
+      headers: { "If-Match": expectedVersion(key, projectId) },
+    });
+    return responseProject({ data }, key);
   },
 
   saveRecovery(owner, projectId, document) {
-    const key = `${ownerKey(owner)}::${projectId}`;
+    const key = ownerKey(owner);
     const recovery = {
       ...document,
       assets: document.assets.map(({ src, ...asset }) => asset),
@@ -208,16 +223,15 @@ export const projectService = {
       })),
     };
     try {
-      localStorage.setItem(`memorybook-recovery:${key}`, JSON.stringify(recovery));
+      localStorage.setItem(recoveryKey(key, projectId), JSON.stringify(recovery));
     } catch (failure) {
       throw new Error(failure instanceof Error ? `Could not keep a local recovery copy: ${failure.message}` : "Could not keep a local recovery copy.");
     }
   },
 
   getRecovery(owner, projectId) {
-    const key = `${ownerKey(owner)}::${projectId}`;
     try {
-      const value = localStorage.getItem(`memorybook-recovery:${key}`);
+      const value = localStorage.getItem(recoveryKey(owner, projectId));
       return value ? JSON.parse(value) : null;
     } catch (failure) {
       throw new Error(failure instanceof Error ? `Could not read the local recovery copy: ${failure.message}` : "Could not read the local recovery copy.");
@@ -225,55 +239,102 @@ export const projectService = {
   },
 
   clearRecovery(owner, projectId) {
-    const key = `${ownerKey(owner)}::${projectId}`;
-    localStorage.removeItem(`memorybook-recovery:${key}`);
+    localStorage.removeItem(recoveryKey(owner, projectId));
   },
 
   async updateProject(owner, projectId, changes) {
-    const project = await this.getProject(owner, projectId);
-    if (!project) return null;
-    const updated = { ...project, ...changes };
-    if (updated.document && changes.title) {
-      updated.document = { ...updated.document, metadata: { ...updated.document.metadata, title: changes.title } };
-    }
-    await storeProject(updated);
-    return updated;
+    const key = ownerKey(owner);
+    const body = typeof changes === "string" ? { title: changes } : changes;
+    const { data } = await apiRequest(projectPath(projectId), {
+      method: "PATCH",
+      body,
+      headers: { "If-Match": expectedVersion(key, projectId) },
+    });
+    return responseProject({ data }, key);
   },
 
   async deleteProject(owner, projectId) {
     const key = ownerKey(owner);
-    const database = await openDatabase();
-    const transaction = database.transaction(STORE_NAME, "readwrite");
-    const completion = new Promise((resolve, reject) => {
-      transaction.oncomplete = resolve;
-      transaction.onerror = () => reject(transaction.error ?? new Error("Could not remove the project."));
-      transaction.onabort = () => reject(transaction.error ?? new Error("Project deletion was cancelled."));
+    await apiRequest(projectPath(projectId), {
+      method: "DELETE",
+      headers: { "If-Match": expectedVersion(key, projectId) },
     });
-    transaction.objectStore(STORE_NAME).delete(`${key}::${projectId}`);
-    await completion;
-    projectsByOwner.set(key, (projectsByOwner.get(key) ?? []).filter((project) => project.id !== projectId));
+    projectVersions.delete(versionKey(key, projectId));
   },
 
   async duplicateProject(owner, projectId) {
-    const project = await this.getProject(owner, projectId);
-    if (!project) return null;
     const key = ownerKey(owner);
-    const id = `created-${Date.now()}-${nextProjectNumber++}`;
-    const copy = {
-      ...project,
-      id,
-      title: `${project.title} (copy)`,
-      createdAt: new Date().toISOString(),
-      updated: "Just now",
-      document: {
-        ...project.document,
-        metadata: { ...project.document.metadata, id, title: `${project.title} (copy)`, createdAt: new Date().toISOString() },
-        pageOrder: project.document.pages.map(() => crypto.randomUUID()),
-        pages: project.document.pages.map((page) => ({ ...page, id: crypto.randomUUID(), elements: page.elements.map((element) => ({ ...element, id: crypto.randomUUID() })) })),
-      },
-    };
-    copy.document.pageOrder = copy.document.pages.map((page) => page.id);
-    await storeProject({ ...copy, owner: key });
-    return copy;
+    const { data } = await apiRequest(`${projectPath(projectId)}/duplicate`, { method: "POST" });
+    return responseProject({ data }, key);
+  },
+
+  async uploadAsset(owner, projectId, file) {
+    return upload(ownerKey(owner), projectId, file);
+  },
+
+  async listAssets(owner, projectId) {
+    ownerKey(owner);
+    const { data } = await apiRequest(`${projectPath(projectId)}/assets`);
+    return data.items;
+  },
+
+  async deleteAsset(owner, projectId, assetId) {
+    const key = ownerKey(owner);
+    const { data } = await apiRequest(`${projectPath(projectId)}/assets/${encodeURIComponent(assetId)}`, {
+      method: "DELETE",
+      headers: { "If-Match": expectedVersion(key, projectId) },
+    });
+    if (Number.isInteger(data?.projectVersion)) projectVersions.set(versionKey(key, projectId), data.projectVersion);
+  },
+
+  async createPage(owner, projectId, page) {
+    return this.savePage(owner, projectId, `/pages`, "POST", page);
+  },
+
+  async updatePage(owner, projectId, pageId, page) {
+    return this.savePage(owner, projectId, `/pages/${encodeURIComponent(pageId)}`, "PATCH", page);
+  },
+
+  async savePage(owner, projectId, suffix, method, page) {
+    const key = ownerKey(owner);
+    const { data } = await apiRequest(`${projectPath(projectId)}${suffix}`, {
+      method,
+      body: page,
+      headers: { "If-Match": expectedVersion(key, projectId) },
+    });
+    return responseProject({ data }, key);
+  },
+
+  async deletePage(owner, projectId, pageId) {
+    const key = ownerKey(owner);
+    const { data } = await apiRequest(`${projectPath(projectId)}/pages/${encodeURIComponent(pageId)}`, {
+      method: "DELETE",
+      headers: { "If-Match": expectedVersion(key, projectId) },
+    });
+    return responseProject({ data }, key);
+  },
+
+  async createRevision(owner, projectId) {
+    const key = ownerKey(owner);
+    const { data } = await apiRequest(`${projectPath(projectId)}/revisions`, {
+      method: "POST",
+      headers: { "If-Match": expectedVersion(key, projectId) },
+    });
+    return data.revision;
+  },
+
+  async getRevision(owner, projectId, revisionId) {
+    ownerKey(owner);
+    const { data } = await apiRequest(`${projectPath(projectId)}/revisions/${encodeURIComponent(revisionId)}`);
+    return data.revision;
+  },
+
+  async restoreRevision(owner, projectId, revisionId) {
+    const key = ownerKey(owner);
+    const { data } = await apiRequest(`${projectPath(projectId)}/revisions/${encodeURIComponent(revisionId)}/restore`, {
+      method: "POST",
+      headers: { "If-Match": expectedVersion(key, projectId) },
+    });
+    return responseProject({ data }, key);
   },
 };

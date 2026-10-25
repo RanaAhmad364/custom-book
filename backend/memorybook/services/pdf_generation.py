@@ -240,7 +240,7 @@ def create_download_link(user_id: str, download_id: str, ip_address: str | None)
     if generated_file is None:
         raise ConflictError("The generated PDF is not ready for download.")
     storage = get_asset_storage()
-    url = storage.download_url(generated_file.storage_key)
+    url = storage.private_download_url(generated_file.storage_key)
     entitlement.download_count += 1
     db.session.add(DownloadHistory(
         entitlement_id=entitlement.id,

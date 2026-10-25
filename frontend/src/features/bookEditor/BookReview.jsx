@@ -16,7 +16,7 @@ function loadAssetDimensions(assets) {
   }))).then(Object.fromEntries);
 }
 
-export default function BookReview({ document, onClose, onGoToPage }) {
+export default function BookReview({ document, onClose, onGoToPage, adminMode = false }) {
   const [dimensions, setDimensions] = useState({});
   useEffect(() => {
     let mounted = true;
@@ -46,7 +46,7 @@ export default function BookReview({ document, onClose, onGoToPage }) {
             {issue.pageId ? <button type="button" onClick={() => onGoToPage(issue.pageId)}>Go to page <ArrowRight size={14} /></button> : null}
           </li>)}</ul>}
       </div>
-      <footer className="book-review-footer"><span>Based on the current saved book document. Final production output may vary.</span><div><button className="button button-outline" type="button" onClick={onClose}>Back to editor</button>{report.pdfReady ? <Link className="button button-outline" to={`/create/design/${document.metadata.id}/print`} onClick={onClose}>Order print <ArrowRight size={15} /></Link> : null}{report.pdfReady ? <Link className="button button-dark" to={`/create/design/${document.metadata.id}/pdf`} onClick={onClose}>Purchase PDF <ArrowRight size={15} /></Link> : null}</div></footer>
+      <footer className="book-review-footer"><span>{adminMode ? "Reviewing the admin master design. Publishing is managed from the book catalog." : "Based on the current saved book document. Final production output may vary."}</span><div><button className="button button-outline" type="button" onClick={onClose}>Back to editor</button>{!adminMode && report.pdfReady ? <Link className="button button-outline" to={`/create/design/${document.metadata.id}/print`} onClick={onClose}>Order print <ArrowRight size={15} /></Link> : null}{!adminMode && report.pdfReady ? <Link className="button button-dark" to={`/create/design/${document.metadata.id}/pdf`} onClick={onClose}>Purchase PDF <ArrowRight size={15} /></Link> : null}</div></footer>
     </section>
   </div>;
 }

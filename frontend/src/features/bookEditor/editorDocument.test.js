@@ -24,6 +24,7 @@ test("page ordering moves pages to the requested position without changing ident
   const order = ["cover", "one", "two", "three", "four"];
   assert.deepEqual(reorderPageIds(order, "one", "three"), ["cover", "two", "one", "three", "four"]);
   assert.deepEqual(reorderPageIds(order, "four", "one"), ["cover", "four", "one", "two", "three"]);
+  assert.deepEqual(reorderPageIds(order, "three", null), ["cover", "one", "two", "four", "three"]);
   assert.deepEqual(reorderPageIds(order, "missing", "one"), order);
 });
 

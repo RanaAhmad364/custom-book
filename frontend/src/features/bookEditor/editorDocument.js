@@ -154,10 +154,10 @@ export function formatBytes(bytes) {
 
 export function reorderPageIds(pageOrder, movedId, beforeId) {
   const from = pageOrder.indexOf(movedId);
-  if (from < 0 || !beforeId || movedId === beforeId) return pageOrder;
+  if (from < 0 || movedId === beforeId) return pageOrder;
   const reordered = [...pageOrder];
   reordered.splice(from, 1);
-  const target = reordered.indexOf(beforeId);
+  const target = beforeId == null ? reordered.length : reordered.indexOf(beforeId);
   if (target < 0) return pageOrder;
   reordered.splice(target, 0, movedId);
   return reordered;

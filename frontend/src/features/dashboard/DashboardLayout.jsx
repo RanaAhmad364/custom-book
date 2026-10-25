@@ -10,7 +10,7 @@ const navigation = [
 ];
 
 function DashboardFrame() {
-  const { data, storageError } = useDashboard();
+  const { data, isLoading, storageError } = useDashboard();
   const { logout } = useAuth();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -31,9 +31,8 @@ function DashboardFrame() {
         <div className="dashboard-sidebar-bottom"><p>Made for the moments that matter.</p><button type="button" onClick={() => { logout(); navigate("/session-expired", { replace: true }); }}>Log out</button></div>
       </aside>
       <section className="dashboard-main-content">
-        <div className="dashboard-demo-banner"><span>Preview workspace</span><p>Projects and sample workspace activity are demo-only. Paid PDF orders and download access are retrieved from the PDF service.</p></div>
-        {storageError ? <div className="dashboard-demo-banner dashboard-storage-error" role="alert"><span>Local storage issue</span><p>{storageError}</p></div> : null}
-        <Outlet />
+        {storageError ? <div className="dashboard-data-banner dashboard-storage-error" role="alert"><span>Dashboard update</span><p>{storageError}</p></div> : null}
+        {isLoading ? <p className="dashboard-info-note" role="status">Loading your account data…</p> : <Outlet />}
       </section>
     </div>
   </main>;

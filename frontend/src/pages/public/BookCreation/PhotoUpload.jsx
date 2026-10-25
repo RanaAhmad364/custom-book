@@ -9,7 +9,7 @@ import { CreationFooter, CreationHeading, CreationShell } from "./CreationShell.
 const MAX_FILE_SIZE = 15 * 1024 * 1024;
 const MAX_TOTAL_SIZE = 100 * 1024 * 1024;
 const MAX_PHOTOS = 40;
-const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const delay = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
 function readDataUrl(file) {
@@ -144,7 +144,17 @@ export default function PhotoUpload() {
         startingLayout: selections.startingLayout,
         book: selections.selectedBook,
         template: selections.selectedTemplate,
-        photos: selections.photos.filter((photo) => photo.status === "ready").map(({ id, name, mimeType, size, preview, quality, dimensions, warning }) => ({ id, name, mimeType, size, preview, quality, dimensions, warning })),
+        photos: selections.photos.filter((photo) => photo.status === "ready").map(({ id, name, mimeType, size, preview, quality, dimensions, warning }) => ({
+          id,
+          name,
+          mimeType,
+          size,
+          preview,
+          quality,
+          dimensions,
+          warning,
+          file: fileById.current.get(id),
+        })),
       });
       reset();
       navigate(`/create/design/${project.id}`, { state: { project } });
@@ -157,9 +167,9 @@ export default function PhotoUpload() {
 
   return <CreationShell current="/create/photos">
     <CreationHeading eyebrow="Gather your moments" title={<>Bring your photos<br /><em>into the story.</em></>} description="Add photos now or continue with an empty book. You can always bring in more moments later." />
-    <div className="creation-upload-preview-note"><CloudUpload size={15} /> Upload progress is simulated in this preview. Selected images stay in this browser session only.</div>
+    <div className="creation-upload-preview-note"><CloudUpload size={15} /> Photos upload securely to your project when you start designing.</div>
     <div className={`creation-dropzone${dragging ? " is-dragging" : ""}`} role="button" tabIndex={0} onClick={() => inputRef.current?.click()} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); inputRef.current?.click(); } }} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files); }}>
-      <input ref={inputRef} className="creation-visually-hidden" type="file" accept="image/*" multiple onChange={(event) => { addFiles(event.target.files); event.target.value = ""; }} />
+      <input ref={inputRef} className="creation-visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={(event) => { addFiles(event.target.files); event.target.value = ""; }} />
       <span className="creation-drop-icon"><CloudUpload size={25} /></span><strong>Drop your photos here</strong><p>or choose from your device</p><span className="button button-outline">Choose photos</span><small>JPG, PNG, HEIC, WebP · up to 15 MB each · up to {MAX_PHOTOS} photos</small>
     </div>
     {error ? <p className="creation-form-error" role="alert">{error}</p> : null}

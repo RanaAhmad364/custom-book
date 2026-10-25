@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ArrowLeft, ArrowRight, BadgeCheck, BookOpen, Check, CircleAlert, Clock3, LoaderCircle, MapPin, PackageCheck, Printer, RefreshCw, ShieldCheck, Truck } from "lucide-react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../../../features/auth/AuthContext.jsx";
+import { PaymentMethodSelect } from "../../../components/commerce/PaymentMethodSelect.jsx";
 import { printOrderService } from "../../../services/printOrderService.js";
 import { projectService } from "../../../services/projectService.js";
 import "./PrintOrder.css";
@@ -163,6 +164,10 @@ export function PrintOrderFlow() {
   const [quote, setQuote] = useState(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteError, setQuoteError] = useState("");
+  const [paymentMethods, setPaymentMethods] = useState([]);
+  const [methodsLoading, setMethodsLoading] = useState(false);
+  const [methodsError, setMethodsError] = useState("");
+  const [selectedMethod, setSelectedMethod] = useState(null);
   const [submitError, setSubmitError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const locationReady = Boolean(
@@ -211,6 +216,31 @@ export function PrintOrderFlow() {
     return () => { active = false; window.clearTimeout(timer); };
   }, [configuration, locationReady, project, projectId]);
 
+  useEffect(() => {
+    let active = true;
+    setPaymentMethods([]);
+    setMethodsError("");
+    if (!quote) {
+      setMethodsLoading(false);
+      return () => { active = false; };
+    }
+    setMethodsLoading(true);
+    printOrderService.getPaymentMethods(quote.currency).then((methods) => {
+      if (active) setPaymentMethods(methods);
+    }).catch((failure) => {
+      if (active) setMethodsError(failure instanceof Error ? failure.message : "Payment methods could not be loaded.");
+    }).finally(() => {
+      if (active) setMethodsLoading(false);
+    });
+    return () => { active = false; };
+  }, [quote]);
+
+  useEffect(() => {
+    if (paymentMethods.length && !paymentMethods.some((method) => method.id === selectedMethod?.id)) {
+      setSelectedMethod(paymentMethods[0]);
+    }
+  }, [paymentMethods, selectedMethod]);
+
   const updateConfiguration = useCallback((changes) => {
     setConfiguration((current) => ({ ...current, ...changes }));
   }, []);
@@ -230,6 +260,10 @@ export function PrintOrderFlow() {
       setSubmitError("Wait for a current server quote before continuing.");
       return;
     }
+    if (!selectedMethod) {
+      setSubmitError("No verified payment method is currently available for this currency.");
+      return;
+    }
     setSubmitting(true);
     try {
       const order = await printOrderService.createOrder(projectId, {
@@ -237,7 +271,7 @@ export function PrintOrderFlow() {
         paper: configuration.paper,
         cover: configuration.cover,
         quantity: configuration.quantity,
-      }, configuration.address, quote.id);
+      }, configuration.address, quote.id, selectedMethod);
       if (order.checkoutUrl) {
         window.location.assign(order.checkoutUrl);
         return;
@@ -287,13 +321,13 @@ export function PrintOrderFlow() {
               <label>City<input required autoComplete="address-level2" value={configuration.address.city} onChange={(event) => updateAddress("city", event.target.value)} /></label>
               <label>State / region<input required autoComplete="address-level1" value={configuration.address.region} onChange={(event) => updateAddress("region", event.target.value)} /></label>
               <label>Postal code<input required autoComplete="postal-code" value={configuration.address.postalCode} onChange={(event) => updateAddress("postalCode", event.target.value)} /></label>
-              <label>Country<select required autoComplete="country" value={configuration.address.country} onChange={(event) => updateAddress("country", event.target.value)}><option value="">Choose country</option><option value="US">United States</option><option value="CA">Canada</option><option value="GB">United Kingdom</option><option value="AU">Australia</option><option value="OTHER">Other</option></select></label>
+              <label>Country<select required autoComplete="country" value={configuration.address.country} onChange={(event) => updateAddress("country", event.target.value)}><option value="">Choose country</option><option value="PK">Pakistan</option><option value="US">United States</option><option value="CA">Canada</option><option value="GB">United Kingdom</option><option value="AU">Australia</option><option value="OTHER">Other</option></select></label>
             </div><button className="button button-dark print-address-submit" type="submit">Save address and review <ArrowRight size={15} /></button>
           </form> : null}
 
           {step === "checkout" ? <><h2>Print order summary</h2><div className="print-choice-summary"><div><span>Tier</span><strong>{configuration.tier.toUpperCase()}</strong></div><div><span>Paper</span><strong>{paperOptions.find((item) => item.id === configuration.paper)?.title}</strong></div><div><span>Cover</span><strong>{coverOptions.find((item) => item.id === configuration.cover)?.title}</strong></div><div><span>Quantity</span><strong>{configuration.quantity}</strong></div><div><span>Delivery to</span><strong>{configuration.address.fullName}<br />{configuration.address.line1}, {configuration.address.city} {configuration.address.postalCode}</strong></div></div><button className="print-refresh-quote" type="button" onClick={() => updateConfiguration({})} disabled={quoteLoading}><RefreshCw size={14} /> Refresh server quote</button></> : null}
 
-          {step === "checkout" ? <QuoteBreakdown quote={quote} /> : null}
+          {step === "checkout" ? <><QuoteBreakdown quote={quote} /><PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading} />{methodsError ? <p className="print-inline-error" role="alert">{methodsError}</p> : null}</> : null}
           {quoteLoading ? <div className="print-message"><LoaderCircle className="print-spin" size={18} /> Requesting a current quote from the printing service…</div> : null}
           {quoteError ? <div className="print-message print-error" role="alert"><CircleAlert size={18} /><span>{quoteError}</span><button className="button button-outline" type="button" onClick={() => updateConfiguration({})}><RefreshCw size={14} /> Try quote again</button></div> : null}
           {step !== "checkout" && step !== "shipping" ? <QuoteBreakdown quote={quote} compact /> : null}
@@ -301,7 +335,7 @@ export function PrintOrderFlow() {
 
           <div className="print-step-actions">
             {stepIndex > 0 ? <Link className="button button-outline" to={`/create/design/${encodeURIComponent(projectId)}/print${previousStep.id === "print" ? "" : `/${previousStep.id}`}`}><ArrowLeft size={15} /> Back</Link> : <Link className="button button-outline" to={`/create/design/${encodeURIComponent(projectId)}`}><ArrowLeft size={15} /> Back to editor</Link>}
-            {step === "checkout" ? <button className="button button-dark" type="button" onClick={placeOrder} disabled={submitting || quoteLoading || !quote}>{submitting ? <><LoaderCircle className="print-spin" size={16} /> Starting secure checkout…</> : <>Continue to payment <ArrowRight size={15} /></>}</button>
+            {step === "checkout" ? <button className="button button-dark" type="button" onClick={placeOrder} disabled={submitting || quoteLoading || methodsLoading || !quote || !selectedMethod}>{submitting ? <><LoaderCircle className="print-spin" size={16} /> Starting secure checkout…</> : <>Continue to payment <ArrowRight size={15} /></>}</button>
               : step === "shipping" ? null
                 : <Link className="button button-dark" to={`/create/design/${encodeURIComponent(projectId)}/print/${nextStep.id}`}>Continue <ArrowRight size={15} /></Link>}
           </div>

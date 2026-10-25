@@ -12,6 +12,7 @@ from sqlalchemy import delete, func, select
 from memorybook.errors import ConflictError, ServiceUnavailableError, ValidationError
 from memorybook.extensions import db
 from memorybook.integrations.asset_storage import get_asset_storage
+from memorybook.integrations.image_validation import validate_and_sanitize_image
 from memorybook.models import (
     BookCategory,
     BookCollection,
@@ -42,7 +43,12 @@ def _catalog_asset_url(value: str | None) -> str | None:
         return None
     if urlparse(value).scheme in {"http", "https"}:
         return value
-    return get_asset_storage().download_url(value)
+    storage = get_asset_storage()
+    if value.startswith("catalog/"):
+        return storage.public_download_url(value)
+    if value.startswith("admin-design/"):
+        return storage.private_download_url(value)
+    return storage.download_url(value)
 
 
 def serialize_category(category: BookCategory) -> dict:
@@ -50,7 +56,16 @@ def serialize_category(category: BookCategory) -> dict:
         select(BookProduct).where(BookProduct.category_id == category.id, BookProduct.is_active.is_(True))
         .order_by(BookProduct.is_featured.desc(), BookProduct.title)
     )
-    image = _catalog_asset_url(category.hero_asset_key or (first_book.cover_asset_key if first_book else None))
+    image_key = category.hero_asset_key
+    if image_key and not (
+        image_key.startswith(("catalog/", "http://", "https://"))
+    ):
+        image_key = None
+    if image_key is None and first_book:
+        image_key = first_book.cover_asset_key
+    if image_key and not image_key.startswith(("catalog/", "http://", "https://")):
+        image_key = None
+    image = _catalog_asset_url(image_key)
     return {
         "id": category.id,
         "name": category.name,
@@ -66,6 +81,7 @@ def serialize_category(category: BookCategory) -> dict:
 
 
 def serialize_collection(collection: BookCollection) -> dict:
+    category = db.session.get(BookCategory, collection.category_id) if collection.category_id else None
     return {
         "id": collection.id,
         "name": collection.name,
@@ -77,6 +93,9 @@ def serialize_collection(collection: BookCollection) -> dict:
         "eyebrow": collection.eyebrow or "A thoughtful collection",
         "recommendedLayouts": collection.recommended_layouts or [],
         "relatedCategories": collection.related_categories or [],
+        "categoryId": collection.category_id,
+        "categoryName": category.name if category else None,
+        "categorySlug": category.slug if category else None,
         "sortOrder": collection.sort_order,
     }
 
@@ -84,6 +103,8 @@ def serialize_collection(collection: BookCollection) -> dict:
 def serialize_book(book: BookProduct, *, include_gallery: bool = False) -> dict:
     category = db.session.get(BookCategory, book.category_id)
     collection = db.session.get(BookCollection, book.collection_id) if book.collection_id else None
+    if collection is not None and (collection.deleted_at is not None or not collection.is_active):
+        collection = None
     variant_cover_ids = db.session.scalars(
         select(BookVariant.cover_type_id).where(BookVariant.product_id == book.id, BookVariant.is_active.is_(True))
     ).all()
@@ -210,7 +231,7 @@ def serialize_template(
         serialized_assets = []
         for asset in design.get("assets", []):
             asset_key = asset.get("assetKey")
-            if not isinstance(asset_key, str) or not asset_key.startswith("catalog/"):
+            if not isinstance(asset_key, str) or not asset_key.startswith(("catalog/", "admin-design/")):
                 continue
             asset_url = _catalog_asset_url(asset_key)
             asset_urls[asset.get("id")] = asset_url
@@ -242,7 +263,7 @@ def list_collections() -> list[dict]:
 
 
 def list_templates(page: int, per_page: int, search: str, category: str) -> tuple[list[dict], int]:
-    query = select(BookTemplate).where(BookTemplate.is_active.is_(True), BookTemplate.deleted_at.is_(None))
+    query = CatalogRepository.templates_query()
     if search:
         query = query.where(BookTemplate.name.ilike(f"%{search}%"))
     if category:
@@ -250,23 +271,19 @@ def list_templates(page: int, per_page: int, search: str, category: str) -> tupl
             (BookCategory.slug == category) | BookCategory.name.ilike(category)
         )
     total = db.session.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
-    templates = db.session.scalars(query.order_by(BookTemplate.name).offset((page - 1) * per_page).limit(per_page)).all()
+    templates = db.session.scalars(query.offset((page - 1) * per_page).limit(per_page)).all()
     return [serialize_template(template) for template in templates], total
 
 
 def get_template(template_id: str) -> dict | None:
-    template = db.session.scalar(
-        select(BookTemplate).where(
-            (BookTemplate.id == template_id) | (BookTemplate.slug == template_id),
-            BookTemplate.is_active.is_(True),
-            BookTemplate.deleted_at.is_(None),
-        )
-    )
+    template = db.session.scalar(CatalogRepository.templates_query().where(
+        (BookTemplate.id == template_id) | (BookTemplate.slug == template_id),
+    ))
     return serialize_template(template, include_pages=True) if template else None
 
 
 def _asset_src(asset: ProjectAsset) -> str:
-    return get_asset_storage().download_url(asset.storage_key)
+    return get_asset_storage().private_download_url(asset.storage_key)
 
 
 def _stored_document(document: dict, project_id: str) -> dict:
@@ -426,6 +443,31 @@ def _copy_published_design(template: BookTemplate, project: UserProject, owner: 
     document = copy.deepcopy(template.published_design_document)
     if not document:
         return document
+    page_id_map = {
+        page["id"]: str(uuid4())
+        for page in document.get("pages", [])
+        if isinstance(page, dict) and isinstance(page.get("id"), str)
+    }
+    element_id_map = {
+        element["id"]: str(uuid4())
+        for page in document.get("pages", [])
+        if isinstance(page, dict)
+        for element in page.get("elements", [])
+        if isinstance(element, dict) and isinstance(element.get("id"), str)
+    }
+    for page in document.get("pages", []):
+        if page.get("id") in page_id_map:
+            page["id"] = page_id_map[page["id"]]
+        for element in page.get("elements", []):
+            if element.get("id") in element_id_map:
+                element["id"] = element_id_map[element["id"]]
+    document["pageOrder"] = [
+        page_id_map.get(page_id, page_id)
+        for page_id in document.get("pageOrder", [])
+    ]
+    cover_page_id = (document.get("cover") or {}).get("pageId")
+    if cover_page_id in page_id_map:
+        document["cover"]["pageId"] = page_id_map[cover_page_id]
     storage = get_asset_storage() if document.get("assets") else None
     copied_keys = []
     asset_id_map = {}
@@ -489,22 +531,63 @@ def _copy_published_design(template: BookTemplate, project: UserProject, owner: 
 
 
 def create_project(owner: User, data: dict) -> UserProject:
-    if data["product_id"] and not db.session.scalar(
-        select(BookProduct.id).where(BookProduct.id == data["product_id"], BookProduct.is_active.is_(True))
-    ):
-        raise ValidationError("The selected book product is unavailable.", {"productId": "not_found"})
-    if data["template_id"] and not db.session.scalar(
-        select(BookTemplate.id).where(
-            BookTemplate.id == data["template_id"],
-            BookTemplate.is_active.is_(True),
-            BookTemplate.deleted_at.is_(None),
+    template = db.session.get(BookTemplate, data["template_id"]) if data["template_id"] else None
+    product_id = data["product_id"]
+    if product_id and not data["template_id"]:
+        raise ValidationError(
+            "The selected book does not have an eligible published design.",
+            {"templateId": "required"},
+        )
+    if product_id and not db.session.scalar(
+        select(BookProduct.id)
+        .join(BookCategory, BookProduct.category_id == BookCategory.id)
+        .where(
+            BookProduct.id == product_id,
+            BookProduct.is_active.is_(True),
+            BookProduct.deleted_at.is_(None),
+            BookCategory.is_active.is_(True),
+            BookCategory.deleted_at.is_(None),
         )
     ):
+        raise ValidationError("The selected book product is unavailable.", {"productId": "not_found"})
+    if data["template_id"] and (
+        template is None
+        or template.deleted_at is not None
+        or not template.is_active
+        or template.product_id is not None and template.published_design_document is None
+    ):
         raise ValidationError("The selected template is unavailable.", {"templateId": "not_found"})
-    template = db.session.get(BookTemplate, data["template_id"]) if data["template_id"] else None
+    if template and template.product_id:
+        template_product = db.session.get(BookProduct, template.product_id)
+        if (
+            template_product is None
+            or template_product.deleted_at is not None
+            or not template_product.is_active
+            or not db.session.scalar(
+                select(BookCategory.id).where(
+                    BookCategory.id == template_product.category_id,
+                    BookCategory.is_active.is_(True),
+                    BookCategory.deleted_at.is_(None),
+                )
+            )
+        ):
+            raise ValidationError("The selected template is unavailable.", {"templateId": "not_found"})
+        if product_id and product_id != template_product.id:
+            raise ValidationError("The selected template does not belong to the selected product.", {"templateId": "product_mismatch"})
+        product_id = template_product.id
+    elif product_id:
+        raise ValidationError(
+            "Choose the published design associated with this book.",
+            {"templateId": "product_mismatch"},
+        )
+    if product_id and (template is None or template.published_design_document is None):
+        raise ValidationError(
+            "The selected book does not have an eligible published design.",
+            {"templateId": "unavailable"},
+        )
     project = UserProject(
         user_id=owner.id,
-        product_id=data["product_id"],
+        product_id=product_id,
         template_id=data["template_id"],
         template_version=(
             (template.published_version or template.version) if template else None
@@ -569,22 +652,35 @@ def duplicate_project(source: UserProject, owner: User) -> UserProject:
         select(ProjectAsset).where(ProjectAsset.project_id == source.id)
     ).all()
     storage = get_asset_storage() if source_assets else None
-    for asset in source_assets:
-        new_asset_id = str(uuid4())
-        asset_id_map[asset.id] = new_asset_id
-        target_key = f"projects/{owner.id}/{duplicate.id}/{new_asset_id}"
-        storage.copy(asset.storage_key, target_key)
-        db.session.add(ProjectAsset(
-            id=new_asset_id,
-            project_id=duplicate.id,
-            storage_key=target_key,
-            mime_type=asset.mime_type,
-            byte_size=asset.byte_size,
-            checksum_sha256=asset.checksum_sha256,
-            original_filename=asset.original_filename,
-            width_px=asset.width_px,
-            height_px=asset.height_px,
-        ))
+    copied_keys = []
+    try:
+        for asset in source_assets:
+            new_asset_id = str(uuid4())
+            asset_id_map[asset.id] = new_asset_id
+            target_key = f"projects/{owner.id}/{duplicate.id}/{new_asset_id}"
+            storage.copy(asset.storage_key, target_key)
+            copied_keys.append(target_key)
+            db.session.add(ProjectAsset(
+                id=new_asset_id,
+                project_id=duplicate.id,
+                storage_key=target_key,
+                mime_type=asset.mime_type,
+                byte_size=asset.byte_size,
+                checksum_sha256=asset.checksum_sha256,
+                original_filename=asset.original_filename,
+                width_px=asset.width_px,
+                height_px=asset.height_px,
+            ))
+    except ServiceUnavailableError:
+        for key in copied_keys:
+            try:
+                storage.delete(key)
+            except ServiceUnavailableError:
+                from flask import current_app
+
+                current_app.logger.exception("Duplicated project asset cleanup failed.")
+        db.session.rollback()
+        raise
     for page in document.get("pages", []):
         page["id"] = page_id_map[page["id"]]
         for element in page.get("elements", []):
@@ -677,25 +773,20 @@ def upload_asset(
     if len(asset_id) > 36 or db.session.get(ProjectAsset, asset_id) is not None:
         raise ValidationError("Asset ID is invalid or already in use.", {"id": "invalid"})
     storage_key = f"projects/{owner.id}/{project.id}/{asset_id}"
-    digest = hashlib.sha256()
-    file.stream.seek(0)
-    signature = file.stream.read(16)
-    file.stream.seek(0)
-    if not _valid_image_signature(metadata["mime_type"], signature):
-        raise ValidationError("The image contents do not match the selected file type.", {"file": "invalid_content"})
-    for block in iter(lambda: file.stream.read(1024 * 1024), b""):
-        digest.update(block)
-    file.stream.seek(0)
+    image, width, height = validate_and_sanitize_image(file.stream, metadata["mime_type"])
+    checksum = hashlib.sha256(image.getbuffer()).hexdigest()
     _next_version(project, expected_version)
-    storage.upload(storage_key, file.stream, metadata["mime_type"])
+    storage.upload(storage_key, image, metadata["mime_type"])
     asset = ProjectAsset(
         id=asset_id,
         project_id=project.id,
         storage_key=storage_key,
         mime_type=metadata["mime_type"],
-        byte_size=metadata["byte_size"],
-        checksum_sha256=digest.hexdigest(),
+        byte_size=image.getbuffer().nbytes,
+        checksum_sha256=checksum,
         original_filename=metadata["filename"],
+        width_px=width,
+        height_px=height,
     )
     db.session.add(asset)
     db.session.commit()
@@ -738,20 +829,6 @@ def delete_asset(project: UserProject, asset: ProjectAsset, expected_version: in
     get_asset_storage().delete(asset.storage_key)
     db.session.delete(asset)
     db.session.commit()
-
-
-def _valid_image_signature(mime_type: str, signature: bytes) -> bool:
-    if mime_type == "image/jpeg":
-        return signature.startswith(b"\xff\xd8\xff")
-    if mime_type == "image/png":
-        return signature.startswith(b"\x89PNG\r\n\x1a\n")
-    if mime_type == "image/webp":
-        return len(signature) >= 12 and signature[:4] == b"RIFF" and signature[8:12] == b"WEBP"
-    if mime_type in {"image/heic", "image/heif"}:
-        return len(signature) >= 12 and signature[4:8] == b"ftyp" and signature[8:12] in {
-            b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1", b"heif", b"heis",
-        }
-    return False
 
 
 def create_revision(project: UserProject, expected_version: int | None) -> ProjectRevision:

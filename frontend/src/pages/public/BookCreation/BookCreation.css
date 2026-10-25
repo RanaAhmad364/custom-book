@@ -329,10 +329,14 @@
   background: var(--sage);
 }
 
-.creation-template-image > img {
+.creation-template-image > img,
+.creation-template-image > .image-fallback {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.creation-template-image > img {
   transition: transform .25s ease;
 }
 

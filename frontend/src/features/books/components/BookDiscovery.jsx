@@ -72,21 +72,15 @@ export function BookDiscovery({
     maxPrice: searchParams.get("maxPrice") ?? "",
     sort: searchParams.get("sort") ?? "featured",
   };
-  const booksQuery = useQuery({
-    queryKey: ["books", "discovery", filters],
-    queryFn: () => catalogService.listBooks(filters),
-  });
   const pageSize = 6;
   const requestedPage = Math.max(1, Number(searchParams.get("page") ?? 1) || 1);
-  const totalPages = Math.max(
-    1,
-    Math.ceil((booksQuery.data?.length ?? 0) / pageSize),
-  );
+  const booksQuery = useQuery({
+    queryKey: ["books", "discovery", filters, requestedPage],
+    queryFn: () => catalogService.listBooksPage(filters, requestedPage, pageSize),
+  });
+  const totalPages = Math.max(1, booksQuery.data?.pagination?.totalPages ?? 1);
   const currentPage = Math.min(requestedPage, totalPages);
-  const visibleBooks = (booksQuery.data ?? []).slice(
-    (currentPage - 1) * pageSize,
-    currentPage * pageSize,
-  );
+  const visibleBooks = booksQuery.data?.items ?? [];
   const options = optionsQuery.data ?? {
     categories: [],
     occasions: [],
@@ -194,7 +188,7 @@ export function BookDiscovery({
               <p aria-live="polite">
                 {booksQuery.isPending
                   ? "Finding the right designs…"
-                  : `${booksQuery.data?.length ?? 0} designs to explore`}
+                  : `${booksQuery.data?.pagination?.totalItems ?? 0} designs to explore`}
               </p>
             </div>
             {activeFilterCount > 0 ? (

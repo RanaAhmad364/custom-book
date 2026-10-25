@@ -49,6 +49,7 @@ test("print order accepts only backend payment and production states", () => {
   assert.equal(order.checkoutUrl, null);
   assert.throws(() => normalizePrintOrder({ ...order, paymentStatus: "paid" }), /unsupported payment status/);
   assert.throws(() => normalizePrintOrder({ ...order, productionStatus: "printed" }), /unsupported production status/);
+  assert.equal(normalizePrintOrder({ ...order, paymentStatus: "refunded" }).paymentStatus, "refunded");
 });
 
 test("checkout links must use HTTPS or the current origin and are only exposed while pending", () => {

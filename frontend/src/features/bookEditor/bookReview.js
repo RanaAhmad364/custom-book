@@ -1,3 +1,5 @@
+import { getPageLabel } from "./pageNavigation.js";
+
 export const REQUIRED_BLEED_INCHES = 0.125;
 export const SAFE_MARGIN = 0.07;
 
@@ -20,7 +22,11 @@ export function analyzeBook(document, assetDimensions = {}) {
   const pageWidth = Number(bookSize.width) || 0;
   const pageHeight = Number(bookSize.height) || 0;
   const issues = [];
-  const addIssue = (issue) => issues.push({ ...issue, id: `${issue.code}:${issue.pageId ?? "book"}:${issues.length}` });
+  const addIssue = (issue) => {
+    const page = issue.pageId ? pagesById.get(issue.pageId) : null;
+    const pageLabel = page && page.type !== "cover" ? getPageLabel(page, document) : issue.pageLabel;
+    issues.push({ ...issue, pageLabel, id: `${issue.code}:${issue.pageId ?? "book"}:${issues.length}` });
+  };
 
   if (!coverPage || document?.cover?.pageId && document.cover.pageId !== coverPage.id) {
     addIssue({ code: "missing-cover", severity: "blocking", message: "The book cover is missing or no longer linked to its cover page." });

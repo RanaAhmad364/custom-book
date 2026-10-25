@@ -40,7 +40,7 @@ export default function Login() {
   return (
     <AuthPageShell eyebrow="Welcome back" title="Sign in to your account." description="Return to the stories and designs you’re working on.">
       {location.search.includes("expired") ? (
-        <p className="auth-message auth-message-info" role="status">Your demo session has ended. Please sign in again.</p>
+        <p className="auth-message auth-message-info" role="status">Your session has ended. Please sign in again.</p>
       ) : null}
       <form className="auth-form" onSubmit={submit}>
         <label className="auth-field" htmlFor="login-email">

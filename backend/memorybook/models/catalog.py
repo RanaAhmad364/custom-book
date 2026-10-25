@@ -30,6 +30,10 @@ class BookCollection(IdMixin, TimestampMixin, SoftDeleteMixin, db.Model):
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     slug: Mapped[str] = mapped_column(String(180), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    category_id: Mapped[str | None] = mapped_column(
+        ForeignKey("book_categories.id", ondelete="RESTRICT"),
+        index=True,
+    )
     hero_asset_key: Mapped[str | None] = mapped_column(String(1024))
     eyebrow: Mapped[str | None] = mapped_column(String(120))
     recommended_layouts: Mapped[list | None] = mapped_column(db.JSON)

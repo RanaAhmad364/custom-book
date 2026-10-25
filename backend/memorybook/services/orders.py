@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -120,36 +120,58 @@ def create_print_quote(
             PaperType.is_active.is_(True),
         )
     ).all()
-    variant = next(
-        (
-            (candidate, size, cover, paper)
-            for candidate, size, cover, paper in variant_row
-            if abs(Decimal(size.width_mm) - width_mm) <= Decimal("0.5")
-            and abs(Decimal(size.height_mm) - height_mm) <= Decimal("0.5")
-            and _matches_choice(cover.name, config["cover"])
-            and _matches_choice(paper.name, config["paper"])
-        ),
-        None,
-    )
+    matching_variants = [
+        (candidate, size, cover, paper)
+        for candidate, size, cover, paper in variant_row
+        if abs(Decimal(size.width_mm) - width_mm) <= Decimal("0.5")
+        and abs(Decimal(size.height_mm) - height_mm) <= Decimal("0.5")
+        and _matches_choice(cover.name, config["cover"])
+        and _matches_choice(paper.name, config["paper"])
+    ]
+    if len(matching_variants) > 1:
+        raise ConflictError("The selected print configuration matches multiple variants. Contact support.")
+    variant = matching_variants[0] if matching_variants else None
     if variant is None:
         raise ConflictError("The selected size, cover, and paper combination is not configured for this book.")
     selected_variant, size, cover, paper = variant
+    product_metadata = product.admin_metadata or {}
+    for field, option_id in (
+        ("sizeOptions", selected_variant.size_id),
+        ("coverOptions", selected_variant.cover_type_id),
+        ("paperOptions", selected_variant.paper_type_id),
+    ):
+        configured_options = product_metadata.get(field)
+        if isinstance(configured_options, list) and configured_options and option_id not in configured_options:
+            raise ConflictError("The selected print option is no longer enabled for this book.")
 
     tier = db.session.scalar(
         select(PricingTier).where(PricingTier.code == config["tier"].upper(), PricingTier.is_active.is_(True))
     )
     if tier is None:
         raise ConflictError("The selected printing tier is not available.")
+    if "printingTiers" in product_metadata:
+        configured_tiers = product_metadata["printingTiers"]
+        if not isinstance(configured_tiers, list) or config["tier"].upper() not in {
+            item.upper() for item in configured_tiers if isinstance(item, str)
+        }:
+            raise ConflictError("The selected printing tier is not configured for this book.")
     page_count = int(project.page_count)
-    page_rule = db.session.scalar(
+    if product.page_count_min is not None and page_count < product.page_count_min:
+        raise ConflictError("The saved book has fewer pages than this product allows.")
+    if product.page_count_max is not None and page_count > product.page_count_max:
+        raise ConflictError("The saved book exceeds this product's maximum page count.")
+    page_rules = db.session.scalars(
         select(PagePricing).where(
             PagePricing.tier_id == tier.id,
             PagePricing.minimum_pages <= page_count,
             PagePricing.maximum_pages >= page_count,
-        )
-    )
-    if page_rule is None:
+        ).limit(2)
+    ).all()
+    if not page_rules:
         raise ConflictError("No page pricing is configured for this book's page count and tier.")
+    if len(page_rules) > 1:
+        raise ConflictError("The selected printing tier has overlapping page-pricing ranges.")
+    page_rule = page_rules[0]
     shipping_rate = db.session.scalar(
         select(ShippingRate)
         .where(
@@ -181,7 +203,9 @@ def create_print_quote(
     shipping_amount = _money(shipping_rate.price, "shipping") * quantity
     discount = Decimal("0.00")
     tax = Decimal("0.00")
-    total = book_price + printing_charge + additional_pages + shipping_amount - discount + tax
+    total = (book_price + printing_charge + additional_pages + shipping_amount - discount + tax).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
     now = datetime.now(UTC)
     production_days = (product.admin_metadata or {}).get("productionDays")
     if isinstance(production_days, bool) or not isinstance(production_days, int) or production_days < 1:

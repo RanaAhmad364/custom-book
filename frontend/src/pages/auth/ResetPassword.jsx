@@ -6,9 +6,9 @@ import PasswordField from "../../features/auth/PasswordField.jsx";
 import { useAuth } from "../../features/auth/AuthContext.jsx";
 
 export default function ResetPassword() {
-  const { resetEmail, resetPassword } = useAuth();
+  const { resetPassword } = useAuth();
   const [params] = useSearchParams();
-  const email = params.get("email") || resetEmail;
+  const token = params.get("token") || "";
   const [form, setForm] = useState({ password: "", confirmPassword: "" });
   const [status, setStatus] = useState("idle");
   const [error, setError] = useState("");
@@ -20,9 +20,14 @@ export default function ResetPassword() {
 
   async function submit(event) {
     event.preventDefault();
+    if (form.password !== form.confirmPassword) {
+      setStatus("error");
+      setError("Those passwords don’t match.");
+      return;
+    }
     setStatus("loading");
     try {
-      await resetPassword(form);
+      await resetPassword({ token, password: form.password });
       setStatus("success");
     } catch (failure) {
       setStatus("error");
@@ -31,9 +36,9 @@ export default function ResetPassword() {
   }
 
   return (
-    <AuthPageShell eyebrow="Choose a new key" title="Set a new password." description={email ? `Demo reset for ${email}.` : "Enter a new password to complete the demo reset."}>
+    <AuthPageShell eyebrow="Choose a new key" title="Set a new password." description="Choose a new password to secure your account.">
       {status === "success" ? (
-        <div className="auth-success-panel" role="status"><CheckCircle2 size={22} /><div><strong>Password reset preview complete.</strong><p>This mock flow has not changed a real account password.</p></div><Link className="button button-dark auth-submit" to="/login">Back to sign in <ArrowRight size={15} /></Link></div>
+        <div className="auth-success-panel" role="status"><CheckCircle2 size={22} /><div><strong>Password updated.</strong><p>Sign in with your new password.</p></div><Link className="button button-dark auth-submit" to="/login">Back to sign in <ArrowRight size={15} /></Link></div>
       ) : (
         <form className="auth-form" onSubmit={submit}>
           <PasswordField id="reset-password" label="New password" name="password" value={form.password} onChange={update} autoComplete="new-password" />

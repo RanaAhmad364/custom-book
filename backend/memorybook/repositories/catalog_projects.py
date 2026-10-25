@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 
 from memorybook.extensions import db
 from memorybook.models import (
@@ -19,7 +19,10 @@ class CatalogRepository:
     @staticmethod
     def books_query(filters: dict):
         query = select(BookProduct).join(BookCategory, BookProduct.category_id == BookCategory.id).outerjoin(
-            BookCollection, BookProduct.collection_id == BookCollection.id
+            BookCollection,
+            (BookProduct.collection_id == BookCollection.id)
+            & BookCollection.is_active.is_(True)
+            & BookCollection.deleted_at.is_(None),
         ).where(
             BookProduct.is_active.is_(True),
             BookProduct.deleted_at.is_(None),
@@ -89,16 +92,35 @@ class CatalogRepository:
 
     @staticmethod
     def collections_query():
-        return select(BookCollection).where(
+        return select(BookCollection).join(
+            BookCategory,
+            (BookCollection.category_id == BookCategory.id)
+            & BookCategory.is_active.is_(True)
+            & BookCategory.deleted_at.is_(None),
+        ).where(
             BookCollection.is_active.is_(True),
             BookCollection.deleted_at.is_(None),
         ).order_by(BookCollection.sort_order, BookCollection.name)
 
     @staticmethod
     def templates_query():
-        return select(BookTemplate).where(BookTemplate.is_active.is_(True), BookTemplate.deleted_at.is_(None)).order_by(
-            BookTemplate.name
-        )
+        published_products = select(BookProduct.id).join(
+            BookCategory,
+            (BookProduct.category_id == BookCategory.id)
+            & BookCategory.is_active.is_(True)
+            & BookCategory.deleted_at.is_(None),
+        ).where(BookProduct.is_active.is_(True), BookProduct.deleted_at.is_(None))
+        return select(BookTemplate).where(
+            BookTemplate.is_active.is_(True),
+            BookTemplate.deleted_at.is_(None),
+            or_(
+                BookTemplate.product_id.is_(None),
+                and_(
+                    BookTemplate.published_design_document.is_not(None),
+                    BookTemplate.product_id.in_(published_products),
+                ),
+            ),
+        ).order_by(BookTemplate.name)
 
     @staticmethod
     def owned_project(project_id: str, owner_id: str, *, lock: bool = False) -> UserProject | None:

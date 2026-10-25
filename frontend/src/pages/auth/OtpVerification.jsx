@@ -45,7 +45,7 @@ export default function OtpVerification() {
     setStatus("loading");
     setError("");
     try {
-      await verifyOtp(digits.join(""));
+      await verifyOtp(email, digits.join(""));
       navigate(`/email-verified?email=${encodeURIComponent(email)}`, { replace: true });
     } catch (failure) {
       setStatus("error");
@@ -57,19 +57,19 @@ export default function OtpVerification() {
     setResendStatus("loading");
     setError("");
     try {
-      await resendOtp();
+      await resendOtp(email);
       setDigits(Array(OTP_LENGTH).fill(""));
       setSecondsLeft(RESEND_SECONDS);
       setResendStatus("success");
       inputRefs.current[0]?.focus();
     } catch (failure) {
       setResendStatus("error");
-      setError(failure instanceof Error ? failure.message : "We couldn’t prepare another demo code.");
+      setError(failure instanceof Error ? failure.message : "We couldn’t send another verification code.");
     }
   }
 
   return (
-    <AuthPageShell eyebrow="One last check" title="Verify your email." description={email ? `Enter the six-digit demo code for ${email}.` : "Enter the six-digit demo code to continue."}>
+    <AuthPageShell eyebrow="One last check" title="Verify your email." description={email ? `Enter the six-digit code sent to ${email}.` : "Enter the six-digit code sent to your email."}>
       <form className="auth-form" onSubmit={submit}>
         <div className="otp-input-group" role="group" aria-label="Six-digit verification code">
           {digits.map((digit, index) => (
@@ -92,9 +92,8 @@ export default function OtpVerification() {
             />
           ))}
         </div>
-        <p className="auth-demo-code">Demo code: <strong>123456</strong></p>
         {error ? <p className="auth-message auth-message-error" role="alert">{error}</p> : null}
-        {resendStatus === "success" ? <p className="auth-message auth-message-success" role="status">A new demo code is ready. Use 123456.</p> : null}
+        {resendStatus === "success" ? <p className="auth-message auth-message-success" role="status">If your account needs verification, a new code has been sent.</p> : null}
         <button className="button button-dark auth-submit" type="submit" disabled={status === "loading" || digits.join("").length !== OTP_LENGTH}>
           {status === "loading" ? <><span className="loading-spinner" /> Verifying…</> : <>Verify code <ArrowRight size={15} /></>}
         </button>

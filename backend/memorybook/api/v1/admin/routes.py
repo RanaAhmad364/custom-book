@@ -39,6 +39,16 @@ def upload_catalog_asset():
     return jsonify({"asset": admin.upload_catalog_asset(file, get_authenticated_user())}), 201
 
 
+@admin_blueprint.post("/design-assets")
+@limiter.limit("30 per hour")
+@roles_required("admin")
+def upload_admin_design_asset():
+    file = request.files.get("file")
+    if file is None:
+        raise ValidationError("An image file is required.", {"file": "required"})
+    return jsonify({"asset": admin.upload_admin_design_asset(file, get_authenticated_user())}), 201
+
+
 def _design_version():
     value = request.headers.get("If-Match")
     if value is None:
@@ -299,6 +309,19 @@ def pricing():
 @roles_required("admin")
 def update_pricing(kind: str, item_id: str):
     return jsonify({"item": admin.update_pricing(kind, item_id, _body())})
+
+
+@admin_blueprint.post("/pricing/<string:kind>")
+@roles_required("admin")
+def create_pricing(kind: str):
+    return jsonify({"item": admin.create_pricing(kind, _body())}), 201
+
+
+@admin_blueprint.delete("/pricing/<string:kind>/<string:item_id>")
+@roles_required("admin")
+def delete_pricing(kind: str, item_id: str):
+    admin.delete_pricing(kind, item_id)
+    return "", 204
 
 
 @admin_blueprint.post("/pricing/variants")

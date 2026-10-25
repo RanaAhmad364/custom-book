@@ -220,7 +220,7 @@
   min-width: 0;
 }
 
-.dashboard-demo-banner {
+.dashboard-data-banner {
   display: flex;
   align-items: center;
   gap: 11px;
@@ -232,7 +232,7 @@
   font-size: 10px;
 }
 
-.dashboard-demo-banner > span {
+.dashboard-data-banner > span {
   flex: 0 0 auto;
   color: var(--green);
   font-size: 9px;
@@ -241,7 +241,7 @@
   text-transform: uppercase;
 }
 
-.dashboard-demo-banner p {
+.dashboard-data-banner p {
   margin: 0;
 }
 
@@ -1559,7 +1559,7 @@
     margin-top: 18px;
   }
 
-  .dashboard-demo-banner {
+  .dashboard-data-banner {
     align-items: flex-start;
     flex-direction: column;
     gap: 4px;

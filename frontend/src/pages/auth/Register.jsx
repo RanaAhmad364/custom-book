@@ -38,11 +38,11 @@ export default function Register() {
     setStatus("loading");
     setError("");
     try {
-      await register(form);
-      navigate("/verify-otp");
+      const result = await register(form);
+      navigate(`/verify-otp?email=${encodeURIComponent(result.user.email)}`);
     } catch (failure) {
       setStatus("error");
-      setError(failure instanceof Error ? failure.message : "We couldn’t start your demo registration.");
+      setError(failure instanceof Error ? failure.message : "We couldn’t create your account.");
     }
   }
 

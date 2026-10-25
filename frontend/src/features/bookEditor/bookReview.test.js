@@ -32,6 +32,18 @@ test("review detects missing photos and offers the source page id", () => {
   assert.ok(report.issues.some((issue) => issue.code === "missing-photo" && issue.pageId === "page-1"));
 });
 
+test("review page links use the current order when page labels have become stale", () => {
+  const document = sampleDocument();
+  document.pages.push({ id: "page-2", type: "page", label: "Page 2", elements: [] });
+  document.pageOrder = ["cover", "page-2", "page-1"];
+  document.book.pageCount = 2;
+  document.pages[1].elements.push({ type: "image", id: "photo", assetId: "missing", name: "portrait.jpg", x: 0.1, y: 0.1, width: 0.8, height: 0.8 });
+
+  const issue = analyzeBook(document).issues.find((item) => item.code === "missing-photo");
+  assert.equal(issue.pageId, "page-1");
+  assert.equal(issue.pageLabel, "Page 2");
+});
+
 test("review flags low-resolution images using effective print density", () => {
   const document = sampleDocument();
   document.pages[1].elements.push({ type: "image", id: "photo", assetId: "asset", x: 0.1, y: 0.1, width: 0.8, height: 0.8 });

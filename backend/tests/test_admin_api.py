@@ -6,8 +6,13 @@ from decimal import Decimal
 from urllib.parse import urlsplit
 from io import BytesIO
 
+from PIL import Image
+
 from memorybook.extensions import db
 from memorybook.models import (
+    BookCategory,
+    BookCollection,
+    BookProduct,
     BookSize,
     BookTemplate,
     BookTemplateVersion,
@@ -15,6 +20,7 @@ from memorybook.models import (
     DiscountCode,
     EmailLog,
     PaperType,
+    PagePricing,
     Payment,
     PdfOrder,
     ProjectAsset,
@@ -23,6 +29,7 @@ from memorybook.models import (
     ProjectRevision,
     Role,
     ShippingAddress,
+    ShippingRate,
     SupportTicket,
     User,
     UserProject,
@@ -40,11 +47,364 @@ class FakeStorage:
     def download_url(self, key):
         return f"https://assets.example.test/{key}"
 
+    def public_download_url(self, key):
+        return f"https://assets.example.test/public/{key}"
+
+    def private_download_url(self, key):
+        return f"https://assets.example.test/private/{key}"
+
     def copy(self, source_key, target_key):
         self.objects[target_key] = self.objects[source_key]
 
     def delete(self, key):
         self.objects.pop(key, None)
+
+
+def create_category(client, csrf, *, slug="category-test"):
+    response = client.post(
+        "/api/v1/admin/categories",
+        json={"name": "Test Category", "slug": slug, "description": "For category tests"},
+        headers=csrf,
+    )
+    assert response.status_code == 201, response.get_json()
+    return response.json["category"]
+
+
+def valid_png():
+    stream = BytesIO()
+    Image.new("RGB", (2, 2), (15, 45, 75)).save(stream, format="PNG")
+    return stream.getvalue()
+
+
+def create_draft_book(client, csrf, category_id):
+    response = client.post(
+        "/api/v1/admin/books",
+        json={
+            "title": "Test Book",
+            "slug": f"test-book-{category_id[:8]}",
+            "description": "A draft book for category safety tests",
+            "categoryId": category_id,
+        },
+        headers=csrf,
+    )
+    assert response.status_code == 201, response.get_json()
+    return response.json["book"]
+
+
+def test_collections_require_category_and_books_reject_category_mismatches(app):
+    client, csrf = admin_client(app, "collection-category-admin@example.test")
+    travel = create_category(client, csrf, slug="collection-travel")
+    family = client.post(
+        "/api/v1/admin/categories",
+        json={"name": "Family", "slug": "collection-family"},
+        headers=csrf,
+    ).json["category"]
+
+    missing_category = client.post(
+        "/api/v1/admin/collections",
+        json={"name": "No category", "slug": "no-category"},
+        headers=csrf,
+    )
+    assert missing_category.status_code == 400
+    assert missing_category.json["error"]["details"]["categoryId"] == "required"
+
+    collection_response = client.post(
+        "/api/v1/admin/collections",
+        json={
+            "name": "Travel stories",
+            "slug": "travel-stories",
+            "categoryId": travel["id"],
+            "relatedCategories": ["travel"],
+        },
+        headers=csrf,
+    )
+    assert collection_response.status_code == 201
+    collection = collection_response.json["collection"]
+    assert collection["categoryId"] == travel["id"]
+    assert collection["categoryName"] == travel["name"]
+    assert collection["relatedCategories"] == ["travel"]
+    category_row = next(
+        item for item in client.get("/api/v1/admin/categories").json["items"]
+        if item["id"] == travel["id"]
+    )
+    assert category_row["collectionCount"] == 1
+
+    mismatch = client.post(
+        "/api/v1/admin/books",
+        json={
+            "title": "Wrong category",
+            "slug": "wrong-category-book",
+            "description": "A test book",
+            "categoryId": family["id"],
+            "collectionId": collection["id"],
+        },
+        headers=csrf,
+    )
+    assert mismatch.status_code == 400
+    assert mismatch.json["error"]["details"]["collectionId"] == "category_mismatch"
+
+    matching = client.post(
+        "/api/v1/admin/books",
+        json={
+            "title": "Right category",
+            "slug": "right-category-book",
+            "description": "A test book",
+            "categoryId": travel["id"],
+            "collectionId": collection["id"],
+        },
+        headers=csrf,
+    )
+    assert matching.status_code == 201
+    assert matching.json["book"]["collectionId"] == collection["id"]
+
+    product_update_mismatch = client.patch(
+        f"/api/v1/admin/books/{matching.json['book']['id']}",
+        json={"categoryId": family["id"]},
+        headers=csrf,
+    )
+    assert product_update_mismatch.status_code == 400
+    assert product_update_mismatch.json["error"]["details"]["collectionId"] == "category_mismatch"
+
+    update_mismatch = client.patch(
+        f"/api/v1/admin/collections/{collection['id']}",
+        json={"categoryId": family["id"]},
+        headers=csrf,
+    )
+    assert update_mismatch.status_code == 409
+    assert update_mismatch.json["error"]["details"]["books"] == 1
+    with app.app_context():
+        persisted_book = db.session.get(BookProduct, matching.json["book"]["id"])
+        persisted_collection = db.session.get(BookCollection, collection["id"])
+        assert persisted_book.category_id == travel["id"]
+        assert persisted_book.collection_id == collection["id"]
+        assert persisted_collection.category_id == travel["id"]
+
+
+def test_admin_category_create_validation_and_duplicate_slug(app):
+    client, csrf = admin_client(app, "category-validation-admin@example.test")
+    invalid_slug = client.post(
+        "/api/v1/admin/categories",
+        json={"name": "Invalid Slug", "slug": "Upper Case"},
+        headers=csrf,
+    )
+    assert invalid_slug.status_code == 400
+    assert invalid_slug.json["error"]["details"]["slug"] == "invalid"
+
+    create_category(client, csrf, slug="unique-category")
+    duplicate = client.post(
+        "/api/v1/admin/categories",
+        json={"name": "Duplicate", "slug": "unique-category"},
+        headers=csrf,
+    )
+    assert duplicate.status_code == 409
+    assert "slug already exists" in duplicate.json["error"]["message"]
+    category = next(
+        item for item in client.get("/api/v1/admin/categories").json["items"]
+        if item["slug"] == "unique-category"
+    )
+    empty_name = client.patch(
+        f"/api/v1/admin/categories/{category['id']}",
+        json={"name": " "},
+        headers=csrf,
+    )
+    assert empty_name.status_code == 400
+    invalid_order = client.patch(
+        f"/api/v1/admin/categories/{category['id']}",
+        json={"sortOrder": 1.5},
+        headers=csrf,
+    )
+    assert invalid_order.status_code == 400
+    negative_order = client.patch(
+        f"/api/v1/admin/categories/{category['id']}",
+        json={"sortOrder": -1},
+        headers=csrf,
+    )
+    assert negative_order.status_code == 400
+    valid_order = client.patch(
+        f"/api/v1/admin/categories/{category['id']}",
+        json={"sortOrder": 7},
+        headers=csrf,
+    )
+    assert valid_order.status_code == 200
+    assert valid_order.json["category"]["sortOrder"] == 7
+
+
+def test_category_list_reports_product_and_collection_references(app):
+    client, csrf = admin_client(app, "category-counts-admin@example.test")
+    category = create_category(client, csrf, slug="category-counts")
+    book = create_draft_book(client, csrf, category["id"])
+    with app.app_context():
+        db.session.add(BookCollection(
+            name="Referenced collection",
+            slug="category-counts-collection",
+            related_categories=[category["slug"]],
+        ))
+        db.session.commit()
+
+    listing = client.get("/api/v1/admin/categories?perPage=20")
+    assert listing.status_code == 200
+    row = next(item for item in listing.json["items"] if item["id"] == category["id"])
+    assert row["bookCount"] == 1
+    assert row["publishedBookCount"] == 0
+    assert row["draftBookCount"] == 1
+    assert row["collectionCount"] == 1
+    assert book["categoryId"] == category["id"]
+
+
+def test_category_can_be_deactivated_without_published_books_and_draft_is_preserved(app):
+    client, csrf = admin_client(app, "category-deactivate-admin@example.test")
+    category = create_category(client, csrf, slug="safe-deactivate")
+    book = create_draft_book(client, csrf, category["id"])
+
+    response = client.patch(
+        f"/api/v1/admin/categories/{category['id']}",
+        json={"isPublished": False},
+        headers=csrf,
+    )
+    assert response.status_code == 200, response.get_json()
+    assert response.json["category"]["isPublished"] is False
+    with app.app_context():
+        persisted_book = db.session.get(BookProduct, book["id"])
+        assert persisted_book.category_id == category["id"]
+        assert persisted_book.is_active is False
+    updated_draft = client.patch(
+        f"/api/v1/admin/books/{book['id']}",
+        json={"description": "Updated while the category is inactive"},
+        headers=csrf,
+    )
+    assert updated_draft.status_code == 200, updated_draft.get_json()
+    assert updated_draft.json["book"]["description"] == "Updated while the category is inactive"
+    activated = client.patch(
+        f"/api/v1/admin/categories/{category['id']}",
+        json={"isPublished": True},
+        headers=csrf,
+    )
+    assert activated.status_code == 200
+    assert activated.json["category"]["isPublished"] is True
+
+
+def test_category_can_be_deactivated_when_it_has_no_references(app):
+    client, csrf = admin_client(app, "category-empty-deactivate-admin@example.test")
+    category = create_category(client, csrf, slug="empty-deactivate")
+
+    response = client.patch(
+        f"/api/v1/admin/categories/{category['id']}",
+        json={"isPublished": False},
+        headers=csrf,
+    )
+    assert response.status_code == 200
+    assert response.json["category"]["isPublished"] is False
+
+
+def test_category_deactivation_is_blocked_for_published_books_without_mutation(app):
+    client, csrf = admin_client(app, "category-published-admin@example.test")
+    category = create_category(client, csrf, slug="published-book-category")
+    book = create_draft_book(client, csrf, category["id"])
+    with app.app_context():
+        persisted_book = db.session.get(BookProduct, book["id"])
+        persisted_book.is_active = True
+        db.session.commit()
+
+    response = client.patch(
+        f"/api/v1/admin/categories/{category['id']}",
+        json={"isPublished": False},
+        headers=csrf,
+    )
+    assert response.status_code == 409
+    assert response.json["error"]["details"]["publishedBooks"] == 1
+    with app.app_context():
+        persisted_category = db.session.get(BookCategory, category["id"])
+        persisted_book = db.session.get(BookProduct, book["id"])
+        assert persisted_category.is_active is True
+        assert persisted_book.is_active is True
+        assert persisted_book.category_id == category["id"]
+
+
+def test_category_deletion_is_blocked_for_product_and_collection_references(app):
+    client, csrf = admin_client(app, "category-delete-admin@example.test")
+    category = create_category(client, csrf, slug="referenced-category")
+    book = create_draft_book(client, csrf, category["id"])
+    with app.app_context():
+        db.session.add(BookCollection(
+            name="Referenced collection",
+            slug="referenced-collection",
+            category_id=category["id"],
+            related_categories=[category["slug"]],
+        ))
+        db.session.commit()
+
+    response = client.delete(f"/api/v1/admin/categories/{category['id']}", headers=csrf)
+    assert response.status_code == 409
+    assert response.json["error"]["details"] == {"books": 1, "collections": 1}
+    with app.app_context():
+        persisted_category = db.session.get(BookCategory, category["id"])
+        persisted_book = db.session.get(BookProduct, book["id"])
+        assert persisted_category.deleted_at is None
+        assert persisted_book.category_id == category["id"]
+
+
+def test_category_deletion_without_references_remains_a_soft_delete(app):
+    client, csrf = admin_client(app, "category-soft-delete-admin@example.test")
+    category = create_category(client, csrf, slug="unused-category")
+
+    response = client.delete(f"/api/v1/admin/categories/{category['id']}", headers=csrf)
+    assert response.status_code == 204
+    with app.app_context():
+        persisted_category = db.session.get(BookCategory, category["id"])
+        assert persisted_category.deleted_at is not None
+        assert persisted_category.is_active is False
+
+
+def test_renaming_category_preserves_collection_json_references(app):
+    client, csrf = admin_client(app, "category-rename-admin@example.test")
+    category = create_category(client, csrf, slug="old-category-slug")
+    with app.app_context():
+        collection = BookCollection(
+            name="Renamed category collection",
+            slug="renamed-category-collection",
+            related_categories=[category["slug"]],
+        )
+        db.session.add(collection)
+        db.session.commit()
+        collection_id = collection.id
+
+    response = client.patch(
+        f"/api/v1/admin/categories/{category['id']}",
+        json={"slug": "new-category-slug"},
+        headers=csrf,
+    )
+    assert response.status_code == 200
+    with app.app_context():
+        persisted_collection = db.session.get(BookCollection, collection_id)
+        assert persisted_collection.related_categories == ["new-category-slug"]
+
+
+def test_public_category_serializer_does_not_expose_private_project_asset(app, client):
+    with app.app_context():
+        category = BookCategory(
+            name="Private asset category",
+            slug="private-asset-category",
+            hero_asset_key="projects/user-id/project-id/private-image.webp",
+        )
+        db.session.add(category)
+        db.session.commit()
+
+    response = client.get("/api/v1/categories/private-asset-category")
+    assert response.status_code == 200
+    assert response.json["category"]["image"] is None
+
+
+def test_category_mutation_requires_admin_role(app, client):
+    category = create_category(*admin_client(app, "category-auth-admin@example.test"), slug="auth-category")
+    assert client.patch(
+        f"/api/v1/admin/categories/{category['id']}",
+        json={"isPublished": False},
+    ).status_code == 401
+    customer, csrf = admin_client(app, "category-auth-customer@example.test", assign_admin=False)
+    assert customer.delete(
+        f"/api/v1/admin/categories/{category['id']}",
+        headers=csrf,
+    ).status_code == 403
 
 
 def admin_client(app, email="admin@example.test", *, assign_admin=True):
@@ -73,6 +433,246 @@ def admin_client(app, email="admin@example.test", *, assign_admin=True):
     return client, {"X-CSRF-TOKEN": csrf}
 
 
+def test_pricing_catalog_crud_validation_and_variant_compatibility(app):
+    client, csrf = admin_client(app, "pricing-catalog-admin@example.test")
+    invalid_tier = client.post(
+        "/api/v1/admin/pricing/tier",
+        json={"code": "BASIC", "name": "Basic", "basePrice": "-1", "currency": "US"},
+        headers=csrf,
+    )
+    assert invalid_tier.status_code == 400
+
+    tier_response = client.post(
+        "/api/v1/admin/pricing/tier",
+        json={"code": "BASIC", "name": "Basic", "description": "Standard print tier", "basePrice": "9.00", "currency": "USD"},
+        headers=csrf,
+    )
+    assert tier_response.status_code == 201
+    tier_id = tier_response.json["item"]["id"]
+    duplicate_tier = client.post(
+        "/api/v1/admin/pricing/tier",
+        json={"code": "BASIC", "name": "Another basic", "basePrice": "0", "currency": "USD"},
+        headers=csrf,
+    )
+    assert duplicate_tier.status_code == 409
+
+    band_response = client.post(
+        "/api/v1/admin/pricing/pagePricing",
+        json={"tierId": tier_id, "minimumPages": 24, "maximumPages": 40, "pricePerPage": "0.50"},
+        headers=csrf,
+    )
+    assert band_response.status_code == 201
+    overlap = client.post(
+        "/api/v1/admin/pricing/pagePricing",
+        json={"tierId": tier_id, "minimumPages": 40, "maximumPages": 80, "pricePerPage": "0.75"},
+        headers=csrf,
+    )
+    assert overlap.status_code == 409
+    assert client.patch(
+        f"/api/v1/admin/pricing/tier/{tier_id}",
+        json={"active": False},
+        headers=csrf,
+    ).status_code == 200
+
+    shipping_response = client.post(
+        "/api/v1/admin/pricing/shipping",
+        json={
+            "countryCode": "us", "serviceCode": "standard", "serviceName": "Standard",
+            "price": "5.25", "currency": "USD", "estimatedDaysMin": 3, "estimatedDaysMax": 7,
+        },
+        headers=csrf,
+    )
+    assert shipping_response.status_code == 201
+    shipping = next(
+        item for item in client.get("/api/v1/admin/pricing").json["shipping"]
+        if item["serviceCode"] == "standard"
+    )
+    assert shipping["countryCode"] == "US"
+    assert shipping["estimatedDaysMin"] == 3
+    assert shipping["estimatedDaysMax"] == 7
+    alternate_shipping = client.post(
+        "/api/v1/admin/pricing/shipping",
+        json={
+            "countryCode": "US", "serviceCode": "express", "serviceName": "Express",
+            "price": "8.00", "currency": "USD",
+        },
+        headers=csrf,
+    )
+    assert alternate_shipping.status_code == 201
+    duplicate_shipping_update = client.patch(
+        f"/api/v1/admin/pricing/shipping/{alternate_shipping.json['item']['id']}",
+        json={"serviceCode": "standard"},
+        headers=csrf,
+    )
+    assert duplicate_shipping_update.status_code == 409
+
+    category = create_category(client, csrf, slug="pricing-variant-category")
+    book = create_draft_book(client, csrf, category["id"])
+    size = client.post(
+        "/api/v1/admin/pricing/size",
+        json={"code": "square-8", "name": "8 inch square", "widthMm": "203.20", "heightMm": "203.20"},
+        headers=csrf,
+    )
+    cover = client.post(
+        "/api/v1/admin/pricing/cover",
+        json={"name": "Linen hardback", "description": "Linen finish"},
+        headers=csrf,
+    )
+    paper = client.post(
+        "/api/v1/admin/pricing/paper",
+        json={"name": "Matte", "weightGsm": 170},
+        headers=csrf,
+    )
+    assert (size.status_code, cover.status_code, paper.status_code) == (201, 201, 201)
+    variant_payload = {
+        "sku": "PRICING-TEST-8-LINEN",
+        "productId": book["id"],
+        "sizeId": size.json["item"]["id"],
+        "coverTypeId": cover.json["item"]["id"],
+        "paperTypeId": paper.json["item"]["id"],
+        "basePrice": "20.00",
+        "currency": "USD",
+    }
+    variant = client.post("/api/v1/admin/pricing/variants", json=variant_payload, headers=csrf)
+    assert variant.status_code == 201
+    variant_id = variant.json["variant"]["id"]
+    duplicate_variant = client.post("/api/v1/admin/pricing/variants", json=variant_payload, headers=csrf)
+    assert duplicate_variant.status_code == 409
+    currency_mismatch = client.patch(
+        f"/api/v1/admin/pricing/variant/{variant_id}",
+        json={"currency": "PKR"},
+        headers=csrf,
+    )
+    assert currency_mismatch.status_code == 400
+
+
+def test_print_quote_uses_catalog_price_components_and_product_page_limits(app):
+    client, csrf = admin_client(app, "pricing-quote-admin@example.test")
+    category = create_category(client, csrf, slug="pricing-quote-category")
+    book = create_draft_book(client, csrf, category["id"])
+    with app.app_context():
+        product = db.session.get(BookProduct, book["id"])
+        product.is_active = True
+        product.currency = "USD"
+        product.starting_price = Decimal("10.10")
+        product.page_count_min = 24
+        product.page_count_max = 80
+        product.admin_metadata = {
+            "dimensions": {"widthMm": "203.20", "heightMm": "203.20"},
+            "printingTiers": ["BASIC"],
+            "productionDays": 5,
+        }
+        user = db.session.scalar(db.select(User).where(User.email == "pricing-quote-admin@example.test"))
+        project = UserProject(
+            user_id=user.id,
+            product_id=product.id,
+            title="Configured quote",
+            page_count=26,
+            version=1,
+            document={"book": {"size": {"width": "8", "height": "8"}}, "pages": []},
+        )
+        db.session.add(project)
+        db.session.commit()
+        project_id = project.id
+
+    size = client.post(
+        "/api/v1/admin/pricing/size",
+        json={"code": "quote-square-8", "name": "Quote 8 inch square", "widthMm": "203.20", "heightMm": "203.20"},
+        headers=csrf,
+    ).json["item"]
+    cover = client.post(
+        "/api/v1/admin/pricing/cover",
+        json={"name": "Quote Linen hardback"},
+        headers=csrf,
+    ).json["item"]
+    paper = client.post(
+        "/api/v1/admin/pricing/paper",
+        json={"name": "Quote Premium matte"},
+        headers=csrf,
+    ).json["item"]
+    tier = client.post(
+        "/api/v1/admin/pricing/tier",
+        json={"code": "BASIC", "name": "Quote Basic", "basePrice": "999.99", "currency": "USD"},
+        headers=csrf,
+    ).json["item"]
+    band = client.post(
+        "/api/v1/admin/pricing/pagePricing",
+        json={"tierId": tier["id"], "minimumPages": 24, "maximumPages": 40, "pricePerPage": "0.33"},
+        headers=csrf,
+    )
+    assert band.status_code == 201
+    shipping = client.post(
+        "/api/v1/admin/pricing/shipping",
+        json={
+            "countryCode": "US", "serviceCode": "quote-standard", "serviceName": "Quote standard",
+            "price": "4.50", "currency": "USD", "estimatedDaysMin": 3, "estimatedDaysMax": 7,
+        },
+        headers=csrf,
+    )
+    assert shipping.status_code == 201
+    variant = client.post(
+        "/api/v1/admin/pricing/variants",
+        json={
+            "sku": "QUOTE-BOOK-8-LINEN",
+            "productId": book["id"],
+            "sizeId": size["id"],
+            "coverTypeId": cover["id"],
+            "paperTypeId": paper["id"],
+            "basePrice": "20.20",
+            "currency": "USD",
+        },
+        headers=csrf,
+    )
+    assert variant.status_code == 201
+
+    quote_payload = {
+        "projectId": project_id,
+        "configuration": {
+            "tier": "basic",
+            "cover": "Quote Linen hardback",
+            "paper": "Quote Premium matte",
+            "quantity": 2,
+        },
+        "shippingAddress": {
+            "fullName": "MemoryBook Admin",
+            "line1": "1 Paper Lane",
+            "line2": "",
+            "city": "Portland",
+            "region": "Oregon",
+            "postalCode": "97201",
+            "country": "US",
+            "phone": "555-0100",
+        },
+    }
+    quote = client.post("/api/v1/print/quotes", json=quote_payload, headers=csrf)
+    assert quote.status_code == 200, quote.get_json()
+    assert quote.json["bookPrice"] == "20.20"
+    assert quote.json["printingCharge"] == "40.40"
+    assert quote.json["additionalPages"] == "1.32"
+    assert quote.json["shipping"] == "9.00"
+    assert quote.json["total"] == "70.92"
+    assert quote.json["currency"] == "USD"
+
+    with app.app_context():
+        product = db.session.get(BookProduct, book["id"])
+        product.admin_metadata = {**product.admin_metadata, "sizeOptions": ["different-size-id"]}
+        db.session.commit()
+    disabled_variant_option = client.post("/api/v1/print/quotes", json=quote_payload, headers=csrf)
+    assert disabled_variant_option.status_code == 409
+    assert "no longer enabled" in disabled_variant_option.json["error"]["message"]
+
+    with app.app_context():
+        product = db.session.get(BookProduct, book["id"])
+        product.admin_metadata = {**product.admin_metadata, "sizeOptions": [size["id"]]}
+        db.session.commit()
+        project = db.session.get(UserProject, project_id)
+        project.page_count = 81
+        db.session.commit()
+    out_of_range = client.post("/api/v1/print/quotes", json=quote_payload, headers=csrf)
+    assert out_of_range.status_code == 409
+    assert "maximum page count" in out_of_range.json["error"]["message"]
+
+
 def add_design_element(document):
     page = next(page for page in document["pages"] if page["type"] != "cover")
     page["elements"].append({
@@ -94,13 +694,13 @@ def test_admin_apis_require_admin_role(app, client):
     assert response.status_code == 403
 
 
-def test_admin_catalog_image_upload_is_validated_and_stored_privately(app):
+def test_admin_catalog_image_upload_is_validated_and_stored_as_public_catalog_asset(app):
     client, csrf = admin_client(app, "assets-admin@example.test")
     storage = FakeStorage()
     app.extensions["asset_storage"] = storage
     response = client.post(
         "/api/v1/admin/assets",
-        data={"file": (BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16), "cover.png")},
+        data={"file": (BytesIO(valid_png()), "cover.png")},
         headers=csrf,
         content_type="multipart/form-data",
     )
@@ -112,18 +712,119 @@ def test_admin_catalog_image_upload_is_validated_and_stored_privately(app):
 
     invalid = client.post(
         "/api/v1/admin/assets",
-        data={"file": (BytesIO(b"not an image"), "cover.png")},
+        data={"file": (BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16), "cover.png")},
         headers=csrf,
         content_type="multipart/form-data",
     )
     assert invalid.status_code == 400
 
 
+def test_admin_design_upload_is_private_to_its_admin(app, tmp_path):
+    app.config["ASSET_STORAGE_BACKEND"] = "filesystem"
+    app.config["ASSET_LOCAL_DIRECTORY"] = str(tmp_path)
+    admin, csrf = admin_client(app, "private-design-admin@example.test")
+    customer, _ = admin_client(app, "private-design-customer@example.test", assign_admin=False)
+
+    response = admin.post(
+        "/api/v1/admin/design-assets",
+        data={"file": (BytesIO(valid_png()), "draft-design.png")},
+        headers=csrf,
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 201, response.get_json()
+    asset = response.json["asset"]
+    assert asset["assetKey"].startswith("admin-design/")
+    asset_path = urlsplit(asset["url"]).path
+    assert admin.get(asset_path).status_code == 200
+    assert customer.get(asset_path).status_code == 404
+    with app.app_context():
+        db.session.add(BookTemplate(
+            name="Published asset access",
+            slug="published-asset-access",
+            is_active=True,
+            published_design_document={"assets": [{"assetKey": asset["assetKey"]}]},
+        ))
+        db.session.commit()
+    assert customer.get(asset_path).status_code == 200
+
+
+def test_local_catalog_asset_url_is_stable_and_public(app, tmp_path):
+    app.config["ASSET_STORAGE_BACKEND"] = "filesystem"
+    app.config["ASSET_LOCAL_DIRECTORY"] = str(tmp_path)
+    app.config["ASSET_S3_PRESIGNED_URL_TTL"] = 1
+    admin, csrf = admin_client(app, "stable-catalog-admin@example.test")
+    uploaded = admin.post(
+        "/api/v1/admin/assets",
+        data={"file": (BytesIO(valid_png()), "catalog-cover.png")},
+        headers=csrf,
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 201
+    url = uploaded.json["asset"]["url"]
+
+    time.sleep(1.1)
+    response = app.test_client().get(urlsplit(url).path)
+    assert response.status_code == 200
+    Image.open(BytesIO(response.data)).verify()
+
+
+def configure_product_for_publication(app, client, csrf, product, *, sku):
+    with app.app_context():
+        size = BookSize(code=f"{sku.lower()}-size", name=f"{sku} size", width_mm=203, height_mm=203)
+        cover = CoverType(name=f"{sku} cover")
+        paper = PaperType(name=f"{sku} paper", weight_gsm=170)
+        tier = PricingTier(code="BASIC", name="Basic", base_price=Decimal("10.00"), currency="USD")
+        db.session.add_all([size, cover, paper, tier])
+        db.session.flush()
+        db.session.add_all([
+            PagePricing(tier_id=tier.id, minimum_pages=24, maximum_pages=80, price_per_page=Decimal("0.50")),
+            ShippingRate(
+                country_code="US", service_code=f"{sku.lower()}-standard", service_name="Standard",
+                price=Decimal("5.00"), currency="USD", is_active=True,
+            ),
+        ])
+        size_id, cover_id, paper_id = size.id, cover.id, paper.id
+        db.session.commit()
+    updated = client.patch(
+        f"/api/v1/admin/books/{product['id']}",
+        json={
+            "coverAssetKey": "catalog/test-cover.jpg",
+            "pageCountMin": 24,
+            "pageCountMax": 80,
+            "adminMetadata": {
+                "dimensions": {"widthMm": "203.00", "heightMm": "203.00"},
+                "pageCountOptions": [24, 32, 40],
+                "sizeOptions": [size_id],
+                "coverOptions": [cover_id],
+                "paperOptions": [paper_id],
+                "printingTiers": ["BASIC"],
+                "previewImageKeys": [],
+                "pdfPrice": "0.00",
+                "printingPrice": "0.00",
+                "productionDays": 10,
+            },
+        },
+        headers=csrf,
+    )
+    assert updated.status_code == 200, updated.get_json()
+    variant = client.post(
+        "/api/v1/admin/pricing/variants",
+        json={
+            "sku": sku, "productId": product["id"], "sizeId": size_id, "coverTypeId": cover_id,
+            "paperTypeId": paper_id, "basePrice": "40.00", "currency": "USD",
+        },
+        headers=csrf,
+    )
+    assert variant.status_code == 201, variant.get_json()
+    return client.post(f"/api/v1/admin/books/{product['id']}/publish", headers=csrf)
+
+
 def test_local_filesystem_catalog_upload_can_be_retrieved(app, tmp_path):
     app.config["ASSET_STORAGE_BACKEND"] = "filesystem"
     app.config["ASSET_LOCAL_DIRECTORY"] = str(tmp_path)
     client, csrf = admin_client(app, "local-assets-admin@example.test")
-    image = b"\x89PNG\r\n\x1a\n" + b"local image bytes"
+    image = valid_png()
 
     response = client.post(
         "/api/v1/admin/assets",
@@ -135,10 +836,10 @@ def test_local_filesystem_catalog_upload_can_be_retrieved(app, tmp_path):
     assert response.status_code == 201, response.get_json()
     asset = response.json["asset"]
     assert asset["assetKey"].startswith("catalog/")
-    assert asset["url"].startswith("/api/v1/assets/")
+    assert asset["url"].startswith("/api/v1/assets/public/catalog/")
     retrieved = client.get(urlsplit(asset["url"]).path)
     assert retrieved.status_code == 200
-    assert retrieved.data == image
+    Image.open(BytesIO(retrieved.data)).verify()
     assert retrieved.mimetype == "image/png"
 
 
@@ -146,15 +847,11 @@ def test_local_asset_retrieval_rejects_invalid_and_expired_signatures(app, tmp_p
     app.config["ASSET_STORAGE_BACKEND"] = "filesystem"
     app.config["ASSET_LOCAL_DIRECTORY"] = str(tmp_path)
     app.config["ASSET_S3_PRESIGNED_URL_TTL"] = 1
-    client, csrf = admin_client(app, "expiring-local-assets-admin@example.test")
-    response = client.post(
-        "/api/v1/admin/assets",
-        data={"file": (BytesIO(b"\x89PNG\r\n\x1a\nlocal"), "temporary.png")},
-        headers=csrf,
-        content_type="multipart/form-data",
-    )
-    assert response.status_code == 201, response.get_json()
-    asset_path = urlsplit(response.json["asset"]["url"]).path
+    client, _ = admin_client(app, "expiring-local-assets-admin@example.test")
+    from memorybook.integrations.asset_storage import LocalFilesystemAssetStorage
+
+    with app.app_context():
+        asset_path = urlsplit(LocalFilesystemAssetStorage().download_url("catalog/expired")).path
 
     invalid = client.get("/api/v1/assets/not-a-valid-signature")
     assert invalid.status_code == 404
@@ -202,7 +899,12 @@ def test_admin_book_and_template_workflow_preserves_published_template_versions(
         f"/api/v1/admin/books/{book['id']}/design/publish",
         headers={**csrf, "If-Match": '"2"'},
     ).status_code == 200
-    assert client.get("/api/v1/books/alpine-notes").status_code == 200
+    assert client.get("/api/v1/books/alpine-notes").status_code == 404
+    assert client.get(f"/api/v1/templates/{design.json['template']['id']}").status_code == 404
+    incomplete_publish = client.post(f"/api/v1/admin/books/{book['id']}/publish", headers=csrf)
+    assert incomplete_publish.status_code == 400
+    assert incomplete_publish.json["error"]["details"]["coverAssetKey"] == "required"
+    assert client.get(f"/api/v1/admin/books?categoryId={category_id}").json["pagination"]["totalItems"] == 1
     with app.app_context():
         size = BookSize(code="square-8", name="8 inch square", width_mm=203.2, height_mm=203.2)
         cover = CoverType(name="Linen hardback")
@@ -216,14 +918,22 @@ def test_admin_book_and_template_workflow_preserves_published_template_versions(
         json={"adminMetadata": {
             "dimensions": {"widthMm": "203.20", "heightMm": "203.20"},
             "sizeOptions": [size_id], "coverOptions": [cover_id], "paperOptions": [paper_id],
-            "pageCountOptions": [24, 32, 40], "printingTiers": ["LIGHT", "BASIC", "PREMIUM"],
+            "pageCountOptions": [24, 32, 40], "printingTiers": ["BASIC"],
             "previewImageKeys": ["catalog/alpine-preview.jpg"], "pdfPrice": "8.00",
             "printingPrice": "44.50", "productionDays": 7,
-        }},
+        }, "coverAssetKey": "catalog/alpine-cover.jpg"},
         headers=csrf,
     )
     assert specification_update.status_code == 200
     assert specification_update.json["book"]["adminMetadata"]["dimensions"]["widthMm"] == "203.20"
+    partial_metadata_update = client.patch(
+        f"/api/v1/admin/books/{book['id']}",
+        json={"adminMetadata": {"productionDays": 8}},
+        headers=csrf,
+    )
+    assert partial_metadata_update.status_code == 200
+    assert partial_metadata_update.json["book"]["adminMetadata"]["sizeOptions"] == [size_id]
+    assert partial_metadata_update.json["book"]["adminMetadata"]["dimensions"]["widthMm"] == "203.20"
     signed_url_update = client.patch(
         f"/api/v1/admin/books/{book['id']}",
         json={"adminMetadata": {"previewImageKeys": ["https://assets.example.test/temporary?signature=test"]}},
@@ -247,6 +957,34 @@ def test_admin_book_and_template_workflow_preserves_published_template_versions(
         json={"basePrice": "26.50"},
         headers=csrf,
     ).status_code == 200
+    assert client.post(
+        "/api/v1/admin/pricing/pagePricing",
+        json={"tierId": tier_id, "minimumPages": 24, "maximumPages": 80, "pricePerPage": "0.50"},
+        headers=csrf,
+    ).status_code == 201
+    assert client.post(
+        "/api/v1/admin/pricing/shipping",
+        json={
+            "countryCode": "US", "serviceCode": "alpine-standard", "serviceName": "Standard",
+            "price": "5.00", "currency": "USD",
+        },
+        headers=csrf,
+    ).status_code == 201
+    product_publication = client.post(f"/api/v1/admin/books/{book['id']}/publish", headers=csrf)
+    assert product_publication.status_code == 200, product_publication.get_json()
+    assert client.get("/api/v1/books/alpine-notes").status_code == 200
+    assert client.get(f"/api/v1/templates/{design.json['template']['id']}").status_code == 200
+    blocked_design_unpublish = client.post(f"/api/v1/admin/books/{book['id']}/design/unpublish", headers=csrf)
+    assert blocked_design_unpublish.status_code == 409
+    unpublished_product = client.post(f"/api/v1/admin/books/{book['id']}/unpublish", headers=csrf)
+    assert unpublished_product.status_code == 200
+    assert unpublished_product.json["book"]["isPublished"] is False
+    assert client.get("/api/v1/books/alpine-notes").status_code == 404
+    preserved_design = client.post(f"/api/v1/admin/books/{book['id']}/design", headers=csrf)
+    assert preserved_design.status_code == 200
+    assert preserved_design.json["template"]["published"] is True
+    republished_product = client.post(f"/api/v1/admin/books/{book['id']}/publish", headers=csrf)
+    assert republished_product.status_code == 200
     discount = client.post(
         "/api/v1/admin/discount-codes",
         json={"code": "BOOKS10", "type": "percent", "value": "10"},
@@ -369,10 +1107,11 @@ def test_book_design_requires_admin_and_saved_valid_design_before_publication(ap
         headers={**csrf, "If-Match": '"2"'},
     )
     assert published.status_code == 200
-    assert published.json["product"]["isPublished"] is True
+    assert published.json["product"]["isPublished"] is False
     assert published.json["template"]["published"] is True
     assert published.json["template"]["publishedVersion"] == 2
-    assert admin.get("/api/v1/books/family-keepsake").status_code == 200
+    assert admin.get("/api/v1/books/family-keepsake").status_code == 404
+    assert admin.get(f"/api/v1/templates/{published.json['template']['id']}").status_code == 404
 
 
 def test_product_publish_api_cannot_bypass_the_design_requirement(app):
@@ -444,6 +1183,15 @@ def test_published_book_design_creates_independent_user_project_copy(app):
         f"{design_url}/publish",
         headers={**csrf, "If-Match": '"2"'},
     ).status_code == 200
+    assert customer.get(f"/api/v1/templates/{template_id}").status_code == 404
+    unavailable_project = customer.post(
+        "/api/v1/projects",
+        json={"title": "Unavailable master", "pageCount": 24, "productId": book["id"], "templateId": template_id},
+        headers=customer_csrf,
+    )
+    assert unavailable_project.status_code == 400
+    product_publication = configure_product_for_publication(app, admin, csrf, book, sku="TRAVEL-MASTER")
+    assert product_publication.status_code == 200, product_publication.get_json()
 
     with app.app_context():
         template = db.session.get(BookTemplate, template_id)
@@ -500,7 +1248,7 @@ def test_admin_can_suspend_users_and_soft_delete_catalog_records(app):
     ).json["category"]
     collection = admin.post(
         "/api/v1/admin/collections",
-        json={"name": "Weekend", "slug": "weekend-collection"},
+        json={"name": "Weekend", "slug": "weekend-collection", "categoryId": category["id"]},
         headers=csrf,
     ).json["collection"]
     assert admin.delete(f"/api/v1/admin/collections/{collection['id']}", headers=csrf).status_code == 204
@@ -512,7 +1260,9 @@ def test_admin_can_suspend_users_and_soft_delete_catalog_records(app):
     assert admin.post(f"/api/v1/admin/books/{product['id']}/publish", headers=csrf).status_code == 400
     assert admin.post(f"/api/v1/admin/books/{product['id']}/unpublish", headers=csrf).status_code == 200
     assert admin.delete(f"/api/v1/admin/books/{product['id']}", headers=csrf).status_code == 204
-    assert admin.delete(f"/api/v1/admin/categories/{category['id']}", headers=csrf).status_code == 204
+    blocked_category_delete = admin.delete(f"/api/v1/admin/categories/{category['id']}", headers=csrf)
+    assert blocked_category_delete.status_code == 409
+    assert blocked_category_delete.json["error"]["details"]["books"] == 1
     assert admin.get("/api/v1/books/archive-book").status_code == 404
 
 

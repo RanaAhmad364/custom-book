@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { ArrowRight, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import { SafeImage } from "../common/SafeImage.jsx";
+import { formatCurrency } from "../../services/money.js";
 
 export function BookPreviewDialog({ book, onClose }) {
   const dialogRef = useRef(null);
@@ -43,7 +44,7 @@ export function BookPreviewDialog({ book, onClose }) {
         <div className="preview-details">
           <span>{book.pages}</span>
           <span>{book.format}</span>
-          <span>From ${book.startingPrice.toFixed(2)}</span>
+          <span>From {formatCurrency(book.startingPrice, book.currency)}</span>
         </div>
         <Link
           className="button button-dark"
