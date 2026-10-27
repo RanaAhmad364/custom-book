@@ -126,8 +126,24 @@ def render_project_pdf(
     )
     if profile == "digital":
         context.start_page(page_width, page_height, 0)
-        _draw_cover_face(context, cover_design.get("front") or {}, source, "front")
-        _draw_page(context, cover_page, page_width, page_height, offset_x=0, offset_y=0, paint_background=False)
+        front_cover = cover_design.get("front") or {}
+        cover_background = (cover_page.get("background") or {}).get("color")
+        _draw_cover_face(
+            context,
+            front_cover,
+            source,
+            "front",
+            background_color=cover_background,
+        )
+        _draw_page(
+            context,
+            _cover_page_without_duplicate_face_elements(cover_page, front_cover, source),
+            page_width,
+            page_height,
+            offset_x=0,
+            offset_y=0,
+            paint_background=False,
+        )
         pdf_canvas.showPage()
         for page in interior_pages:
             context.start_page(page_width, page_height, 0)
@@ -513,6 +529,7 @@ def _draw_cover_face(
     *,
     x_offset: float = 0,
     face_width: float | None = None,
+    background_color: object | None = None,
 ) -> None:
     width, height = face_width or context.page_width, context.page_height
     bleed = context.bleed
@@ -530,7 +547,10 @@ def _draw_cover_face(
         background_height = height + 2 * bleed
     _fill_rect(
         context.canvas,
-        _color(face.get("backgroundColor"), "#e8ece5" if side == "front" else "#f4eee5"),
+        _color(
+            background_color if isinstance(background_color, str) else face.get("backgroundColor"),
+            "#e8ece5" if side == "front" else "#f4eee5",
+        ),
         background_left,
         background_y,
         background_width * 72,
@@ -588,6 +608,31 @@ def _draw_cover_face(
             line_width = pdfmetrics.stringWidth(line, subtitle_font, subtitle_size)
             context.canvas.drawString(left + (width * 72 - line_width) / 2, sub_y - index * subtitle_size * 1.3, line)
     context.canvas.restoreState()
+
+
+def _cover_page_without_duplicate_face_elements(
+    cover_page: dict[str, Any],
+    front_cover: dict[str, Any],
+    document: dict[str, Any],
+) -> dict[str, Any]:
+    title = front_cover.get("title") or document["metadata"]["title"]
+    photo_asset_id = front_cover.get("photoAssetId")
+    elements = [
+        element
+        for element in cover_page.get("elements", [])
+        if not (
+            (
+                element.get("type") == "text"
+                and element.get("text") == title
+            )
+            or (
+                element.get("type") == "image"
+                and photo_asset_id is not None
+                and element.get("assetId") == photo_asset_id
+            )
+        )
+    ]
+    return {**cover_page, "elements": elements}
 
 
 def _draw_spine(

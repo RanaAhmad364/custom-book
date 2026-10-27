@@ -94,6 +94,7 @@ def create_pdf_order(
         idempotency_key=idempotency_key,
     )
     db.session.add(order)
+    db.session.flush()
     db.session.add(_history_row(order.id, "pdf", "order_placed", "PDF order created; payment is pending."))
     db.session.commit()
     from memorybook.services.payments import create_payment

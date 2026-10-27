@@ -1088,7 +1088,17 @@ def delete_product(product_id: str) -> None:
     item = db.session.get(BookProduct, product_id)
     if item is None or item.deleted_at is not None:
         raise NotFound("Book product was not found.")
-    item.deleted_at = datetime.now(UTC)
+    templates = db.session.scalars(
+        select(BookTemplate).where(
+            BookTemplate.product_id == item.id,
+            BookTemplate.deleted_at.is_(None),
+        )
+    ).all()
+    now = datetime.now(UTC)
+    for template in templates:
+        template.deleted_at = now
+        template.is_active = False
+    item.deleted_at = now
     item.is_active = False
     _commit("book.deleted", "book_product", item.id)
 
@@ -1283,13 +1293,21 @@ def delete_simple_catalog(model, kind: str, object_id: str) -> None:
         raise NotFound(f"{kind.title()} was not found.")
     if kind == "category":
         product_count = db.session.scalar(
-            select(func.count(BookProduct.id)).where(BookProduct.category_id == item.id)
+            select(func.count(BookProduct.id)).where(
+                BookProduct.category_id == item.id,
+                BookProduct.deleted_at.is_(None),
+            )
         ) or 0
         collection_ids = set(db.session.scalars(
-            select(BookCollection.id).where(BookCollection.category_id == item.id)
+            select(BookCollection.id).where(
+                BookCollection.category_id == item.id,
+                BookCollection.deleted_at.is_(None),
+            )
         ).all())
         for collection_id, related_categories in db.session.execute(
-            select(BookCollection.id, BookCollection.related_categories)
+            select(BookCollection.id, BookCollection.related_categories).where(
+                BookCollection.deleted_at.is_(None)
+            )
         ).all():
             if isinstance(related_categories, list) and any(
                 isinstance(category_key, str) and category_key in {item.slug, item.id}

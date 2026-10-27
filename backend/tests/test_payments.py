@@ -4,6 +4,7 @@ import json
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -42,6 +43,51 @@ def test_payment_routes_are_registered_and_user_history_is_protected(client):
         headers={"Stripe-Signature": "invalid"},
     )
     assert webhook.status_code == 400
+
+
+def test_customer_order_serialization_includes_status_and_paid_at(app):
+    paid_at = datetime.now(UTC)
+    created_at = datetime.now(UTC)
+    pdf_order = SimpleNamespace(
+        id="pdf-order-serialization",
+        project_id="project-pdf",
+        project_revision_id="missing-revision",
+        order_number="PDF-SERIALIZATION",
+        total_amount=Decimal("850.00"),
+        currency="PKR",
+        status="paid",
+        paid_at=paid_at,
+        created_at=created_at,
+        page_count=24,
+    )
+    print_order = SimpleNamespace(
+        id="print-order-serialization",
+        project_id="project-print",
+        project_revision_id="missing-revision",
+        order_number="PRT-SERIALIZATION",
+        total_amount=Decimal("4250.00"),
+        currency="PKR",
+        status="payment_confirmed",
+        paid_at=paid_at,
+        created_at=created_at,
+        price_snapshot={},
+        book_amount=Decimal("2500.00"),
+        printing_amount=Decimal("1000.00"),
+        additional_pages_amount=Decimal("0.00"),
+        shipping_amount=Decimal("750.00"),
+        discount_amount=Decimal("0.00"),
+        tax_amount=Decimal("0.00"),
+        shipping_address_snapshot={},
+    )
+
+    with app.app_context():
+        serialized_pdf = payments.serialize_order(pdf_order, "pdf")
+        serialized_print = payments.serialize_order(print_order, "print")
+
+    assert serialized_pdf["status"] == "paid"
+    assert serialized_pdf["paidAt"] == paid_at.isoformat()
+    assert serialized_print["status"] == "payment_confirmed"
+    assert serialized_print["paidAt"] == paid_at.isoformat()
 
 
 def test_payment_methods_fail_closed_for_unverified_pkr_gateways(app, client):

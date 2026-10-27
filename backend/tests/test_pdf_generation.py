@@ -7,12 +7,16 @@ from decimal import Decimal
 from PIL import Image
 from pypdf import PdfReader
 import pytest
+import pypdfium2
 
 from memorybook.extensions import db
 from memorybook.models import (
     BackgroundJob,
+    BookCategory,
+    BookProduct,
     DownloadEntitlement,
     DownloadHistory,
+    OrderStatusHistory,
     Payment,
     PdfJob,
     PdfOrder,
@@ -202,6 +206,51 @@ def test_renderer_creates_valid_digital_and_print_pdfs_from_revision_document():
     assert print_info["checksumSha256"]
 
 
+def test_digital_cover_uses_project_background_and_does_not_duplicate_cover_face_content():
+    source = document_with_photos()
+    cover = next(page for page in source["pages"] if page["type"] == "cover")
+    cover["background"] = {
+        "color": "#355849",
+        "borderColor": "#111111",
+        "borderStyle": "solid",
+    }
+    source["cover"]["design"]["front"]["photoAssetId"] = None
+    cover["elements"] = [
+        {
+            "id": "duplicate-cover-photo",
+            "type": "image",
+            "assetId": "photo-1",
+            "x": 0.08,
+            "y": 0.08,
+            "width": 0.84,
+            "height": 0.84,
+        },
+        {
+            "id": "duplicate-cover-title",
+            "type": "text",
+            "text": "Front cover title",
+            "x": 0.1,
+            "y": 0.1,
+            "width": 0.8,
+            "height": 0.1,
+        },
+    ]
+
+    pdf_bytes, _ = render_project_pdf(source, {"photo-1": make_image()}, "digital")
+    first_page = PdfReader(io.BytesIO(pdf_bytes), strict=True).pages[0]
+    rendered_page = pypdfium2.PdfDocument(pdf_bytes)[0].render(scale=1).to_pil().convert("RGB")
+    pixel = rendered_page.getpixel((2, 2))
+    assert pixel == (53, 88, 73)
+    assert first_page.extract_text().count("Front cover title") == 1
+    assert len(first_page.images) == 1
+
+    source["cover"]["design"]["front"]["photoAssetId"] = "photo-1"
+    photographed_pdf, _ = render_project_pdf(source, {"photo-1": make_image()}, "digital")
+    photographed_cover = PdfReader(io.BytesIO(photographed_pdf), strict=True).pages[0]
+    assert photographed_cover.extract_text().count("Front cover title") == 1
+    assert len(photographed_cover.images) == 1
+
+
 def test_print_renderer_rejects_low_resolution_images_and_unsafe_text():
     source = document_with_photos()
     with pytest.raises(PdfRenderError, match="below the required 300 DPI"):
@@ -232,6 +281,60 @@ def authenticated_client(app, email):
         if value.startswith("csrf_access_token=")
     )
     return client, {"X-CSRF-TOKEN": csrf}
+
+
+def test_pdf_order_creation_persists_status_history_with_order_id(app):
+    client, csrf = authenticated_client(app, "pdf-history@example.test")
+    with app.app_context():
+        user = db.session.scalar(db.select(User).where(User.email == "pdf-history@example.test"))
+        category = BookCategory(name="Order tests", slug="pdf-history")
+        db.session.add(category)
+        db.session.flush()
+        product = BookProduct(
+            category_id=category.id,
+            title="Order test book",
+            slug="pdf-history-book",
+            description="A book for the PDF order history regression test.",
+            book_type="BASIC",
+            page_count_min=1,
+            page_count_max=80,
+            starting_price=Decimal("10.00"),
+            currency="PKR",
+            is_active=True,
+            admin_metadata={"pdfPrice": "850.00", "basePageCount": 1},
+        )
+        db.session.add(product)
+        db.session.flush()
+        project = UserProject(
+            user_id=user.id,
+            product_id=product.id,
+            title="Order test project",
+            page_count=2,
+            version=1,
+            status="completed",
+            document=document_with_photos(),
+        )
+        db.session.add(project)
+        db.session.commit()
+        project_id = project.id
+
+    response = client.post(
+        "/api/v1/pdf/orders",
+        json={"projectId": project_id, "provider": "manual"},
+        headers={**csrf, "Idempotency-Key": "pdf-order-history-regression"},
+    )
+
+    assert response.status_code == 201, response.get_json()
+    with app.app_context():
+        history = db.session.scalar(
+            db.select(OrderStatusHistory).where(
+                OrderStatusHistory.pdf_order_id == response.json["id"],
+                OrderStatusHistory.status == "order_placed",
+            )
+        )
+        assert history is not None
+        assert history.pdf_order_id == response.json["id"]
+        assert history.print_order_id is None
 
 
 def test_pdf_generation_requires_payment_is_idempotent_and_download_is_owner_scoped(app):

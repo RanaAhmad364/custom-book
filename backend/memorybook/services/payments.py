@@ -761,6 +761,8 @@ def serialize_order(
         "checkoutUrl": checkout_url,
         "amount": str(order.total_amount),
         "currency": order.currency,
+        "status": order.status,
+        "paidAt": order.paid_at.isoformat() if order.paid_at else None,
         "createdAt": order.created_at.isoformat(),
     }
     if payment is not None:

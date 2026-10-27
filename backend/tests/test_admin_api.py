@@ -515,6 +515,36 @@ def test_category_deletion_without_references_remains_a_soft_delete(app):
         assert persisted_category.is_active is False
 
 
+def test_category_deletion_ignores_soft_deleted_books_and_collections(app):
+    client, csrf = admin_client(app, "category-delete-soft-references@example.test")
+    category = create_category(client, csrf, slug="soft-referenced-category")
+    book = create_draft_book(client, csrf, category["id"])
+    collection_response = client.post(
+        "/api/v1/admin/collections",
+        json={
+            "name": "Soft deleted collection",
+            "slug": "soft-deleted-category-collection",
+            "categoryId": category["id"],
+            "relatedCategories": [category["slug"]],
+        },
+        headers=csrf,
+    )
+    assert collection_response.status_code == 201, collection_response.get_json()
+
+    assert client.delete(f"/api/v1/admin/books/{book['id']}", headers=csrf).status_code == 204
+    assert client.delete(
+        f"/api/v1/admin/collections/{collection_response.json['collection']['id']}",
+        headers=csrf,
+    ).status_code == 204
+
+    deleted = client.delete(f"/api/v1/admin/categories/{category['id']}", headers=csrf)
+
+    assert deleted.status_code == 204, deleted.get_json()
+    with app.app_context():
+        persisted_category = db.session.get(BookCategory, category["id"])
+        assert persisted_category.deleted_at is not None
+
+
 def test_renaming_category_preserves_collection_json_references(app):
     client, csrf = admin_client(app, "category-rename-admin@example.test")
     category = create_category(client, csrf, slug="old-category-slug")
@@ -1203,6 +1233,7 @@ def test_admin_book_and_template_workflow_preserves_published_template_versions(
     with app.app_context():
         assert db.session.scalar(db.select(DiscountCode).where(DiscountCode.code == "BOOKS10")).value == Decimal("10.00")
 
+
     template = client.post(
         "/api/v1/admin/templates",
         json={
@@ -1250,6 +1281,71 @@ def test_admin_book_and_template_workflow_preserves_published_template_versions(
         assert saved_project.template_version == 1
         assert saved_project.document == {"pages": [{"id": "saved-page", "elements": []}]}
         assert db.session.scalar(db.select(BookTemplateVersion).where(BookTemplateVersion.template_id == template_id))
+
+
+def test_deleting_book_hides_linked_template_without_breaking_project_or_order(app):
+    client, csrf = admin_client(app, "delete-book-template-admin@example.test")
+    category = create_category(client, csrf, slug="delete-template-category")
+    book = create_draft_book(client, csrf, category["id"])
+    design = client.post(f"/api/v1/admin/books/{book['id']}/design", headers=csrf)
+    assert design.status_code == 200, design.get_json()
+    template_id = design.json["template"]["id"]
+
+    with app.app_context():
+        user = db.session.scalar(db.select(User).where(User.email == "delete-book-template-admin@example.test"))
+        project = UserProject(
+            user_id=user.id,
+            product_id=book["id"],
+            template_id=template_id,
+            title="Project based on deleted book",
+            page_count=24,
+            version=1,
+            document={"schemaVersion": 1, "metadata": {"title": "Project based on deleted book"}, "pages": []},
+        )
+        db.session.add(project)
+        db.session.flush()
+        revision = ProjectRevision(
+            project_id=project.id,
+            revision_number=1,
+            document_version=1,
+            document=project.document,
+            checksum_sha256="a" * 64,
+        )
+        db.session.add(revision)
+        db.session.flush()
+        order = PdfOrder(
+            order_number="PDF-DELETE-TEMPLATE-TEST",
+            user_id=user.id,
+            project_id=project.id,
+            project_revision_id=revision.id,
+            status="pending",
+            currency="PKR",
+            service_price=Decimal("850.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("850.00"),
+            price_snapshot={"pdfProfiles": ["digital"]},
+            page_count=24,
+        )
+        db.session.add(order)
+        db.session.commit()
+        project_id, order_id = project.id, order.id
+
+    deleted = client.delete(f"/api/v1/admin/books/{book['id']}", headers=csrf)
+
+    assert deleted.status_code == 204
+    listed_templates = client.get("/api/v1/admin/templates")
+    assert listed_templates.status_code == 200
+    assert template_id not in {template["id"] for template in listed_templates.json["items"]}
+    with app.app_context():
+        template = db.session.get(BookTemplate, template_id)
+        project = db.session.get(UserProject, project_id)
+        order = db.session.get(PdfOrder, order_id)
+        assert template is not None
+        assert template.deleted_at is not None
+        assert template.is_active is False
+        assert project.template_id == template_id
+        assert order.project_id == project_id
 
 
 def test_template_publication_requires_a_valid_design(app):
@@ -1514,10 +1610,11 @@ def test_admin_can_suspend_users_and_soft_delete_catalog_records(app):
     assert admin.post(f"/api/v1/admin/books/{product['id']}/publish", headers=csrf).status_code == 400
     assert admin.post(f"/api/v1/admin/books/{product['id']}/unpublish", headers=csrf).status_code == 200
     assert admin.delete(f"/api/v1/admin/books/{product['id']}", headers=csrf).status_code == 204
-    blocked_category_delete = admin.delete(f"/api/v1/admin/categories/{category['id']}", headers=csrf)
-    assert blocked_category_delete.status_code == 409
-    assert blocked_category_delete.json["error"]["details"]["books"] == 1
+    category_delete = admin.delete(f"/api/v1/admin/categories/{category['id']}", headers=csrf)
+    assert category_delete.status_code == 204
     assert admin.get("/api/v1/books/archive-book").status_code == 404
+    with app.app_context():
+        assert db.session.get(BookCategory, category["id"]).deleted_at is not None
 
 
 def test_admin_manages_print_orders_support_settings_pricing_and_notifications(app):
