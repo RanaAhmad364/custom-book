@@ -1,26 +1,5 @@
 import { apiRequest } from "./apiClient.js";
 
-const tierPresentation = [
-  {
-    id: "light",
-    name: "LIGHT",
-    tagline: "Simple & beautiful",
-    features: ["20–40 pages", "Soft cover", "Standard paper"],
-  },
-  {
-    id: "basic",
-    name: "BASIC",
-    tagline: "More to discover",
-    features: ["20–60 pages", "Hard cover options", "Premium paper"],
-  },
-  {
-    id: "premium",
-    name: "PREMIUM",
-    tagline: "A keepsake for special moments",
-    features: ["20–100 pages", "Premium cover", "High-quality paper"],
-  },
-];
-
 function buildQuery(values) {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(values)) {
@@ -57,11 +36,9 @@ export const catalogService = {
   async getBookDetails(id) {
     const book = await getBook(id);
     if (!book) return null;
-    const pageRanges = {
-      LIGHT: ["20", "24", "32", "40"],
-      BASIC: ["20", "24", "32", "40", "60"],
-      PREMIUM: ["20", "24", "32", "40", "60", "80", "100"],
-    }[book.bookType] ?? ["20", "24", "32", "40", "60"];
+    const pageRanges = Array.isArray(book.pageCountOptions) && book.pageCountOptions.length
+      ? book.pageCountOptions.map(String)
+      : book.pageCountMin ? [String(book.pageCountMin)] : [];
     return {
       ...book,
       dimensions: book.bookType === "LIGHT" ? "8 × 8 in" : "10 × 10 in",
@@ -142,18 +119,9 @@ export const catalogService = {
   },
 
   async listBookTiers() {
-    const books = await listBooks();
-    return tierPresentation.map((tier) => {
-      const tierBooks = books.filter((book) => book.bookType === tier.name);
-      return {
-        ...tier,
-        startingPrice: tierBooks.reduce(
-          (minimum, book) => Math.min(minimum, book.startingPrice),
-          Number.POSITIVE_INFINITY,
-        ),
-        currency: tierBooks[0]?.currency ?? "USD",
-      };
-    }).filter((tier) => Number.isFinite(tier.startingPrice));
+    const { data } = await apiRequest("/pricing/tiers");
+    if (!Array.isArray(data?.items)) throw new Error("The pricing service returned an invalid plan catalog.");
+    return data.items;
   },
 
   async listTemplates(filters = {}) {

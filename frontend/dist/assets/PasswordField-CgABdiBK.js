@@ -1,6 +1,0 @@
-import{c as h,r as x,j as s}from"./index-D6sXrhyn.js";import{E as u}from"./eye-BEdxo_ti.js";/**
- * @license lucide-react v0.468.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */const f=h("EyeOff",[["path",{d:"M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49",key:"ct8e1f"}],["path",{d:"M14.084 14.158a3 3 0 0 1-4.242-4.242",key:"151rxh"}],["path",{d:"M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143",key:"13bj9a"}],["path",{d:"m2 2 20 20",key:"1ooewy"}]]);function y({id:t,label:a,name:r,value:o,onChange:i,autoComplete:p,required:c=!0,minLength:n=8}){const[e,d]=x.useState(!1);return s.jsxs("label",{className:"auth-field",htmlFor:t,children:[s.jsx("span",{children:a}),s.jsxs("span",{className:"auth-password-wrap",children:[s.jsx("input",{id:t,name:r,type:e?"text":"password",value:o,onChange:i,autoComplete:p,required:c,minLength:n}),s.jsx("button",{type:"button",className:"auth-password-toggle","aria-label":e?`Hide ${a.toLowerCase()}`:`Show ${a.toLowerCase()}`,"aria-pressed":e,onClick:()=>d(l=>!l),children:e?s.jsx(f,{size:17}):s.jsx(u,{size:17})})]})]})}export{y as P};

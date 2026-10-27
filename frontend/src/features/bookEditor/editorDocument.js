@@ -57,9 +57,9 @@ export function createShapeElement(shape = "rectangle") {
     width: 0.28,
     height: 0.28,
     rotation: 0,
-    fill: shape === "circle" ? "#dce8e1" : "#eadfce",
-    stroke: "#17483e",
-    strokeWidth: 2,
+    fill: shape === "photo-placeholder" ? "#edf0eb" : shape === "circle" ? "#dce8e1" : "#eadfce",
+    stroke: shape === "photo-placeholder" ? "#d8ded8" : "#17483e",
+    strokeWidth: shape === "photo-placeholder" ? 0.001 : 2,
     opacity: 1,
     rx: 0.02,
   };
@@ -86,6 +86,25 @@ export function createPhotoElement(asset, x = 0.1, y = 0.1, width = 0.8, height 
     borderRadius: 0,
     shadow: false,
   };
+}
+
+export function placePhotoOnPage(elements, asset, selectedElementId) {
+  const selectedIndex = elements.findIndex((element) => element.id === selectedElementId);
+  const selected = elements[selectedIndex];
+  const canReplace = selected?.type === "image"
+    || (selected?.type === "shape" && selected.shape === "photo-placeholder");
+
+  if (!canReplace) {
+    const photo = createPhotoElement(asset);
+    return { elements: [...elements, photo], photo };
+  }
+
+  const photo = createPhotoElement(asset, selected.x, selected.y, selected.width, selected.height);
+  photo.id = selected.id;
+  photo.rotation = selected.rotation ?? 0;
+  const nextElements = [...elements];
+  nextElements[selectedIndex] = photo;
+  return { elements: nextElements, photo };
 }
 
 export function normalizeFabricObject(object, dimensions = { width: EDITOR_WIDTH, height: EDITOR_HEIGHT }) {
@@ -180,6 +199,63 @@ export function removePage(document, pageId) {
   next.pageOrder = next.pageOrder.filter((id) => id !== pageId);
   next.book.pageCount = next.pageOrder.filter((id) => next.pages.find((page) => page.id === id)?.type !== "cover").length;
   return { document: next, nextActivePageId: next.pageOrder[Math.max(0, targetIndex - 1)] };
+}
+
+export function resizeBookPageCount(document, pageCount) {
+  if (!Number.isInteger(pageCount) || pageCount < 1 || pageCount > 500) return null;
+  const next = cloneDocument(document);
+  const interiorIds = next.pageOrder.filter((id) => next.pages.find((page) => page.id === id)?.type !== "cover");
+  while (interiorIds.length > pageCount) {
+    const removedId = interiorIds.pop();
+    next.pageOrder = next.pageOrder.filter((id) => id !== removedId);
+    next.pages = next.pages.filter((page) => page.id !== removedId);
+  }
+  while (interiorIds.length < pageCount) {
+    const page = createPage("page", interiorIds.length + 1, next.styles?.background ?? "#fffdf9");
+    interiorIds.push(page.id);
+    next.pages.push(page);
+    next.pageOrder.push(page.id);
+  }
+  next.book.pageCount = pageCount;
+  return next;
+}
+
+export function pagesWithoutPhotoSlots(document) {
+  return document.pageOrder
+    .map((id) => document.pages.find((page) => page.id === id))
+    .filter((page) => page && page.type !== "cover")
+    .filter((page) => !(page.elements ?? []).some((element) => (
+      element.type === "image" || (element.type === "shape" && element.shape === "photo-placeholder")
+    )))
+    .map((page) => page.label);
+}
+
+export function createPreviewDocument(document) {
+  const dummyImages = [
+    ["#d6c6b8", "#f1e7dc"],
+    ["#9bb3a3", "#dfe9df"],
+    ["#d6b48d", "#f2dfc7"],
+    ["#a5a9ba", "#e6e6ed"],
+  ];
+  return {
+    ...document,
+    pages: document.pages.map((page) => ({
+      ...page,
+      elements: page.elements.map((element, index) => {
+        if (element.type !== "shape" || element.shape !== "photo-placeholder") return element;
+        const [start, end] = dummyImages[index % dummyImages.length];
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 800"><defs><linearGradient id="g" x2="0" y2="1"><stop stop-color="${start}"/><stop offset="1" stop-color="${end}"/></linearGradient></defs><rect width="600" height="800" fill="url(#g)"/><circle cx="440" cy="190" r="85" fill="#fff" fill-opacity=".2"/><path d="M0 620 180 390l135 145 95-110 190 205v170H0Z" fill="#fff" fill-opacity=".28"/></svg>`;
+        return {
+          ...element,
+          type: "image",
+          src: `data:image/svg+xml,${encodeURIComponent(svg)}`,
+          name: "Design preview photo",
+          fit: "cover",
+          opacity: 1,
+        };
+      }),
+    })),
+  };
 }
 
 export const pageLayouts = [

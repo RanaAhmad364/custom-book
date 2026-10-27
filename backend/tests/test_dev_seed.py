@@ -46,11 +46,11 @@ def test_demo_catalog_seed_is_previewed_idempotent_and_complete(app, client, tmp
         ).all()
         variants = db.session.scalars(select(BookVariant)).all()
         projects = db.session.scalars(select(UserProject)).all()
-        assert len(categories) == 4
-        assert len(collections) == 6
-        assert len(products) == 10
-        assert len(templates) == 10
-        assert len(variants) == 40
+        assert len(categories) == 6
+        assert len(collections) == 4
+        assert len(products) == 12
+        assert len(templates) == 12
+        assert len(variants) == 48
         assert len(projects) == 3
         assert all(product.is_active and product.currency == "PKR" for product in products)
         assert all(product.collection_id for product in products)
@@ -108,23 +108,23 @@ def test_demo_catalog_seed_is_previewed_idempotent_and_complete(app, client, tmp
     public_books = client.get("/api/v1/books")
     assert public_books.status_code == 200
     public_slugs = {item["slug"] for item in public_books.json["items"]}
-    assert len({slug for slug in public_slugs if slug.startswith("demo-")}) == 10
+    assert len({slug for slug in public_slugs if slug.startswith("demo-")}) == 12
 
     second = runner.invoke(args=["seed-demo-catalog", "--apply"])
     assert second.exit_code == 0, second.output
     with app.app_context():
         assert db.session.scalar(
             select(db.func.count()).select_from(BookCategory).where(BookCategory.slug.like("demo-%"))
-        ) == 4
-        assert db.session.scalar(
-            select(db.func.count()).select_from(BookCollection).where(BookCollection.slug.like("demo-%"))
         ) == 6
         assert db.session.scalar(
+            select(db.func.count()).select_from(BookCollection).where(BookCollection.slug.like("demo-%"))
+        ) == 4
+        assert db.session.scalar(
             select(db.func.count()).select_from(BookProduct).where(BookProduct.slug.like("demo-%"))
-        ) == 10
+        ) == 12
         assert db.session.scalar(
             select(db.func.count()).select_from(BookTemplate).where(BookTemplate.slug.like("demo-%-master-design"))
-        ) == 10
+        ) == 12
         preserved = db.session.scalar(
             select(BookProduct).where(BookProduct.slug == "demo-our-family-story")
         )

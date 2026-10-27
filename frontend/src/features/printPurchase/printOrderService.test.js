@@ -48,7 +48,8 @@ test("print order accepts only backend payment and production states", () => {
   assert.equal(order.productionStatus, "in_production");
   assert.equal(order.checkoutUrl, null);
   assert.throws(() => normalizePrintOrder({ ...order, paymentStatus: "paid" }), /unsupported payment status/);
-  assert.throws(() => normalizePrintOrder({ ...order, productionStatus: "printed" }), /unsupported production status/);
+  assert.equal(normalizePrintOrder({ ...order, productionStatus: "printed" }).productionStatus, "printed");
+  assert.throws(() => normalizePrintOrder({ ...order, productionStatus: "forged" }), /unsupported production status/);
   assert.equal(normalizePrintOrder({ ...order, paymentStatus: "refunded" }).paymentStatus, "refunded");
 });
 

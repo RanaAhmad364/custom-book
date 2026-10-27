@@ -17,6 +17,7 @@ class User(db.Model):
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
     full_name: Mapped[str | None] = mapped_column(String(100))
     phone: Mapped[str | None] = mapped_column(String(40))
+    privacy_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     password_hash: Mapped[str] = mapped_column(String(512), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -39,6 +40,7 @@ class User(db.Model):
             "email": self.email,
             "name": self.full_name,
             "phone": self.phone,
+            "privacyMode": self.privacy_mode,
             "isActive": self.is_active,
             "emailVerified": self.email_verified_at is not None,
             "roles": role_names,

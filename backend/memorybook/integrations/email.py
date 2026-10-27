@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import smtplib
+import ssl
 from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import quote
@@ -73,8 +74,17 @@ def send_email(recipient: str, subject: str, body: str) -> None:
     message["To"] = recipient
     message.set_content(body)
     try:
-        with smtplib.SMTP(config["SMTP_HOST"], config["SMTP_PORT"], timeout=10) as client:
-            if config.get("SMTP_USE_TLS"):
+        if config.get("SMTP_USE_SSL"):
+            connection = smtplib.SMTP_SSL(
+                config["SMTP_HOST"],
+                config["SMTP_PORT"],
+                timeout=10,
+                context=ssl.create_default_context(),
+            )
+        else:
+            connection = smtplib.SMTP(config["SMTP_HOST"], config["SMTP_PORT"], timeout=10)
+        with connection as client:
+            if config.get("SMTP_USE_TLS") and not config.get("SMTP_USE_SSL"):
                 client.starttls()
             username = config.get("SMTP_USERNAME")
             if username:

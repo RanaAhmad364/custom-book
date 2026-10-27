@@ -36,7 +36,7 @@ test("book form maps existing product and persisted asset keys into editable val
   assert.equal("image" in payload, false);
 });
 
-test("new product defaults preserve USD and form metadata defaults", () => {
+test("new product defaults use PKR and form metadata defaults", () => {
   const values = bookFormValues({
     title: "New book",
     slug: "new-book",
@@ -45,7 +45,7 @@ test("new product defaults preserve USD and form metadata defaults", () => {
   });
   const payload = buildBookPayload(values);
 
-  assert.equal(values.currency, "USD");
+  assert.equal(values.currency, "PKR");
   assert.equal(payload.bookType, "BASIC");
   assert.equal(payload.pageCountMin, 24);
   assert.deepEqual(payload.adminMetadata.printingTiers, []);

@@ -262,6 +262,19 @@
   padding-left: 18px;
 }
 
+.book-details-actions .favorite-control {
+  position: relative;
+  top: auto;
+  right: auto;
+  align-items: center;
+}
+
+.book-details-actions .favorite-button {
+  width: 48px;
+  height: 48px;
+  border-radius: 0;
+}
+
 .book-details-availability {
   margin: 14px 0 0;
   color: #858d84;

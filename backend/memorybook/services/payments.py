@@ -13,6 +13,7 @@ from memorybook.errors import ConflictError, ServiceUnavailableError, Validation
 from memorybook.extensions import db
 from memorybook.integrations.payment_gateways import (
     JazzCashGateway,
+    ManualPaymentGateway,
     StripeGateway,
     available_payment_methods,
     provider_for,
@@ -138,10 +139,78 @@ def _start_provider_checkout(payment, attempt, order, kind, provider) -> dict:
         db.session.commit()
         raise
     payment.provider_payment_id = checkout.reference
-    attempt.provider_reference = checkout.reference
+    if provider.name != "manual":
+        attempt.provider_reference = checkout.reference
     attempt.checkout_url = checkout.url
     db.session.commit()
-    return serialize_order(order, kind, checkout_url=checkout.url)
+    return serialize_order(
+        order,
+        kind,
+        checkout_url=checkout.url,
+        payment_instructions=checkout.instructions,
+    )
+
+
+def submit_manual_payment_reference(payment: Payment, user_id: str, reference: str) -> dict:
+    if payment.user_id != user_id:
+        raise NotFound("Payment was not found.")
+    if payment.provider != "manual" or payment.status != "pending":
+        raise ConflictError("This payment is not awaiting manual confirmation.")
+    normalized = reference.strip()
+    if not normalized or len(normalized) > 160:
+        raise ValidationError("Enter a valid transfer reference.", {"reference": "invalid"})
+    attempt = db.session.scalar(
+        select(PaymentAttempt)
+        .where(PaymentAttempt.payment_id == payment.id)
+        .order_by(PaymentAttempt.attempt_number.desc())
+        .with_for_update()
+    )
+    if attempt is None or attempt.status != "pending":
+        raise ConflictError("This payment attempt is not accepting a transfer reference.")
+    attempt.provider_reference = normalized
+    attempt.status = "submitted"
+    db.session.commit()
+    return serialize_transaction(payment)
+
+
+def review_manual_payment(payment_id: str, *, approved: bool, actor_id: str) -> dict:
+    payment = db.session.scalar(
+        select(Payment).where(Payment.id == payment_id).with_for_update()
+    )
+    if payment is None:
+        raise NotFound("Payment was not found.")
+    if payment.provider != "manual":
+        raise ConflictError("Only manual payments can be reviewed by an administrator.")
+    if payment.status != "pending":
+        raise ConflictError("This payment has already been reviewed.")
+    attempt = db.session.scalar(
+        select(PaymentAttempt)
+        .where(PaymentAttempt.payment_id == payment.id)
+        .order_by(PaymentAttempt.attempt_number.desc())
+        .with_for_update()
+    )
+    if attempt is None or attempt.status != "submitted" or not attempt.provider_reference:
+        raise ConflictError("The customer must submit a transfer reference before review.")
+    if approved:
+        _apply_payment_result(
+            payment,
+            success=True,
+            provider_reference=attempt.provider_reference,
+            changed_by_user_id=actor_id,
+        )
+    else:
+        _apply_payment_result(
+            payment,
+            success=False,
+            provider_reference=attempt.provider_reference,
+            changed_by_user_id=actor_id,
+        )
+        attempt.failure_code = "manual_payment_rejected"
+        attempt.failure_message = "The administrator could not verify the submitted transfer."
+    db.session.commit()
+    if approved and payment.pdf_order_id:
+        _queue_pdf_generation(payment)
+    return serialize_transaction(payment)
 
 
 def process_stripe_event(raw_body: bytes, signature: str | None) -> dict:
@@ -258,7 +327,13 @@ def _process_verified_event(
     return {"received": True, "processed": True}
 
 
-def _apply_payment_result(payment: Payment, *, success: bool, provider_reference: str | None) -> None:
+def _apply_payment_result(
+    payment: Payment,
+    *,
+    success: bool,
+    provider_reference: str | None,
+    changed_by_user_id: str | None = None,
+) -> None:
     if payment.status in {"refunded", "partially_refunded"}:
         return
     if payment.status == "successful":
@@ -292,17 +367,24 @@ def _apply_payment_result(payment: Payment, *, success: bool, provider_reference
         order.paid_at = datetime.now(UTC)
         old_status = order.status
         order.status = "paid" if payment.pdf_order_id else "payment_confirmed"
+        verification_note = (
+            "Manual transfer reviewed and approved by an administrator."
+            if payment.provider == "manual"
+            else "Payment verified by payment provider."
+        )
         if payment.print_order_id and old_status != order.status:
             db.session.add(OrderStatusHistory(
                 print_order_id=order.id,
                 status="payment_confirmed",
-                note="Payment verified by payment provider.",
+                note=verification_note,
+                changed_by_user_id=changed_by_user_id,
             ))
         elif payment.pdf_order_id and old_status != order.status:
             db.session.add(OrderStatusHistory(
                 pdf_order_id=order.id,
                 status="paid",
-                note="Payment verified by payment provider.",
+                note=verification_note,
+                changed_by_user_id=changed_by_user_id,
             ))
         queue_order_event(
             order.user_id,
@@ -341,7 +423,12 @@ def _apply_payment_result(payment: Payment, *, success: bool, provider_reference
             pdf_order_id=order.id if payment.pdf_order_id else None,
             print_order_id=order.id if payment.print_order_id else None,
             status="payment_failed",
-            note="Payment was declined by the payment provider.",
+            note=(
+                "Manual payment was not verified by an administrator."
+                if payment.provider == "manual"
+                else "Payment was declined by the payment provider."
+            ),
+            changed_by_user_id=changed_by_user_id,
         ))
         queue_order_event(
             order.user_id,
@@ -363,7 +450,9 @@ def _queue_pdf_generation(payment: Payment) -> None:
     if dispatch:
         current_app = _app()
         try:
-            current_app.extensions["celery"].send_task("memorybook.generate_pdf", args=[job.id])
+            from memorybook.tasks.dispatch import dispatch_pdf_generation
+
+            dispatch_pdf_generation(job.id)
         except Exception:
             current_app.logger.exception("Paid PDF generation could not be dispatched.")
             db.session.rollback()
@@ -578,7 +667,7 @@ def _sync_refund_payment_status(payment: Payment, refund: Refund) -> None:
     ) or Decimal("0")
     payment.status = "refunded" if total >= payment.amount else "partially_refunded"
     order = _payment_order(payment)
-    if payment.pdf_order_id and payment.status == "refunded":
+    if payment.status == "refunded":
         order.status = "refunded"
     if payment.pdf_order_id:
         for entitlement in db.session.scalars(
@@ -637,7 +726,13 @@ def _order_title(order, kind: str) -> str:
     return f"{'PDF download' if kind == 'pdf' else 'Printed MemoryBook'} — {order.order_number}"
 
 
-def serialize_order(order, kind: str, *, checkout_url: str | None = None) -> dict:
+def serialize_order(
+    order,
+    kind: str,
+    *,
+    checkout_url: str | None = None,
+    payment_instructions: dict[str, str] | None = None,
+) -> dict:
     payment = db.session.scalar(
         select(Payment).where(
             (Payment.pdf_order_id == order.id) if kind == "pdf" else (Payment.print_order_id == order.id)
@@ -652,14 +747,36 @@ def serialize_order(order, kind: str, *, checkout_url: str | None = None) -> dic
         checkout_url = current_attempt.checkout_url if current_attempt else None
     payload = {
         "id": order.id,
+        "projectId": order.project_id,
         "orderNumber": order.order_number,
         "paymentStatus": _frontend_payment_status(payment.status if payment else "pending"),
         "paymentId": payment.id if payment else None,
+        "paymentProvider": payment.provider if payment else None,
+        "paymentMethod": payment.payment_method if payment else None,
+        "paymentReference": payment.provider_payment_id if payment and payment.provider == "manual" else None,
+        "paymentInstructions": payment_instructions if payment_instructions is not None else (
+            ManualPaymentGateway().create_checkout(payment, "", "").instructions
+            if payment and payment.provider == "manual" else None
+        ),
         "checkoutUrl": checkout_url,
         "amount": str(order.total_amount),
         "currency": order.currency,
         "createdAt": order.created_at.isoformat(),
     }
+    if payment is not None:
+        latest_attempt = db.session.scalar(
+            select(PaymentAttempt)
+            .where(PaymentAttempt.payment_id == payment.id)
+            .order_by(PaymentAttempt.attempt_number.desc())
+        )
+        payload["manualReferenceStatus"] = (
+            latest_attempt.status if payment.provider == "manual" and latest_attempt else None
+        )
+        payload["submittedPaymentReference"] = (
+            latest_attempt.provider_reference
+            if payment.provider == "manual" and latest_attempt and latest_attempt.status == "submitted"
+            else None
+        )
     if kind == "pdf":
         from memorybook.models import PdfJob
 

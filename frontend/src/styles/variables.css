@@ -1,5 +1,5 @@
 :root {
-  font-family: "DM Sans", sans-serif;
+  font-family: "DM Sans", "Segoe UI", Arial, sans-serif;
   color: #1d2824;
   background: #f6f2ea;
   font-synthesis: none;
@@ -15,6 +15,6 @@
   --sage: #dce8e1;
   --sand: #e9ddca;
   --border: #d9d3c8;
-  --serif: "Playfair Display", Georgia, serif;
+  --serif: "Playfair Display", Georgia, "Times New Roman", serif;
   --content-width: 1280px;
 }

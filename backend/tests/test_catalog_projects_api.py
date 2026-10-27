@@ -6,6 +6,7 @@ from decimal import Decimal
 from urllib.parse import urlsplit
 
 from PIL import Image
+from sqlalchemy import select
 
 from memorybook.extensions import db
 from memorybook.models import (
@@ -160,6 +161,64 @@ def test_public_catalog_only_returns_active_records_with_search_filters_and_pagi
     assert client.get("/api/v1/templates/hidden-template").status_code == 404
 
 
+def test_public_plan_catalog_uses_active_catalog_prices_and_configured_currency(app, client):
+    with app.app_context():
+        seed_catalog()
+
+    response = client.get("/api/v1/pricing/tiers")
+
+    assert response.status_code == 200
+    plans = {item["id"]: item for item in response.json["items"]}
+    assert set(plans) == {"basic", "medium", "premium"}
+    assert plans["basic"]["startingPrice"] == "42.50"
+    assert plans["basic"]["currency"] == "PKR"
+    assert plans["basic"]["maximumPages"] == 80
+    assert plans["medium"]["startingPrice"] is None
+    assert plans["premium"]["startingPrice"] is None
+
+
+def test_favorites_are_private_idempotent_and_included_in_catalog_responses(app, client):
+    with app.app_context():
+        _, _, product, _ = seed_catalog()
+        book_id = product.id
+        book_slug = product.slug
+
+    assert client.get("/api/v1/favorites").status_code == 401
+    assert client.post(f"/api/v1/favorites/{book_id}").status_code == 401
+    assert client.delete(f"/api/v1/favorites/{book_id}").status_code == 401
+    assert client.get("/api/v1/books").json["items"][0]["is_favorite"] is False
+
+    owner, owner_headers = authenticated_client(app, "favorites-owner@example.test")
+    other, other_headers = authenticated_client(app, "favorites-other@example.test")
+    add_path = f"/api/v1/favorites/{book_id}"
+    assert owner.post(add_path, headers=owner_headers).status_code == 200
+    assert owner.post(f"/api/v1/favorites/{book_slug}", headers=owner_headers).status_code == 200
+    assert owner.get("/api/v1/favorites").json["items"][0]["id"] == book_id
+    assert owner.get("/api/v1/books").json["items"][0]["is_favorite"] is True
+    assert owner.get(f"/api/v1/books/{book_slug}").json["book"]["is_favorite"] is True
+    from memorybook.services.admin import _product_dict, dashboard_metrics
+    with app.app_context():
+        assert dashboard_metrics()["favoritesCount"] == 1
+        assert _product_dict(db.session.get(BookProduct, book_id))["favorites_count"] == 1
+
+    assert other.get("/api/v1/favorites").json["items"] == []
+    assert other.get("/api/v1/books").json["items"][0]["is_favorite"] is False
+    assert other.delete(add_path, headers=other_headers).status_code == 204
+    assert owner.get("/api/v1/favorites").json["items"][0]["id"] == book_id
+    assert owner.delete(add_path, headers=owner_headers).status_code == 204
+    assert owner.delete(add_path, headers=owner_headers).status_code == 204
+    assert owner.get("/api/v1/favorites").json["items"] == []
+
+
+def test_favorites_reject_unpublished_books(app, client):
+    with app.app_context():
+        _, _, _, _ = seed_catalog()
+        hidden = db.session.scalar(select(BookProduct).where(BookProduct.slug == "unpublished-sample"))
+        hidden_id = hidden.id
+    member, headers = authenticated_client(app, "favorites-hidden@example.test")
+    assert member.post(f"/api/v1/favorites/{hidden_id}", headers=headers).status_code == 404
+
+
 def test_inactive_collection_details_are_hidden_without_hiding_public_books(app, client):
     with app.app_context():
         category, collection, product, _ = seed_catalog()
@@ -273,6 +332,8 @@ def test_product_projects_require_its_published_master_design(app):
     customer, headers = authenticated_client(app, "published-design-customer@example.test")
     with app.app_context():
         _, _, product, template = seed_catalog()
+        product.page_count_min = 1
+        db.session.commit()
         product_id = product.id
         template_id = template.id
 
@@ -612,3 +673,44 @@ def test_project_deletion_is_soft_and_assets_do_not_leak_to_other_users(app):
     with app.app_context():
         persisted = db.session.get(UserProject, project["id"])
         assert persisted.status == "deleted"
+
+
+def test_account_privacy_and_project_overrides_are_persisted(app):
+    client, headers = authenticated_client(app, "privacy-settings@example.test")
+    enabled = client.patch("/api/v1/auth/me", json={"privacyMode": True}, headers=headers)
+    assert enabled.status_code == 200
+    assert enabled.json["user"]["privacyMode"] is True
+
+    inherited = client.post(
+        "/api/v1/projects",
+        json={"title": "Inherited privacy", "pageCount": 1},
+        headers=headers,
+    )
+    standard = client.post(
+        "/api/v1/projects",
+        json={
+            "title": "Project-specific standard",
+            "pageCount": 1,
+            "privacyOverride": False,
+        },
+        headers=headers,
+    )
+    assert inherited.status_code == 201
+    assert inherited.json["project"]["privacyMode"] is True
+    assert inherited.json["project"]["privacyOverride"] is None
+    assert standard.status_code == 201
+    assert standard.json["project"]["privacyMode"] is False
+    assert standard.json["project"]["privacyOverride"] is False
+
+    private_override = client.patch(
+        f"/api/v1/projects/{standard.json['project']['id']}",
+        json={"privacyOverride": True},
+        headers={**headers, "If-Match": '"1"'},
+    )
+    assert private_override.status_code == 200
+    assert private_override.json["project"]["privacyMode"] is True
+    assert client.patch(
+        "/api/v1/auth/me",
+        json={"privacyMode": "yes"},
+        headers=headers,
+    ).status_code == 400

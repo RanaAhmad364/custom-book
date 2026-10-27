@@ -128,6 +128,9 @@
 .print-choice-summary > div > strong { color: var(--ink); text-align: right; }
 .print-refresh-quote { display: inline-flex; align-items: center; gap: 7px; margin: 12px 0; padding: 6px 0; border: 0; background: transparent; color: var(--green); font-size: 11px; cursor: pointer; }
 .print-refresh-quote:disabled { opacity: .55; cursor: wait; }
+.print-discount-field { display: grid; gap: 7px; max-width: 360px; margin-top: 16px; color: var(--ink); font-size: 12px; }
+.print-discount-field input { min-height: 40px; padding: 9px 11px; border: 1px solid #d8ded7; border-radius: 2px; background: #fff; color: var(--ink); font: inherit; }
+.print-discount-note { margin: -5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 
 .print-quote { margin-top: 19px; padding: 18px; border: 1px solid var(--border); background: #fbfcf9; }
 .print-quote.compact { margin: 17px 0 0; }

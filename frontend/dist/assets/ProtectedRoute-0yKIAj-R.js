@@ -1,1 +1,0 @@
-import{e as o,x as r,j as t,N as u,O as n}from"./index-D6sXrhyn.js";function c(){const{user:e,ready:s}=o(),a=r();return s?e?t.jsx(n,{}):t.jsx(u,{to:"/unauthorized",replace:!0,state:{from:a}}):t.jsx("main",{className:"auth-loading",role:"status",children:"Checking your session…"})}export{c as default};

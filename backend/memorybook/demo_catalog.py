@@ -66,7 +66,7 @@ CATEGORIES = (
     {
         "name": "Weddings & Celebrations",
         "slug": "demo-weddings-celebrations",
-        "description": "Elegant keepsakes for the celebrations and milestones shared with the people you love.",
+        "description": "Elegant keepsakes for the ceremonies, celebrations, and milestones shared with the people you love.",
         "style": "Romantic",
         "color": ("#efe1df", "#684c50", "#bf967e"),
     },
@@ -77,28 +77,42 @@ CATEGORIES = (
         "style": "Classic",
         "color": ("#e5e8df", "#52706a", "#d0a47c"),
     },
+    {
+        "name": "Birthday & Milestones",
+        "slug": "demo-birthday-milestones",
+        "description": "Bright keepsakes for milestone birthdays, sweet surprises, and years worth celebrating.",
+        "style": "Playful",
+        "color": ("#f1ebdd", "#7a4a3b", "#d09d5a"),
+    },
+    {
+        "name": "Anniversaries & Everyday Life",
+        "slug": "demo-anniversaries-everyday-life",
+        "description": "Beautiful albums for anniversaries, treasured rituals, and the small moments that become memories.",
+        "style": "Luxury",
+        "color": ("#ece7e3", "#54474e", "#b68a6d"),
+    },
 )
 
 COLLECTIONS = (
     ("Family Heritage", "demo-family-heritage", 0, "Stories, recipes, and family traditions passed from one generation to the next."),
-    ("Everyday Moments", "demo-everyday-moments", 0, "A home for ordinary days that became favorite memories."),
     ("Travel Diaries", "demo-travel-diaries", 1, "A collected journal of faraway places and the journey between them."),
     ("Wedding Memories", "demo-wedding-memories", 2, "A refined collection for the ceremony, celebration, and all the details in between."),
     ("Baby's First Year", "demo-babys-first-year", 3, "A gentle record of first smiles, first steps, and the people who were there."),
-    ("Birthday Celebrations", "demo-birthday-celebrations", 2, "A joyful keepsake for milestone birthdays and the people gathered around."),
 )
 
 BOOKS = (
     ("Our Family Story", "our-family-story", 0, 0, "BASIC", "Editorial", "Family", 24, 80, "A living portrait of family traditions, familiar places, and the people who make a house a home."),
-    ("The Travel Journal", "the-travel-journal", 1, 2, "PREMIUM", "Modern", "Travel", 24, 80, "A considered travel journal for maps, quiet mornings, local color, and the road home."),
-    ("Wedding Memories", "wedding-memories", 2, 3, "PREMIUM", "Romantic", "Wedding", 24, 80, "A graceful keepsake of the vows, the gathering, and every thoughtful detail of the day."),
-    ("Baby's First Year", "babys-first-year", 3, 4, "BASIC", "Classic", "Baby", 24, 80, "A soft, timeless record of new beginnings and a first year that moved too quickly."),
-    ("Birthday Celebration Book", "birthday-celebration-book", 2, 5, "LIGHT", "Playful", "Birthday", 24, 80, "A bright collection of candles, familiar faces, shared laughter, and birthday wishes."),
-    ("Our Love Story", "our-love-story", 2, 3, "PREMIUM", "Romantic", "Anniversary", 24, 80, "A personal anniversary book for the places, rituals, and little moments that became yours."),
-    ("Adventure Begins", "adventure-begins", 1, 2, "LIGHT", "Editorial", "Travel", 24, 80, "A light, portable album for spontaneous weekends and the first chapter of a new adventure."),
-    ("Everyday Moments", "everyday-moments-book", 0, 1, "LIGHT", "Minimal", "Family", 24, 80, "A simple, modern album that gives ordinary days the space they deserve."),
+    ("Everyday Moments", "everyday-moments-book", 0, 0, "LIGHT", "Minimal", "Family", 24, 80, "A simple, modern album that gives ordinary days the space they deserve."),
     ("Family Recipe Memories", "family-recipe-memories", 0, 0, "BASIC", "Classic", "Family", 24, 80, "A family recipe book pairing treasured dishes with the stories and people behind them."),
-    ("Graduation Memories", "graduation-memories", 2, 5, "BASIC", "Modern", "Birthday", 24, 80, "A polished keepsake for the hard work, proud faces, and new beginnings of graduation."),
+    ("The Travel Journal", "the-travel-journal", 1, 1, "PREMIUM", "Modern", "Travel", 24, 80, "A considered travel journal for maps, quiet mornings, local color, and the road home."),
+    ("Adventure Begins", "adventure-begins", 1, 1, "LIGHT", "Editorial", "Travel", 24, 80, "A light, portable album for spontaneous weekends and the first chapter of a new adventure."),
+    ("Weekend Escape", "weekend-escape", 1, 1, "BASIC", "Modern", "Travel", 24, 80, "A living keepsake of little escapes, local discoveries, and the joy of wandering a little more."),
+    ("Wedding Memories", "wedding-memories", 2, 2, "PREMIUM", "Romantic", "Wedding", 24, 80, "A graceful keepsake of the vows, the gathering, and every thoughtful detail of the day."),
+    ("Our Love Story", "our-love-story", 2, 2, "PREMIUM", "Romantic", "Anniversary", 24, 80, "A personal anniversary book for the places, rituals, and little moments that became yours."),
+    ("Celebration Details", "celebration-details", 2, 2, "LIGHT", "Romantic", "Wedding", 24, 80, "A mood-rich compilation of table settings, floral details, and joyful moments from the celebration."),
+    ("Baby's First Year", "babys-first-year", 3, 3, "BASIC", "Classic", "Baby", 24, 80, "A soft, timeless record of new beginnings and a first year that moved too quickly."),
+    ("Tiny Wonders", "tiny-wonders", 3, 3, "LIGHT", "Classic", "Baby", 24, 80, "A gentle album of tiny milestones, first smiles, and the details that felt endlessly new."),
+    ("Birthday Celebration Book", "birthday-celebration-book", 3, 3, "LIGHT", "Playful", "Birthday", 24, 80, "A bright collection of candles, familiar faces, shared laughter, and birthday wishes."),
 )
 
 TIERS = (
@@ -165,6 +179,8 @@ def _find_category(data: dict) -> BookCategory | None:
         "demo-travel-adventures": ("travel & adventures", "travel"),
         "demo-weddings-celebrations": ("weddings & celebrations", "wedding"),
         "demo-baby-childhood": ("baby & childhood", "baby", "childhood"),
+        "demo-birthday-milestones": ("birthday & milestones", "birthday", "milestones"),
+        "demo-anniversaries-everyday-life": ("anniversaries & everyday life", "anniversary", "everyday life"),
     }[data["slug"]]
     return db.session.scalar(
         select(BookCategory).where(

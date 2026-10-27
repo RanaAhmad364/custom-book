@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import { AlertCircle, FilePlus2, Plus, Save } from "lucide-react";
 import { SafeImage } from "../../components/common/SafeImage.jsx";
-import { loadAdminBookReferences, loadAdminSection } from "./adminService.js";
+import { loadAdminBookReferences, loadAdminSection, loadPrivatePrintOrderPhotos } from "./adminService.js";
 import { categoryFormPayload, validateCategoryRecord } from "./categoryForm.js";
 import { validatePricingRecord } from "./pricingForm.js";
+import { apiUrl } from "../../services/apiClient.js";
 
 const PRINT_ORDER_STATUSES = [
-  "order_placed", "payment_confirmed", "design_verified", "in_production", "quality_check",
-  "packed", "shipped", "out_for_delivery", "delivered", "cancellation_requested", "cancelled",
+  "order_placed", "payment_confirmed", "processing", "printed", "shipped", "delivered",
+  "design_verified", "in_production", "quality_check", "packed", "out_for_delivery",
+  "cancellation_requested", "cancelled", "refunded",
 ];
 const SUPPORT_STATUSES = ["open", "in_progress", "waiting_for_customer", "resolved", "closed"];
 const SUPPORT_PRIORITIES = ["low", "normal", "high", "urgent"];
@@ -335,6 +337,9 @@ export default function AdminRecordEditor({ section, record, setRecord, onSave, 
   const [pricingOptions, setPricingOptions] = useState(null);
   const [optionsError, setOptionsError] = useState("");
   const [optionsLoading, setOptionsLoading] = useState(false);
+  const [privatePhotos, setPrivatePhotos] = useState([]);
+  const [privatePhotosLoading, setPrivatePhotosLoading] = useState(false);
+  const [privatePhotosError, setPrivatePhotosError] = useState("");
   const readOnly = ["users", "payments", "refunds", "notifications"].includes(section);
   const title = record.title || record.name || record.email || record.orderNumber || record.ticketNumber || record.code || record.key || "Record details";
   const imageTarget = section === "templates" ? "previewAssetKey" : "heroAssetKey";
@@ -345,8 +350,12 @@ export default function AdminRecordEditor({ section, record, setRecord, onSave, 
     setImageUploadError("");
     setCategoryValidationError("");
     setPricingValidationError("");
+    setPrivatePhotos([]);
+    setPrivatePhotosError("");
     setSettingValueText(JSON.stringify(record.value ?? {}, null, 2));
   }, [record.id, record.kind, record.__create, section]);
+
+  useEffect(() => () => privatePhotos.forEach((photo) => URL.revokeObjectURL(photo.src)), [privatePhotos]);
 
   useEffect(() => {
     let active = true;
@@ -398,6 +407,25 @@ export default function AdminRecordEditor({ section, record, setRecord, onSave, 
     } finally {
       setUploading(false);
     }
+
+    async function openPrivatePhotos() {
+      setPrivatePhotosLoading(true);
+      setPrivatePhotosError("");
+      setPrivatePhotos([]);
+      try {
+        const items = await loadPrivatePrintOrderPhotos(record.id);
+        const blobs = await Promise.all(items.map(async (item) => {
+          const response = await fetch(apiUrl(item.url), { credentials: "include" });
+          if (!response.ok) throw new Error("A private customer photo could not be loaded.");
+          return { id: item.id, name: item.name, blob: await response.blob() };
+        }));
+        setPrivatePhotos(blobs.map(({ blob, ...photo }) => ({ ...photo, src: URL.createObjectURL(blob) })));
+      } catch (failure) {
+        setPrivatePhotosError(failure instanceof Error ? failure.message : "Private customer photos could not be loaded.");
+      } finally {
+        setPrivatePhotosLoading(false);
+      }
+    }
   }
 
   function changePages(transform) {
@@ -436,6 +464,12 @@ export default function AdminRecordEditor({ section, record, setRecord, onSave, 
         <button type="button" onClick={() => changePages((pages) => pages.map((page, index) => index === pages.length - 1 ? { ...page, background: "#E5E9E0" } : page))}>Set sage page background</button>
       </div>
     </div> : null}
+    {section === "print-orders" && record.photosAvailable ? <section className="admin-private-photos">
+      <div><strong>Private customer photos</strong><p>Access is logged and limited to this paid order in production.</p></div>
+      <button className="admin-button admin-button-secondary" type="button" disabled={privatePhotosLoading} onClick={() => void openPrivatePhotos()}><Eye size={15} />{privatePhotosLoading ? "Loading photos…" : "Review photos"}</button>
+      {privatePhotosError ? <p role="alert">{privatePhotosError}</p> : null}
+      {privatePhotos.length ? <div className="admin-private-photo-grid">{privatePhotos.map((photo) => <figure key={photo.id}><img src={photo.src} alt={photo.name} /><figcaption>{photo.name}</figcaption></figure>)}</div> : null}
+    </section> : null}
     <FormFields section={section} record={record} update={update} categories={relatedCategories} books={relatedBooks} pricingOptions={pricingOptions}
       settingValueText={settingValueText} setSettingValueText={setSettingValueText} />
     {optionsLoading && (section === "pricing" || section === "shipping")

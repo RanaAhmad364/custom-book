@@ -10,9 +10,12 @@ const productionStates = [
   "in_production",
   "quality_check",
   "packed",
+  "printed",
   "shipped",
   "out_for_delivery",
   "delivered",
+  "cancelled",
+  "refunded",
 ];
 const cancellationStates = new Set(["requested", "accepted", "rejected", "pending"]);
 

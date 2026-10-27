@@ -10,6 +10,7 @@ import pytest
 
 from memorybook.extensions import db
 from memorybook.models import (
+    BackgroundJob,
     DownloadEntitlement,
     DownloadHistory,
     Payment,
@@ -155,6 +156,19 @@ def document_with_photos(asset_id="photo-1"):
 
 def test_renderer_creates_valid_digital_and_print_pdfs_from_revision_document():
     source = document_with_photos()
+    source["pages"][1]["background"].update({"borderColor": "#315b49", "borderStyle": "dotted"})
+    source["pages"][1]["elements"].append({
+        "id": "photo-slot",
+        "type": "shape",
+        "shape": "photo-placeholder",
+        "x": 0.55,
+        "y": 0.55,
+        "width": 0.35,
+        "height": 0.35,
+        "fill": "#edf0eb",
+        "stroke": "#d8ded8",
+        "strokeWidth": 0.001,
+    })
     photo = make_image()
     digital_bytes, digital_info = render_project_pdf(source, {"photo-1": photo}, "digital")
     digital = PdfReader(io.BytesIO(digital_bytes), strict=True)
@@ -220,7 +234,7 @@ def authenticated_client(app, email):
     return client, {"X-CSRF-TOKEN": csrf}
 
 
-def test_pdf_generation_requires_payment_is_idempotent_and_download_is_owner_scoped(app, monkeypatch):
+def test_pdf_generation_requires_payment_is_idempotent_and_download_is_owner_scoped(app):
     client, csrf = authenticated_client(app, "reader@example.test")
     fake_storage = MemoryStorage()
     app.extensions["asset_storage"] = fake_storage
@@ -286,8 +300,6 @@ def test_pdf_generation_requires_payment_is_idempotent_and_download_is_owner_sco
         db.session.commit()
         order_id = order.id
 
-    sent_jobs = []
-    monkeypatch.setattr(app.extensions["celery"], "send_task", lambda name, args: sent_jobs.append((name, args)))
     unpaid = client.post(f"/api/v1/pdf/orders/{order_id}/generate", json={"profile": "digital"}, headers=csrf)
     assert unpaid.status_code == 409
     with app.app_context():
@@ -301,12 +313,27 @@ def test_pdf_generation_requires_payment_is_idempotent_and_download_is_owner_sco
     assert generated.status_code == 202
     assert duplicate.status_code == 202
     assert generated.json["job"]["id"] == duplicate.json["job"]["id"]
-    assert len(sent_jobs) == 1
     job_id = generated.json["job"]["id"]
-    task = app.extensions["celery"].tasks["memorybook.generate_pdf"]
-    result = task.apply(args=[job_id], throw=True)
-    assert result.successful()
-    assert result.result["status"] == "ready"
+    with app.app_context():
+        background_job = db.session.scalar(
+            db.select(BackgroundJob).where(
+                BackgroundJob.job_type == "generate_pdf",
+                BackgroundJob.reference_id == job_id,
+            )
+        )
+        assert background_job.status == "queued"
+        background_job_id = background_job.id
+        assert db.session.scalar(
+            db.select(db.func.count()).select_from(BackgroundJob).where(
+                BackgroundJob.job_type == "generate_pdf",
+                BackgroundJob.reference_id == job_id,
+            )
+        ) == 1
+    app.extensions["background_jobs"]._run_job(background_job_id)
+    with app.app_context():
+        background_job = db.session.get(BackgroundJob, background_job_id)
+        assert background_job.status == "completed"
+        assert db.session.get(PdfJob, job_id).status == "ready"
     assert fake_storage.objects[f"generated/pdf/{order_id}/digital/{job_id}.pdf"][1] == "application/pdf"
     notifications = client.get("/api/v1/payments/notifications")
     assert notifications.status_code == 200

@@ -97,7 +97,7 @@ function mapSettings(preferences) {
 }
 
 export async function loadDashboardData(user) {
-  const [projects, printResponse, pdfResponse, notificationResponse, addressResponse, preferenceResponse] =
+  const [projects, printResponse, pdfResponse, notificationResponse, addressResponse, preferenceResponse, favorites] =
     await Promise.all([
       projectService.listProjects(user.email),
       apiRequest("/print/orders"),
@@ -105,6 +105,7 @@ export async function loadDashboardData(user) {
       apiRequest("/payments/notifications"),
       authApi.listAddresses(),
       authApi.notificationPreferences(),
+      apiRequest("/favorites"),
     ]);
 
   const printOrders = printResponse.data?.items;
@@ -112,8 +113,10 @@ export async function loadDashboardData(user) {
   const notifications = notificationResponse.data?.items;
   const addresses = addressResponse?.items;
   const preferences = preferenceResponse?.items;
+  const favoriteBooks = favorites.data?.items;
   if (!Array.isArray(printOrders) || !Array.isArray(pdfOrders)
-    || !Array.isArray(notifications) || !Array.isArray(addresses) || !Array.isArray(preferences)) {
+    || !Array.isArray(notifications) || !Array.isArray(addresses) || !Array.isArray(preferences)
+    || !Array.isArray(favoriteBooks)) {
     throw new Error("The dashboard services returned an invalid response.");
   }
 
@@ -122,6 +125,7 @@ export async function loadDashboardData(user) {
       name: user.name || user.email,
       email: user.email,
       phone: user.phone || "",
+      privacyMode: Boolean(user.privacyMode),
       photo: "",
     },
     projects,
@@ -130,7 +134,8 @@ export async function loadDashboardData(user) {
     notifications: notifications.map(mapNotification),
     billing: [],
     addresses: addresses.map(mapAddress),
-    settings: mapSettings(preferences),
+    settings: { ...mapSettings(preferences), privacyMode: Boolean(user.privacyMode) },
+    favorites: favoriteBooks,
   };
 }
 

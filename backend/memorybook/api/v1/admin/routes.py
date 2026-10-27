@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request
+import csv
+from datetime import UTC, datetime, timedelta
+from io import BytesIO, StringIO
 
-from memorybook.errors import ValidationError
+from flask import Blueprint, Response, abort, jsonify, request, send_file
+
+from memorybook.errors import ServiceUnavailableError, ValidationError
+from memorybook.integrations.asset_storage import get_asset_storage
 from memorybook.extensions import limiter
 from memorybook.models import BookCategory, BookCollection
 from memorybook.permissions import get_authenticated_user, roles_required
@@ -11,6 +16,7 @@ from memorybook.services.payments import (
     approve_refund_request,
     complete_manual_refund,
     reject_refund_request,
+    review_manual_payment,
 )
 
 admin_blueprint = Blueprint("admin", __name__)
@@ -26,7 +32,57 @@ def _body() -> dict:
 @admin_blueprint.get("/dashboard")
 @roles_required("admin")
 def dashboard():
-    return jsonify(admin.dashboard_metrics())
+    return jsonify(admin.dashboard_metrics(request.args.get("days", 30)))
+
+
+@admin_blueprint.get("/analytics/overview")
+@roles_required("admin")
+def analytics_overview():
+    return jsonify(admin.dashboard_metrics(request.args.get("days", 30)))
+
+
+@admin_blueprint.get("/analytics/revenue-chart")
+@roles_required("admin")
+def analytics_revenue_chart():
+    return jsonify({"items": admin.revenue_chart(request.args.get("days", 30))})
+
+
+@admin_blueprint.get("/analytics/download-chart")
+@roles_required("admin")
+def analytics_download_chart():
+    return jsonify({"items": admin.downloads_chart(request.args.get("days", 30))})
+
+
+@admin_blueprint.get("/analytics/top-selling")
+@roles_required("admin")
+def analytics_top_selling():
+    return jsonify({"items": admin.top_selling_books(request.args.get("days", 30))})
+
+
+@admin_blueprint.get("/analytics/most-downloaded")
+@roles_required("admin")
+def analytics_most_downloaded():
+    return jsonify({"items": admin.most_downloaded_books(request.args.get("days", 30))})
+
+
+@admin_blueprint.get("/analytics/most-favorited")
+@roles_required("admin")
+def analytics_most_favorited():
+    return jsonify({"items": admin.most_favorited_books()})
+
+
+@admin_blueprint.get("/analytics/recent-payments")
+@roles_required("admin")
+def analytics_recent_payments():
+    return jsonify({"items": admin.recent_admin_payments(request.args.get("limit", 10, type=int))})
+
+
+@admin_blueprint.get("/analytics/recent-users")
+@roles_required("admin")
+def analytics_recent_users():
+    limit = request.args.get("limit", 10, type=int)
+    limit = max(1, min(limit or 10, 50))
+    return jsonify({"items": admin.recent_admin_users(limit)})
 
 
 @admin_blueprint.post("/assets")
@@ -113,6 +169,12 @@ def users():
     return jsonify(admin.list_users(request.args))
 
 
+@admin_blueprint.get("/users/<string:user_id>/orders")
+@roles_required("admin")
+def user_orders(user_id: str):
+    return jsonify(admin.list_user_orders(user_id, request.args))
+
+
 @admin_blueprint.patch("/users/<string:user_id>")
 @roles_required("admin")
 def update_user(user_id: str):
@@ -123,6 +185,12 @@ def update_user(user_id: str):
 @roles_required("admin")
 def books():
     return jsonify(admin.list_products(request.args))
+
+
+@admin_blueprint.get("/books/<string:book_id>/orders")
+@roles_required("admin")
+def book_orders(book_id: str):
+    return jsonify(admin.list_book_orders(book_id, request.args))
 
 
 @admin_blueprint.post("/books")
@@ -250,9 +318,84 @@ def template_versions(template_id: str):
 
 
 @admin_blueprint.get("/orders")
+@admin_blueprint.get("/purchases")
 @roles_required("admin")
 def orders():
     return jsonify(admin.list_orders(request.args))
+
+
+def _csv_cell(value: object) -> str:
+    text = "" if value is None else str(value)
+    if text.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + text
+    return text
+
+
+def _orders_csv(args):
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(("User", "Email", "Book", "Order", "Type", "Pages", "Amount", "Currency", "Payment status", "Order status", "Date"))
+    page = 1
+    while True:
+        page_args = args.copy()
+        page_args["page"] = str(page)
+        page_args["perPage"] = "100"
+        result = admin.list_orders(page_args)
+        for order in result["items"]:
+            writer.writerow(_csv_cell(value) for value in (
+                order.get("userName"), order.get("userEmail"), order.get("bookTitle"), order.get("orderNumber"),
+                order.get("type"), order.get("pageCount"), order.get("amount"), order.get("currency"),
+                order.get("paymentStatus"), order.get("status"), order.get("createdAt"),
+            ))
+        if page >= result["pagination"]["totalPages"]:
+            break
+        page += 1
+    return Response(
+        "\ufeff" + output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="memorybook-purchases.csv"'},
+    )
+
+
+@admin_blueprint.get("/orders/export.csv")
+@admin_blueprint.get("/purchases/export.csv")
+@roles_required("admin")
+def export_orders_csv():
+    return _orders_csv(request.args)
+
+
+@admin_blueprint.get("/orders/print/<string:order_id>/photos")
+@roles_required("admin")
+def private_print_order_photos(order_id: str):
+    order, assets = admin.get_private_print_order_assets(order_id)
+    actor = get_authenticated_user()
+    admin.log_private_print_photo_access(order, actor.id)
+    return jsonify({"items": [{
+        "id": asset.id,
+        "name": asset.original_filename or "Customer photo",
+        "mimeType": asset.mime_type,
+        "url": f"/admin/orders/print/{order.id}/photos/{asset.id}",
+    } for asset in assets]})
+
+
+@admin_blueprint.get("/orders/print/<string:order_id>/photos/<string:asset_id>")
+@roles_required("admin")
+def private_print_order_photo(order_id: str, asset_id: str):
+    order, assets = admin.get_private_print_order_assets(order_id)
+    asset = next((item for item in assets if item.id == asset_id), None)
+    if asset is None:
+        abort(404)
+    admin.log_private_print_photo_access(order, get_authenticated_user().id, asset.id)
+    storage = get_asset_storage()
+    try:
+        content = storage.download(asset.storage_key)
+        content_type = storage.content_type(asset.storage_key)
+    except ServiceUnavailableError:
+        abort(404)
+    response = send_file(BytesIO(content), mimetype=content_type, max_age=0)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 @admin_blueprint.patch("/orders/<string:kind>/<string:order_id>")
@@ -261,10 +404,66 @@ def update_order(kind: str, order_id: str):
     return jsonify({"order": admin.update_order(order_id, kind, _body(), get_authenticated_user().id)})
 
 
+@admin_blueprint.get("/orders/<string:kind>/<string:order_id>/history")
+@roles_required("admin")
+def order_history(kind: str, order_id: str):
+    return jsonify({"items": admin.get_order_history(order_id, kind)})
+
+
 @admin_blueprint.get("/payments")
 @roles_required("admin")
 def payments():
     return jsonify(admin.list_payments(request.args))
+
+
+@admin_blueprint.get("/downloads")
+@roles_required("admin")
+def downloads():
+    return jsonify(admin.list_downloads(request.args))
+
+
+@admin_blueprint.get("/downloads/export.csv")
+@roles_required("admin")
+def export_downloads_csv():
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(("User", "Email", "Book", "Order", "Type", "Pages", "Amount", "Currency", "Payment status", "Downloaded"))
+    page = 1
+    while True:
+        result = admin.list_downloads({**request.args, "page": str(page), "perPage": "100"})
+        for item in result["items"]:
+            writer.writerow(_csv_cell(value) for value in (
+                item.get("userName"), item.get("userEmail"), item.get("bookTitle"), item.get("orderNumber"),
+                item.get("type"), item.get("pageCount"), item.get("amount"), item.get("currency"),
+                item.get("paymentStatus"), item.get("downloadedAt"),
+            ))
+        if page >= result["pagination"]["totalPages"]:
+            break
+        page += 1
+    return Response(
+        "\ufeff" + output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="memorybook-downloads.csv"'},
+    )
+
+
+@admin_blueprint.patch("/payments/<string:payment_id>")
+@roles_required("admin")
+def review_payment(payment_id: str):
+    payload = _body()
+    status = payload.get("status")
+    if status not in {"approved", "rejected"}:
+        raise ValidationError("Payment review status must be approved or rejected.", {"status": "invalid"})
+    result = review_manual_payment(
+        payment_id,
+        approved=status == "approved",
+        actor_id=get_authenticated_user().id,
+    )
+    admin.record_manual_payment_action(
+        payment_id,
+        {"status": status},
+    )
+    return jsonify({"payment": result})
 
 
 @admin_blueprint.get("/refunds")

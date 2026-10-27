@@ -6,7 +6,7 @@ from test_auth_api import PASSWORD, register, verification_code, verify_email
 
 TEST_EMAIL = "user1.test@memorybook.local"
 NEW_PASSWORD = "a-strong-local-test-password-2026!"
-ADMIN_EMAIL = "ra7514770@gmail.com"
+ADMIN_EMAIL = "admin.test@memorybook.local"
 ADMIN_PASSWORD = "admin-test-password-2026"
 
 
@@ -75,7 +75,7 @@ def test_development_admin_provisioning_uses_registration_otp_and_is_idempotent(
     app.config["ENVIRONMENT"] = "development"
     result = app.test_cli_runner().invoke(
         args=["dev-provision-admin"],
-        input=f"{ADMIN_PASSWORD}\n{ADMIN_PASSWORD}\n",
+        input=f"{ADMIN_EMAIL}\n{ADMIN_PASSWORD}\n{ADMIN_PASSWORD}\n",
     )
 
     assert result.exit_code == 0, result.output
@@ -95,7 +95,7 @@ def test_development_admin_provisioning_uses_registration_otp_and_is_idempotent(
         ).all()
         assert sorted(role_names) == ["admin", "customer"]
 
-    repeated = app.test_cli_runner().invoke(args=["dev-provision-admin"])
+    repeated = app.test_cli_runner().invoke(args=["dev-provision-admin", "--email", ADMIN_EMAIL])
     assert repeated.exit_code == 0, repeated.output
     assert "Initial administrator password" not in repeated.output
     with app.app_context():
@@ -127,3 +127,23 @@ def test_development_admin_provisioning_refuses_non_development(app):
 
     assert result.exit_code != 0
     assert "only in development" in result.output
+
+
+def test_grant_admin_promotes_an_existing_account_idempotently(app, client):
+    email = "existing-customer@memorybook.local"
+    assert register(client, email=email).status_code == 201
+
+    first = app.test_cli_runner().invoke(args=["grant-admin", email])
+    second = app.test_cli_runner().invoke(args=["grant-admin", email])
+
+    assert first.exit_code == 0, first.output
+    assert second.exit_code == 0, second.output
+    assert f"Admin role ensured for {email}" in first.output
+    with app.app_context():
+        user = db.session.scalar(db.select(User).where(User.email == email))
+        roles = db.session.scalars(
+            db.select(Role.name)
+            .join(UserRole, UserRole.role_id == Role.id)
+            .where(UserRole.user_id == user.id)
+        ).all()
+        assert sorted(roles) == ["admin", "customer"]

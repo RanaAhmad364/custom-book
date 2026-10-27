@@ -46,6 +46,23 @@ const PrintOrderResult = lazy(() => import("../pages/public/PrintOrder/PrintOrde
 const AdminRoute = lazy(() => import("../features/admin/AdminRoute.jsx"));
 const AdminLayout = lazy(() => import("../features/admin/AdminLayout.jsx"));
 const AdminSection = lazy(() => import("../features/admin/AdminSection.jsx"));
+const AdminDashboardPage = lazy(() => import("../features/admin/pages/AdminDashboardPage.jsx"));
+const AdminPurchasesPage = lazy(() => import("../features/admin/pages/AdminPurchasesPage.jsx"));
+const AdminDownloadsPage = lazy(() => import("../features/admin/pages/AdminDownloadsPage.jsx"));
+const AdminBooksPage = lazy(() => import("../features/admin/pages/AdminBooksPage.jsx"));
+const AdminCategoriesPage = lazy(() => import("../features/admin/pages/AdminCategoriesPage.jsx"));
+const AdminCollectionsPage = lazy(() => import("../features/admin/pages/AdminCollectionsPage.jsx"));
+const AdminTemplatesPage = lazy(() => import("../features/admin/pages/AdminTemplatesPage.jsx"));
+const AdminPricingPage = lazy(() => import("../features/admin/pages/AdminPricingPage.jsx"));
+const AdminUsersPage = lazy(() => import("../features/admin/pages/AdminUsersPage.jsx"));
+const AdminPaymentsPage = lazy(() => import("../features/admin/pages/AdminPaymentsPage.jsx"));
+const AdminRefundsPage = lazy(() => import("../features/admin/pages/AdminRefundsPage.jsx"));
+const AdminShippingPage = lazy(() => import("../features/admin/pages/AdminShippingPage.jsx"));
+const AdminNotificationsPage = lazy(() => import("../features/admin/pages/AdminNotificationsPage.jsx"));
+const AdminSupportPage = lazy(() => import("../features/admin/pages/AdminSupportPage.jsx"));
+const AdminReportsPage = lazy(() => import("../features/admin/pages/AdminReportsPage.jsx"));
+const AdminSettingsPage = lazy(() => import("../features/admin/pages/AdminSettingsPage.jsx"));
+const AdminProfilePage = lazy(() => import("../features/admin/pages/AdminProfilePage.jsx"));
 
 export default function AppRoutes() {
   return (
@@ -84,7 +101,23 @@ export default function AppRoutes() {
       <Route element={<AdminRoute />}>
         <Route path="/admin/books/:bookId/design" element={<CreationEditor adminMode />} />
         <Route path="/admin" element={<AdminLayout />}>
-          <Route index element={<AdminSection />} />
+          <Route index element={<AdminDashboardPage />} />
+          <Route path="purchases" element={<AdminPurchasesPage />} />
+          <Route path="downloads" element={<AdminDownloadsPage />} />
+          <Route path="books" element={<AdminBooksPage />} />
+          <Route path="categories" element={<AdminCategoriesPage />} />
+          <Route path="collections" element={<AdminCollectionsPage />} />
+          <Route path="templates" element={<AdminTemplatesPage />} />
+          <Route path="pricing" element={<AdminPricingPage />} />
+          <Route path="users" element={<AdminUsersPage />} />
+          <Route path="payments" element={<AdminPaymentsPage />} />
+          <Route path="refunds" element={<AdminRefundsPage />} />
+          <Route path="shipping" element={<AdminShippingPage />} />
+          <Route path="notifications" element={<AdminNotificationsPage />} />
+          <Route path="support" element={<AdminSupportPage />} />
+          <Route path="reports" element={<AdminReportsPage />} />
+          <Route path="settings" element={<AdminSettingsPage />} />
+          <Route path="profile" element={<AdminProfilePage />} />
           <Route path=":section" element={<AdminSection />} />
         </Route>
       </Route>
@@ -106,6 +139,7 @@ export default function AppRoutes() {
           <Route path="recent" element={<DashboardSection section="recent" />} />
           <Route path="drafts" element={<DashboardSection section="drafts" />} />
           <Route path="completed" element={<DashboardSection section="completed" />} />
+          <Route path="favorites" element={<DashboardSection section="favorites" />} />
           <Route path="downloads" element={<DashboardSection section="downloads" />} />
           <Route path="downloads/:downloadId" element={<DashboardSection section="download-detail" />} />
           <Route path="orders" element={<DashboardSection section="orders" />} />

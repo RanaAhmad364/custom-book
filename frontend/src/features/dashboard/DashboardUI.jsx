@@ -20,7 +20,7 @@ export function ProjectEditAction({ project, children, className = "button butto
   return <Link className={className} to={`/create/design/${project.id}`}>{children}</Link>;
 }
 
-export function ProjectCard({ project, onRename, onDuplicate, onDelete, compact = false }) {
+export function ProjectCard({ project, onRename, onDuplicate, onDelete, onPrivacyChange, compact = false }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [savingTitle, setSavingTitle] = useState(false);
@@ -54,6 +54,7 @@ export function ProjectCard({ project, onRename, onDuplicate, onDelete, compact 
         <span className="dashboard-card-eyebrow">{project.category} <span>·</span> {project.pages} pages</span>
         {editing ? <form className="dashboard-rename-form" onSubmit={saveTitle}><input aria-label="Project title" value={title} onChange={(event) => setTitle(event.target.value)} maxLength={80} autoFocus disabled={savingTitle} /><button className="dashboard-icon-button" type="submit" aria-label="Save project name" disabled={savingTitle}><Check size={16} /></button></form> : <h3>{project.title}</h3>}
         <p>Updated {project.updated}</p>
+        {onPrivacyChange ? <label className="dashboard-project-privacy"><span>Project privacy</span><select aria-label={`Privacy for ${project.title}`} value={project.privacyOverride === null || project.privacyOverride === undefined ? "inherit" : project.privacyOverride ? "private" : "standard"} onChange={(event) => onPrivacyChange(project.id, event.target.value === "inherit" ? null : event.target.value === "private")}><option value="inherit">Use account setting</option><option value="private">Private</option><option value="standard">Standard</option></select></label> : null}
         <div className="dashboard-project-actions">
           <ProjectEditAction project={project}>{project.status === "completed" ? "Open book" : "Continue editing"} <ArrowRight size={14} /></ProjectEditAction>
           <button className="dashboard-secondary-action" type="button" onClick={() => setPreviewOpen(true)}><Eye size={15} /> Preview</button>

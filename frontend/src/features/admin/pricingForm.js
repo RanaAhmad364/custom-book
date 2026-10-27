@@ -1,6 +1,6 @@
-export function pricingRecordDefaults(kind) {
+export function pricingRecordDefaults(kind, currency = "PKR") {
   const defaults = {
-    tier: { code: "", name: "", description: "", basePrice: "0.00", currency: "USD", active: true },
+    tier: { code: "", name: "", description: "", basePrice: "0.00", currency, active: true },
     pagePricing: { tierId: "", minimumPages: 24, maximumPages: 80, pricePerPage: "0.00" },
     shipping: {
       countryCode: "",
@@ -8,7 +8,7 @@ export function pricingRecordDefaults(kind) {
       serviceCode: "",
       serviceName: "",
       price: "0.00",
-      currency: "USD",
+      currency,
       estimatedDaysMin: "",
       estimatedDaysMax: "",
       active: true,
@@ -23,7 +23,7 @@ export function pricingRecordDefaults(kind) {
       coverTypeId: "",
       paperTypeId: "",
       basePrice: "0.00",
-      currency: "USD",
+      currency,
       active: true,
     },
   };

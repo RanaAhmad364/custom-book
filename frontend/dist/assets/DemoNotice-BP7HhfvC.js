@@ -1,1 +1,0 @@
-import{j as e}from"./index-D6sXrhyn.js";function t(){return e.jsxs("div",{className:"demo-notice",role:"note",children:[e.jsx("span",{className:"demo-dot"}),"Preview catalog — sample content for demonstration"]})}export{t as D};

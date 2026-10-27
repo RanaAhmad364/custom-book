@@ -143,6 +143,32 @@ def test_login_requires_verified_email_and_rotates_refresh_cookie(app, client):
     assert replay.status_code == 401
 
 
+def test_complete_registration_verification_login_me_and_logout_lifecycle(app, client):
+    email = "auth-lifecycle@example.test"
+    registration = register(client, email=email)
+    assert registration.status_code == 201
+
+    code = verification_code(app, email)
+    wrong_code = "000000" if code != "000000" else "000001"
+    verified = client.post("/api/v1/auth/verify-otp", json={"email": email, "code": wrong_code})
+    assert verified.status_code == 400
+    verified = client.post("/api/v1/auth/verify-otp", json={"email": email, "code": code})
+    assert verified.status_code == 200
+
+    login = client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD})
+    assert login.status_code == 200
+    current_user = client.get("/api/v1/auth/me")
+    assert current_user.status_code == 200
+    assert current_user.json["user"]["email"] == email
+
+    logged_out = client.post(
+        "/api/v1/auth/logout",
+        headers=csrf_header(login, "csrf_access_token"),
+    )
+    assert logged_out.status_code == 200
+    assert client.get("/api/v1/auth/me").status_code == 401
+
+
 def test_login_failure_does_not_disclose_which_credential_was_wrong(app, client):
     register_verified(app, client)
 
@@ -232,7 +258,9 @@ def test_resend_failure_preserves_previous_usable_verification_code(app, client)
 
     response = client.post("/api/v1/auth/resend-otp", json={"email": EMAIL})
 
-    assert response.status_code == 200
+    assert response.status_code == 503
+    error_message = response.json["error"]["message"].lower()
+    assert "try again later" in error_message or "mail unavailable" in error_message
     assert client.post(
         "/api/v1/auth/verify-otp",
         json={"email": EMAIL, "code": original_code},
@@ -335,11 +363,13 @@ def test_customer_role_is_assigned_and_role_guard_denies_admin_access(app, clien
         return {"ok": True}
 
     app.register_blueprint(protected)
+    assert client.get("/api/v1/admin/dashboard").status_code == 401
     register_verified(app, client)
     login_response = client.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD})
     response = client.get("/api/v1/role-test")
 
     assert response.status_code == 403
+    assert client.get("/api/v1/admin/dashboard").status_code == 403
     with app.app_context():
         user = db.session.scalar(db.select(User).where(User.email == EMAIL))
         roles = db.session.scalars(
@@ -391,6 +421,46 @@ def test_disabled_user_cannot_refresh_token(app, client):
     assert response.status_code == 401
 
 
+def test_cookie_auth_requires_csrf_header_for_post_put_patch_and_delete(app, client):
+    from memorybook.permissions import active_user_required
+
+    protected = Blueprint("csrf_test", __name__, url_prefix="/api/v1")
+
+    @protected.route("/csrf-test", methods=["POST", "PUT", "PATCH", "DELETE"])
+    @active_user_required
+    def csrf_test():
+        return {"ok": True}
+
+    app.register_blueprint(protected)
+    register_verified(app, client)
+    login_response = client.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD})
+    csrf = csrf_header(login_response, "csrf_access_token")
+
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        assert client.open("/api/v1/csrf-test", method=method).status_code == 401
+        accepted = client.open("/api/v1/csrf-test", method=method, headers=csrf)
+        assert accepted.status_code == 200, method
+        assert accepted.json == {"ok": True}
+
+
+def test_expired_password_reset_token_is_rejected(app, client):
+    register_verified(app, client)
+    assert client.post("/api/v1/auth/forgot-password", json={"email": EMAIL}).status_code == 200
+    reset_message = app.extensions["auth_email_outbox"][-1][2]
+    token = parse_qs(urlparse(re.search(r"https?://\S+", reset_message).group(0)).query)["token"][0]
+    with app.app_context():
+        reset_record = db.session.scalar(db.select(PasswordResetToken))
+        reset_record.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        db.session.commit()
+
+    response = client.post(
+        "/api/v1/auth/reset-password",
+        json={"token": token, "password": "new-secure-password"},
+    )
+    assert response.status_code == 400
+    assert client.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD}).status_code == 200
+
+
 def test_login_and_otp_endpoints_enforce_rate_limits(tmp_path):
     from memorybook import create_app
 
@@ -422,6 +492,35 @@ def test_login_and_otp_endpoints_enforce_rate_limits(tmp_path):
 
     assert login_responses[-1].status_code == 429
     assert otp_responses[-1].status_code == 429
+    with application.app_context():
+        db.session.remove()
+        db.drop_all()
+
+
+def test_resend_otp_enforces_hourly_rate_limit(tmp_path):
+    from memorybook import create_app
+
+    application = create_app({
+        "TESTING": True,
+        "SECRET_KEY": "test-only-secret-key-that-is-not-used-outside-testing",
+        "JWT_SECRET_KEY": "test-only-jwt-secret-that-is-not-used-outside-testing",
+        "SQLALCHEMY_DATABASE_URI": f"sqlite:///{(tmp_path / 'resend-limit.sqlite').as_posix()}",
+        "MIGRATIONS_DIRECTORY": "../migrations",
+        "CORS_ORIGINS": [],
+        "LOG_LEVEL": "CRITICAL",
+        "RATELIMIT_ENABLED": True,
+        "RATE_LIMIT_STORAGE_URI": "memory://",
+    })
+    with application.app_context():
+        db.create_all()
+    client = application.test_client()
+
+    responses = [
+        client.post("/api/v1/auth/resend-otp", json={"email": "limit@example.test"})
+        for _ in range(4)
+    ]
+
+    assert [response.status_code for response in responses] == [200, 200, 200, 429]
     with application.app_context():
         db.session.remove()
         db.drop_all()

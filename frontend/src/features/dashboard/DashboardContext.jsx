@@ -10,15 +10,17 @@ const DashboardContext = createContext(null);
 function DashboardUserScope({ user, children }) {
   const [isLoading, setIsLoading] = useState(true);
   const [storageError, setStorageError] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
   const [data, setData] = useState({
     profile: { name: user.name || user.email, email: user.email, phone: "", photo: "" },
     projects: [],
     orders: [],
     downloads: [],
+    favorites: [],
     notifications: [],
     billing: [],
     addresses: [],
-    settings: { orderEmails: true, productNews: false },
+    settings: { orderEmails: true, productNews: false, privacyMode: Boolean(user.privacyMode) },
   });
 
   useEffect(() => {
@@ -34,12 +36,17 @@ function DashboardUserScope({ user, children }) {
       if (active) setIsLoading(false);
     });
     return () => { active = false; };
-  }, [user.email, user.name]);
+  }, [user.email, user.name, reloadKey]);
 
   const value = useMemo(() => ({
     data,
     isLoading,
     storageError,
+    reloadDashboard() {
+      setStorageError("");
+      setIsLoading(true);
+      setReloadKey((key) => key + 1);
+    },
     async updateProject(id, changes) {
       try {
         const saved = await projectService.updateProject(user.email, id, changes);
@@ -51,6 +58,24 @@ function DashboardUserScope({ user, children }) {
         return true;
       } catch (failure) {
         setStorageError(failure instanceof Error ? failure.message : "The project update could not be saved.");
+        return false;
+      }
+    },
+    async removeFavorite(bookId) {
+      const removedBook = data.favorites.find((book) => book.id === bookId);
+      setData((current) => ({
+        ...current,
+        favorites: current.favorites.filter((book) => book.id !== bookId),
+      }));
+      try {
+        await apiRequest(`/favorites/${encodeURIComponent(bookId)}`, { method: "DELETE" });
+        setStorageError("");
+        return true;
+      } catch (failure) {
+        setData((current) => current.favorites.some((book) => book.id === bookId) || !removedBook
+          ? current
+          : { ...current, favorites: [removedBook, ...current.favorites] });
+        setStorageError(failure instanceof Error ? failure.message : "The favorite could not be removed.");
         return false;
       }
     },
@@ -94,11 +119,16 @@ function DashboardUserScope({ user, children }) {
     },
     async updateProfile(changes) {
       try {
-        const response = await authApi.updateProfile({ name: changes.name, phone: changes.phone });
+        const response = await authApi.updateProfile({
+          ...(Object.prototype.hasOwnProperty.call(changes, "name") ? { name: changes.name } : {}),
+          ...(Object.prototype.hasOwnProperty.call(changes, "phone") ? { phone: changes.phone } : {}),
+          ...(Object.prototype.hasOwnProperty.call(changes, "privacyMode") ? { privacyMode: changes.privacyMode } : {}),
+        });
         if (!response?.user) throw new Error("The profile service returned an invalid response.");
         setData((current) => ({
           ...current,
           profile: { ...current.profile, name: response.user.name, phone: response.user.phone || "" },
+          settings: { ...current.settings, privacyMode: Boolean(response.user.privacyMode) },
         }));
         setStorageError("");
         return true;
@@ -116,6 +146,10 @@ function DashboardUserScope({ user, children }) {
         preferences.push({ channel: "email", category: "product_news", enabled: changes.productNews });
       }
       try {
+        if (Object.prototype.hasOwnProperty.call(changes, "privacyMode")) {
+          const response = await authApi.updateProfile({ privacyMode: changes.privacyMode });
+          if (!response?.user) throw new Error("The privacy settings service returned an invalid response.");
+        }
         await Promise.all(preferences.map((preference) => authApi.updateNotificationPreference(preference)));
         setData((current) => ({ ...current, settings: { ...current.settings, ...changes } }));
         setStorageError("");

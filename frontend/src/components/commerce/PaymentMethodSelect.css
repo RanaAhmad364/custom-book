@@ -27,3 +27,21 @@
   font-size: 13px;
   line-height: 1.5;
 }
+
+.payment-method-instructions {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--line, #dedbd2);
+  border-radius: 6px;
+  background: #f8f7f2;
+}
+
+.payment-method-instructions p {
+  color: var(--muted, #6d6b63);
+  overflow-wrap: anywhere;
+}
+
+.payment-method-instructions strong {
+  color: var(--ink, #292821);
+}

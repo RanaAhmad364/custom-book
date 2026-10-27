@@ -8,7 +8,6 @@ version = "0.1.0"
 description = "Modular Flask backend foundation for MemoryBook."
 requires-python = ">=3.11"
 dependencies = [
-  "celery[redis]>=5.4,<6",
   "Flask>=3.0,<4",
   "Flask-Cors>=5,<6",
   "Flask-JWT-Extended>=4.6,<5",
@@ -28,6 +27,12 @@ dependencies = [
 dev = [
   "pytest>=8,<9",
   "pytest-cov>=5,<7",
+]
+celery = [
+  "celery[redis]>=5.4,<6",
+]
+redis = [
+  "redis>=5,<7",
 ]
 
 [tool.setuptools.packages.find]

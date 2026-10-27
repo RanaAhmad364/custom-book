@@ -11,6 +11,8 @@ import { BookPreviewDialog } from "../../../components/book/BookPreviewDialog.js
 import { ErrorState } from "../../../components/common/ErrorState.jsx";
 import { LoadingState } from "../../../components/common/LoadingState.jsx";
 import { SafeImage } from "../../../components/common/SafeImage.jsx";
+import { FavoriteButton } from "../../../components/book/FavoriteButton.jsx";
+import { formatCurrency } from "../../../services/money.js";
 
 const homepageFaqs = [
   {
@@ -299,6 +301,7 @@ function HomePage() {
               <article className={`featured-book-card tone-${book.color}`} key={book.id}>
                 <div className="featured-book-image">
                   <SafeImage src={book.image} alt={book.imageAlt} />
+                  <FavoriteButton book={book} />
                   <button
                     className="preview-icon-button"
                     type="button"
@@ -315,7 +318,7 @@ function HomePage() {
                     <span>{book.pages}</span><span>·</span><span>{book.format}</span>
                   </div>
                   <span className="featured-book-price">
-                    From ${book.startingPrice.toFixed(2)}
+                    From {formatCurrency(book.startingPrice, book.currency)}
                   </span>
                   <div className="featured-book-actions">
                     <button
@@ -532,7 +535,9 @@ function HomePage() {
                       ))}
                     </ul>
                     <span className="tier-price">
-                      From ${tier.startingPrice.toFixed(2)}
+                      {tier.startingPrice === null
+                        ? "Explore available books"
+                        : `From ${formatCurrency(tier.startingPrice, tier.currency)}`}
                     </span>
                   </button>
                 </article>

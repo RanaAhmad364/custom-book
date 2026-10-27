@@ -16,6 +16,7 @@ from memorybook.services.payments import (
     process_stripe_event,
     create_refund_request,
     request_refund,
+    submit_manual_payment_reference,
     retry_payment,
     serialize_transaction,
 )
@@ -115,6 +116,31 @@ def get_payment(payment_id: str):
     if payment is None:
         raise NotFound("Payment was not found.")
     return jsonify({"payment": serialize_transaction(payment)})
+
+
+@payments_blueprint.post("/<payment_id>/manual-confirmation")
+@active_user_required
+@limiter.limit("5 per hour")
+def manual_confirmation(payment_id: str):
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        raise ValidationError("A JSON object is required.")
+    reference = body.get("reference")
+    if not isinstance(reference, str):
+        raise ValidationError("Enter the transfer reference from your receipt.", {"reference": "required"})
+    payment = db.session.scalar(
+        select(Payment).where(
+            Payment.id == payment_id,
+            Payment.user_id == get_authenticated_user().id,
+        ).with_for_update()
+    )
+    if payment is None:
+        raise NotFound("Payment was not found.")
+    return jsonify({"payment": submit_manual_payment_reference(
+        payment,
+        get_authenticated_user().id,
+        reference,
+    )})
 
 
 @payments_blueprint.post("/<payment_id>/refund-requests")

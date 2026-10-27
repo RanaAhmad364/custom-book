@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowRight, BadgeCheck, BookOpen, Check, CircleAlert, Clock3
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../../../features/auth/AuthContext.jsx";
 import { PaymentMethodSelect } from "../../../components/commerce/PaymentMethodSelect.jsx";
+import { ManualPaymentPanel } from "../../../components/commerce/ManualPaymentPanel.jsx";
 import { canDownloadPdf, pdfOrderService } from "../../../services/pdfOrderService.js";
 import { projectService } from "../../../services/projectService.js";
 import { SafeImage } from "../../../components/common/SafeImage.jsx";
@@ -169,7 +170,8 @@ export function PdfOrderProcessing() {
     {loading && !order ? <div className="pdf-state"><LoaderCircle className="pdf-spin" size={20} /> Checking payment and generation status…</div> : null}
     {error ? <div className="pdf-state pdf-error" role="alert"><CircleAlert size={20} /><span>{error}</span><button className="button button-outline" type="button" onClick={() => { setLoading(true); setRefreshKey((value) => value + 1); }}><RefreshCw size={15} /> Check again</button></div> : null}
     {order ? <><div className="pdf-status-card"><div className="pdf-state-row"><span><span className="eyebrow">Payment</span><strong>{paymentLabels[order.paymentStatus]}</strong></span>{order.paymentStatus === "successful" ? <BadgeCheck /> : order.paymentStatus === "failed" ? <CircleAlert /> : <Clock3 />}</div><div className="pdf-state-row"><span><span className="eyebrow">PDF generation</span><strong>{generationLabels[order.generationStatus]}</strong></span>{order.generationStatus === "ready" ? <Check /> : order.generationStatus === "failed" ? <CircleAlert /> : <LoaderCircle className={order.generationStatus === "generating" || order.generationStatus === "queued" ? "pdf-spin" : ""} />}</div><div className="pdf-status-meta"><span>Order {order.id}</span>{order.amount !== null ? <strong>{formatPrice(order.amount, order.currency)}</strong> : null}</div></div>
-      {order.paymentStatus === "failed" ? <p className="pdf-inline-error" role="alert">Payment was not confirmed. No PDF is available. You may return to checkout to start a new payment attempt.</p> : null}
+      <ManualPaymentPanel order={order} onSubmitted={() => { setLoading(true); setRefreshKey((value) => value + 1); }} />
+      {order.paymentStatus === "failed" ? <p className="pdf-inline-error" role="alert">Payment was not confirmed. No PDF is available. <Link to={`/create/design/${encodeURIComponent(order.projectId)}/pdf/checkout`}>Try checkout again</Link>.</p> : null}
       {order.generationStatus === "failed" && order.paymentStatus === "successful" ? <p className="pdf-inline-error" role="alert">Payment was confirmed, but PDF generation failed. Please contact support with this order number.</p> : null}
       {downloadable ? <div className="pdf-actions"><Link className="button button-outline" to={`/pdf/downloads/${encodeURIComponent(order.id)}`}>View download details <ArrowRight size={15} /></Link><a className="button button-dark" href={order.downloadUrl} download><Download size={16} /> Download PDF</a></div> : <div className="pdf-actions"><button className="button button-outline" type="button" onClick={() => { setLoading(true); setRefreshKey((value) => value + 1); }}><RefreshCw size={15} /> Refresh status</button><Link className="pdf-text-link" to="/dashboard/downloads">PDF download history</Link></div>}
     </> : null}

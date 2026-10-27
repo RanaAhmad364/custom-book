@@ -118,10 +118,7 @@ class AuthService:
         user = UserRepository.get_by_email(email)
         if user is None or not user.is_active or user.deleted_at is not None or user.email_verified_at is not None:
             return
-        try:
-            AuthService.issue_email_verification(email)
-        except ServiceUnavailableError:
-            current_app.logger.warning("Verification email delivery could not be completed.")
+        AuthService.issue_email_verification(email)
 
     @staticmethod
     def _require_email_delivery() -> None:

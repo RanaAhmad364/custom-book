@@ -80,6 +80,7 @@ function makeShape(element, width, height) {
     height: element.height * height,
     fill: element.fill,
     stroke: element.stroke,
+    strokeDashArray: element.shape === "photo-placeholder" ? [8, 6] : undefined,
     strokeWidth: element.strokeWidth * width,
     opacity: element.opacity,
     angle: element.rotation,
@@ -115,6 +116,8 @@ export default function EditorCanvas({
   zoom,
   selectedId,
   preview,
+  adminMode = false,
+  snapToGrid = false,
 }) {
   const elementRef = useRef(null);
   const canvasRef = useRef(null);
@@ -122,8 +125,8 @@ export default function EditorCanvas({
   const generationRef = useRef(0);
   const selectedRef = useRef(selectedId);
   selectedRef.current = selectedId;
-  const callbacksRef = useRef({ onElementsChange, onSelectionChange, onCanvasError: () => {}, page, document });
-  callbacksRef.current = { onElementsChange, onSelectionChange, onCanvasError, page, document };
+  const callbacksRef = useRef({ onElementsChange, onSelectionChange, onCanvasError: () => {}, page, document, adminMode, snapToGrid });
+  callbacksRef.current = { onElementsChange, onSelectionChange, onCanvasError, page, document, adminMode, snapToGrid };
 
   const width = 760;
   const ratio = document.book.size.height / document.book.size.width;
@@ -173,6 +176,28 @@ export default function EditorCanvas({
         history,
       );
     };
+    const snapObject = (event) => {
+      const object = event.target;
+      if (!object || !callbacksRef.current.adminMode || !callbacksRef.current.snapToGrid || object.type === "activeSelection") return;
+      const grid = width * 0.05;
+      const scaledWidth = object.getScaledWidth();
+      const scaledHeight = object.getScaledHeight();
+      const snappedWidth = Math.min(width, Math.max(grid, Math.round(scaledWidth / grid) * grid));
+      const snappedHeight = Math.min(height, Math.max(grid, Math.round(scaledHeight / grid) * grid));
+      if (event.transform?.action === "scale") {
+        object.set({
+          scaleX: snappedWidth / object.width,
+          scaleY: snappedHeight / object.height,
+        });
+      }
+      object.set({
+        left: Math.min(Math.max(0, Math.round((object.left ?? 0) / grid) * grid), width - object.getScaledWidth()),
+        top: Math.min(Math.max(0, Math.round((object.top ?? 0) / grid) * grid), height - object.getScaledHeight()),
+      });
+      object.setCoords();
+    };
+    canvas.on("object:moving", snapObject);
+    canvas.on("object:scaling", snapObject);
     canvas.on("object:modified", () => sync(true));
     canvas.on("text:changed", () => sync(true));
     canvas.on("selection:created", (event) => { if (!suppressRef.current) callbacksRef.current.onSelectionChange(event.selected?.[0]?.elementId ?? null); });
@@ -226,6 +251,11 @@ export default function EditorCanvas({
   return (
     <div className={`editor-artboard${guides ? " show-guides" : ""}`} style={{ aspectRatio: `${width} / ${height}` }}>
       <canvas ref={elementRef} aria-label={`Editable ${pageTitle ?? page?.label ?? "book page"}`} />
+      {page.background?.borderColor && page.background?.borderStyle !== "none" ? <div
+        className="editor-page-border"
+        style={{ borderColor: page.background.borderColor, borderStyle: page.background.borderStyle ?? "solid" }}
+        aria-hidden="true"
+      /> : null}
       {guides ? <div className="editor-safe-guide" aria-hidden="true" /> : null}
     </div>
   );

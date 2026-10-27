@@ -70,6 +70,7 @@ def retrieve_private_asset(token: str):
             .join(UserProject, UserProject.id == ProjectAsset.project_id)
             .where(
                 ProjectAsset.storage_key == key,
+                ProjectAsset.original_deleted_at.is_(None),
                 UserProject.user_id == user.id,
                 UserProject.status != "deleted",
             )

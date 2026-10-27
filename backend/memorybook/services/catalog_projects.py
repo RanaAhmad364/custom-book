@@ -21,6 +21,7 @@ from memorybook.models import (
     BookTemplateVersion,
     BookVariant,
     CoverType,
+    Favorite,
     ProjectAsset,
     ProjectElement,
     ProjectPage,
@@ -32,6 +33,7 @@ from memorybook.models import (
     UserProject,
 )
 from memorybook.repositories.catalog_projects import CatalogRepository
+from memorybook.services.pricing import plan_details, validate_order_page_count
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -100,9 +102,16 @@ def serialize_collection(collection: BookCollection) -> dict:
     }
 
 
-def serialize_book(book: BookProduct, *, include_gallery: bool = False) -> dict:
+def serialize_book(
+    book: BookProduct,
+    *,
+    include_gallery: bool = False,
+    favorite_ids: set[str] | None = None,
+    include_favorite_count: bool = False,
+) -> dict:
     category = db.session.get(BookCategory, book.category_id)
     collection = db.session.get(BookCollection, book.collection_id) if book.collection_id else None
+    metadata = book.admin_metadata if isinstance(book.admin_metadata, dict) else {}
     if collection is not None and (collection.deleted_at is not None or not collection.is_active):
         collection = None
     variant_cover_ids = db.session.scalars(
@@ -127,8 +136,13 @@ def serialize_book(book: BookProduct, *, include_gallery: bool = False) -> dict:
         "style": book.style,
         "occasion": book.occasion,
         "bookType": book.book_type,
+        "planDetails": plan_details(book.book_type),
         "pageCountMin": book.page_count_min,
         "pageCountMax": book.page_count_max,
+        "pageCountOptions": metadata.get("pageCountOptions", []),
+        "basePageCount": metadata.get("basePageCount", book.page_count_min),
+        "pdfPrice": metadata.get("pdfPrice"),
+        "extraPagePrice": metadata.get("extraPagePrice"),
         "pageCount": book.page_count_min,
         "pages": (
             f"{book.page_count_min} pages"
@@ -139,7 +153,12 @@ def serialize_book(book: BookProduct, *, include_gallery: bool = False) -> dict:
         "currency": book.currency,
         "featured": book.is_featured,
         "format": ", ".join(sorted(set(cover_names))) or "Customizable",
+        "is_favorite": book.id in (favorite_ids or set()),
     }
+    if include_favorite_count:
+        result["favorites_count"] = db.session.scalar(
+            select(func.count(Favorite.id)).where(Favorite.book_id == book.id)
+        ) or 0
     if include_gallery:
         gallery = []
         if result["image"]:
@@ -148,7 +167,6 @@ def serialize_book(book: BookProduct, *, include_gallery: bool = False) -> dict:
                 "imageAlt": book.title,
                 "label": "Cover",
             })
-        metadata = book.admin_metadata if isinstance(book.admin_metadata, dict) else {}
         preview_keys = metadata.get("previewImageKeys", [])
         if isinstance(preview_keys, list):
             gallery.extend(
@@ -245,13 +263,21 @@ def serialize_template(
     return result
 
 
-def list_books(filters: dict) -> tuple[list[dict], int]:
+def list_books(filters: dict, favorite_user_id: str | None = None) -> tuple[list[dict], int]:
     query = CatalogRepository.books_query(filters)
     total = db.session.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
     products = db.session.scalars(
         query.offset((filters["page"] - 1) * filters["per_page"]).limit(filters["per_page"])
     ).all()
-    return [serialize_book(book) for book in products], total
+    favorite_ids = set()
+    if favorite_user_id and products:
+        favorite_ids = set(db.session.scalars(
+            select(Favorite.book_id).where(
+                Favorite.user_id == favorite_user_id,
+                Favorite.book_id.in_([book.id for book in products]),
+            )
+        ).all())
+    return [serialize_book(book, favorite_ids=favorite_ids) for book in products], total
 
 
 def list_categories() -> list[dict]:
@@ -282,8 +308,17 @@ def get_template(template_id: str) -> dict | None:
     return serialize_template(template, include_pages=True) if template else None
 
 
-def _asset_src(asset: ProjectAsset) -> str:
+def _asset_src(asset: ProjectAsset) -> str | None:
+    if asset.original_deleted_at is not None:
+        return None
     return get_asset_storage().private_download_url(asset.storage_key)
+
+
+def is_project_private(project: UserProject, owner: User | None = None) -> bool:
+    if project.privacy_override is not None:
+        return project.privacy_override
+    owner = owner or db.session.get(User, project.user_id)
+    return bool(owner and owner.privacy_mode)
 
 
 def _stored_document(document: dict, project_id: str) -> dict:
@@ -304,7 +339,9 @@ def serialize_project(project: UserProject, owner: User) -> dict:
     product = db.session.get(BookProduct, project.product_id) if project.product_id else None
     category = db.session.get(BookCategory, product.category_id) if product else None
     first_asset = db.session.scalar(
-        select(ProjectAsset).where(ProjectAsset.project_id == project.id).order_by(ProjectAsset.created_at)
+        select(ProjectAsset)
+        .where(ProjectAsset.project_id == project.id, ProjectAsset.original_deleted_at.is_(None))
+        .order_by(ProjectAsset.created_at)
     )
     image = _asset_src(first_asset) if first_asset else (
         _catalog_asset_url(product.cover_asset_key) if product else None
@@ -351,6 +388,8 @@ def serialize_project(project: UserProject, owner: User) -> dict:
         "image": image,
         "category": category.name if category else "Custom",
         "version": project.version,
+        "privacyOverride": project.privacy_override,
+        "privacyMode": is_project_private(project, owner),
         "createdAt": _iso(project.created_at),
         "updatedAt": _iso(project.updated_at),
         "document": document,
@@ -423,6 +462,15 @@ def _sync_document(project: UserProject, document: dict) -> None:
     project.document = stored
     project.page_count = int((stored.get("book") or {}).get("pageCount") or max(0, len(stored["pages"]) - 1))
     _sync_pages(project, stored)
+
+
+def _validate_project_page_count(project: UserProject) -> None:
+    if not project.product_id:
+        return
+    product = db.session.get(BookProduct, project.product_id)
+    if product is None:
+        raise ConflictError("The linked book product is unavailable.")
+    validate_order_page_count(product, int(project.page_count), print_order=False)
 
 
 def _assert_version(project: UserProject, expected_version: int | None) -> None:
@@ -596,6 +644,7 @@ def create_project(owner: User, data: dict) -> UserProject:
         page_count=data["page_count"],
         status="draft",
         version=1,
+        privacy_override=data.get("privacy_override"),
     )
     db.session.add(project)
     db.session.flush()
@@ -605,6 +654,7 @@ def create_project(owner: User, data: dict) -> UserProject:
     if document:
         document["metadata"]["id"] = project.id
         _sync_document(project, document)
+    _validate_project_page_count(project)
     db.session.commit()
     return project
 
@@ -618,6 +668,7 @@ def update_project(project: UserProject, data: dict, expected_version: int | Non
         if document["metadata"].get("id") not in (None, project.id):
             raise ValidationError("Project document belongs to another project.", {"document": "project_mismatch"})
         _sync_document(project, document)
+    _validate_project_page_count(project)
     db.session.commit()
     return project
 
@@ -638,6 +689,7 @@ def duplicate_project(source: UserProject, owner: User) -> UserProject:
         status="draft",
         page_count=source.page_count,
         version=1,
+        privacy_override=source.privacy_override,
     )
     db.session.add(duplicate)
     db.session.flush()
@@ -651,6 +703,21 @@ def duplicate_project(source: UserProject, owner: User) -> UserProject:
     source_assets = db.session.scalars(
         select(ProjectAsset).where(ProjectAsset.project_id == source.id)
     ).all()
+    deleted_asset_ids = {asset.id for asset in source_assets if asset.original_deleted_at is not None}
+    if deleted_asset_ids:
+        document["assets"] = [
+            asset for asset in document.get("assets", [])
+            if asset.get("id") not in deleted_asset_ids
+        ]
+        for page in document.get("pages", []):
+            page["elements"] = [
+                element for element in page.get("elements", [])
+                if not (element.get("type") == "image" and element.get("assetId") in deleted_asset_ids)
+            ]
+        front = ((document.get("cover") or {}).get("design") or {}).get("front")
+        if front and front.get("photoAssetId") in deleted_asset_ids:
+            front["photoAssetId"] = None
+    source_assets = [asset for asset in source_assets if asset.original_deleted_at is None]
     storage = get_asset_storage() if source_assets else None
     copied_keys = []
     try:
@@ -702,6 +769,7 @@ def duplicate_project(source: UserProject, owner: User) -> UserProject:
     if front_design and front_design.get("photoAssetId") in asset_id_map:
         front_design["photoAssetId"] = asset_id_map[front_design["photoAssetId"]]
     _sync_document(duplicate, document)
+    _validate_project_page_count(duplicate)
     db.session.commit()
     return duplicate
 

@@ -22,13 +22,33 @@ class GatewayError(Exception):
 
 @dataclass(frozen=True)
 class CheckoutSession:
-    url: str
+    url: str | None
     reference: str
+    instructions: dict[str, str] | None = None
 
 
-def available_payment_methods(currency: str) -> list[dict[str, str]]:
+def available_payment_methods(currency: str) -> list[dict]:
     if currency.strip().upper() == "PKR":
-        methods = []
+        methods = [
+            {
+                "provider": "manual",
+                "method": "bank_transfer",
+                "label": "Bank transfer",
+                "instructions": _manual_instructions("bank_transfer"),
+            },
+            {
+                "provider": "manual",
+                "method": "jazzcash",
+                "label": "JazzCash",
+                "instructions": _manual_instructions("jazzcash"),
+            },
+            {
+                "provider": "manual",
+                "method": "easypaisa",
+                "label": "Easypaisa",
+                "instructions": _manual_instructions("easypaisa"),
+            },
+        ]
         api_url = current_app.config.get("JAZZCASH_API_URL")
         return_url = current_app.config.get("PAYMENT_RETURN_URL")
         api_url_is_secure = isinstance(api_url, str) and urlparse(api_url).scheme == "https"
@@ -54,6 +74,12 @@ def available_payment_methods(currency: str) -> list[dict[str, str]]:
                     "method": "jazzcash_wallet",
                     "label": "JazzCash wallet",
                 })
+        if (
+            current_app.config.get("STRIPE_ENABLED")
+            and current_app.config.get("STRIPE_SECRET_KEY")
+            and current_app.config.get("STRIPE_WEBHOOK_SECRET")
+        ):
+            methods.append({"provider": "stripe", "method": "card", "label": "Card"})
         return methods
 
     if (
@@ -87,11 +113,51 @@ def provider_for(currency: str, preferred: str | None = None, method: str | None
     )
     if selected is None:
         raise ServiceUnavailableError("No enabled, verified payment method is available for this currency.")
+    if name == "manual":
+        return ManualPaymentGateway()
     if name == "jazzcash":
         return JazzCashGateway()
     if name == "stripe":
         return StripeGateway()
     raise ValidationError("Choose an enabled payment method for this currency.", {"provider": "unsupported"})
+
+
+def _manual_instructions(method: str) -> dict[str, str]:
+    if method == "bank_transfer":
+        values = {
+            "accountTitle": current_app.config.get("MANUAL_BANK_ACCOUNT_TITLE", ""),
+            "bank": current_app.config.get("MANUAL_BANK_NAME", ""),
+            "accountNumber": current_app.config.get("MANUAL_BANK_ACCOUNT_NUMBER", ""),
+        }
+    elif method == "jazzcash":
+        values = {"accountNumber": current_app.config.get("MANUAL_JAZZCASH_NUMBER", "")}
+    else:
+        values = {"accountNumber": current_app.config.get("MANUAL_EASYPAISA_NUMBER", "")}
+    return {
+        key: value.strip() if isinstance(value, str) and value.strip() else
+        ("Contact MemoryBook support for transfer details." if key == "accountNumber" else "")
+        for key, value in values.items()
+    }
+
+
+class ManualPaymentGateway:
+    name = "manual"
+
+    def create_checkout(self, payment: Payment, title: str, idempotency_key: str) -> CheckoutSession:
+        method = payment.payment_method or "bank_transfer"
+        reference = f"MB-{payment.id.replace('-', '')[:16].upper()}"
+        return CheckoutSession(
+            url=None,
+            reference=reference,
+            instructions={
+                **_manual_instructions(method),
+                "amount": str(payment.amount),
+                "currency": payment.currency,
+                "orderReference": reference,
+                "paymentMethod": method,
+                "note": "Use the order reference in your transfer note, then submit your transaction reference for review.",
+            },
+        )
 
 
 def _configured_methods(value) -> set[str]:
@@ -182,12 +248,11 @@ class StripeGateway:
             data=urlencode(fields).encode() if method == "POST" else None,
             method=method,
             headers={
-                "Authorization": f"Bearer {self._api_key()}",
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Idempotency-Key": idempotency_key,
             },
         )
-        request.add_header("Authorization", f"Bearer {self._api_key()}")
+        request.add_header("Authorization", "Bearer " + self._api_key())
         return _read_json_response(request, "Stripe")
 
 

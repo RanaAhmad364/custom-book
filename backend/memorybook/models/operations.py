@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from memorybook.extensions import db
@@ -100,3 +100,23 @@ class SupportMessage(IdMixin, db.Model):
     body: Mapped[str] = mapped_column(Text, nullable=False)
     is_internal: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class BackgroundJob(IdMixin, TimestampMixin, db.Model):
+    __tablename__ = "background_jobs"
+    __table_args__ = (
+        UniqueConstraint("job_type", "reference_id", name="uq_background_jobs_type_reference"),
+        Index("ix_background_jobs_status_run_after", "status", "run_after"),
+        CheckConstraint("status IN ('queued', 'running', 'completed', 'failed')", name="ck_background_jobs_status"),
+        CheckConstraint("attempt_count >= 0 AND max_attempts > 0", name="ck_background_jobs_attempts"),
+    )
+
+    job_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    reference_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued", server_default="queued")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3, server_default="3")
+    run_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_message: Mapped[str | None] = mapped_column(Text)

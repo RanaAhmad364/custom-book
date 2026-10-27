@@ -22,6 +22,8 @@ from memorybook.models import (
     PaymentAttempt,
     PaymentWebhookEvent,
     PdfOrder,
+    OrderStatusHistory,
+    Notification,
     ProjectRevision,
     Refund,
     User,
@@ -52,13 +54,16 @@ def test_payment_methods_fail_closed_for_unverified_pkr_gateways(app, client):
             JAZZCASH_CHECKOUT_CONTRACT_VERIFIED=True,
             JAZZCASH_CALLBACK_CONTRACT_VERIFIED=False,
         )
-        assert available_payment_methods("PKR") == []
+        methods = available_payment_methods("PKR")
+        assert {method["provider"] for method in methods} == {"manual"}
         with pytest.raises(ServiceUnavailableError):
             provider_for("PKR")
 
     response = client.get("/api/v1/payments/methods?currency=PKR")
     assert response.status_code == 200
-    assert response.json == {"currency": "PKR", "items": [], "primaryGateway": "payfast"}
+    assert response.json["currency"] == "PKR"
+    assert response.json["primaryGateway"] == "payfast"
+    assert {method["provider"] for method in response.json["items"]} == {"manual"}
 
 
 def test_jazzcash_method_stays_blocked_without_server_inquiry_implementation(app):
@@ -75,7 +80,7 @@ def test_jazzcash_method_stays_blocked_without_server_inquiry_implementation(app
             PAYMENT_RETURN_URL="https://memorybook.example.test/payment-return",
             JAZZCASH_PAYMENT_METHODS="jazzcash_wallet",
         )
-        assert available_payment_methods("PKR") == []
+        assert not any(method["provider"] == "jazzcash" for method in available_payment_methods("PKR"))
         with pytest.raises(ServiceUnavailableError):
             provider_for("PKR", "jazzcash", "jazzcash_wallet")
 
@@ -97,7 +102,7 @@ def test_stripe_request_uses_configured_bearer_secret(app, monkeypatch):
         monkeypatch.setattr("memorybook.integrations.payment_gateways._read_json_response", capture_request)
         StripeGateway()._request("POST", "/v1/checkout/sessions", {}, idempotency_key="header-check")
 
-    assert captured["authorization"] == f"Bearer {api_secret}"
+    assert captured["authorization"] == "Bearer " + api_secret
 
 
 def _make_pdf_payment(
@@ -159,7 +164,9 @@ def _make_pdf_payment(
         payment_id=payment.id,
         attempt_number=1,
         status="successful" if paid else "pending",
-        provider_reference="cs_test_session" if provider == "stripe" else "MB-test-session",
+        provider_reference="cs_test_session" if provider == "stripe" else (
+            None if provider == "manual" else "MB-test-session"
+        ),
         amount=payment.amount,
         idempotency_key=f"{payment.id}:attempt:1",
     )
@@ -188,6 +195,69 @@ def _make_pdf_payment(
         download_id = entitlement.id
     db.session.commit()
     return payment.id, order.id, download_id
+
+
+def test_manual_payment_requires_customer_reference_and_admin_approval_before_paid(app, monkeypatch):
+    with app.app_context():
+        payment_id, order_id, _ = _make_pdf_payment(paid=False, provider="manual", currency="PKR")
+        payment = db.session.get(Payment, payment_id)
+        attempt = db.session.scalar(
+            db.select(PaymentAttempt).where(PaymentAttempt.payment_id == payment_id)
+        )
+        user_id = payment.user_id
+        assert attempt.status == "pending"
+        assert payment.provider == "manual"
+
+        submitted = payments.submit_manual_payment_reference(payment, user_id, "TXN-849201")
+        assert submitted["status"] == "pending"
+        assert db.session.get(PdfOrder, order_id).paid_at is None
+        assert db.session.get(PaymentAttempt, attempt.id).status == "submitted"
+
+        generated = []
+        monkeypatch.setattr(payments, "_queue_pdf_generation", lambda item: generated.append(item.id))
+        reviewed = payments.review_manual_payment(payment_id, approved=True, actor_id=user_id)
+        order = db.session.get(PdfOrder, order_id)
+        assert reviewed["status"] == "successful"
+        assert order.paid_at is not None
+        assert order.status == "paid"
+        assert db.session.get(PaymentAttempt, attempt.id).provider_reference == "TXN-849201"
+        assert generated == [payment_id]
+        history = db.session.scalars(
+            db.select(OrderStatusHistory).where(OrderStatusHistory.pdf_order_id == order_id)
+        ).all()
+        assert [item.status for item in history][-1] == "paid"
+        notices = db.session.scalars(
+            db.select(Notification).where(Notification.user_id == user_id)
+        ).all()
+        assert {item.title for item in notices} >= {"Payment confirmed", "PDF purchased"}
+
+
+def test_rejected_manual_payment_is_failed_and_not_paid(app):
+    with app.app_context():
+        payment_id, order_id, _ = _make_pdf_payment(paid=False, provider="manual", currency="PKR")
+        payment = db.session.get(Payment, payment_id)
+        payments.submit_manual_payment_reference(payment, payment.user_id, "TXN-REJECT-9")
+
+        result = payments.review_manual_payment(
+            payment_id,
+            approved=False,
+            actor_id=payment.user_id,
+        )
+
+        order = db.session.get(PdfOrder, order_id)
+        assert result["status"] == "failed"
+        assert order.paid_at is None
+        assert order.status == "pending"
+        history = db.session.scalars(
+            db.select(OrderStatusHistory).where(OrderStatusHistory.pdf_order_id == order_id)
+        ).all()
+        assert [item.status for item in history][-1] == "payment_failed"
+        assert db.session.scalar(
+            db.select(Notification.id).where(
+                Notification.user_id == payment.user_id,
+                Notification.title == "Payment failed",
+            )
+        )
 
 
 def test_verified_webhook_is_idempotent_and_updates_payment_once(app, monkeypatch):

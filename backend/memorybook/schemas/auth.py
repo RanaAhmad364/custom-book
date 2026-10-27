@@ -118,16 +118,20 @@ def _password_field(data: dict, field: str) -> str:
 
 class ProfileSchema:
     @staticmethod
-    def load(data: object) -> dict[str, str | None]:
+    def load(data: object) -> dict[str, str | bool | None]:
         if not isinstance(data, dict):
             raise ValidationError("A JSON object is required.")
-        result: dict[str, str | None] = {}
+        result: dict[str, str | bool | None] = {}
         for field, maximum in (("name", 100), ("phone", 40)):
             if field in data:
                 value = data[field]
                 if value is not None and (not isinstance(value, str) or len(value.strip()) > maximum):
                     raise ValidationError(f"{field} must be {maximum} characters or fewer.", {field: "invalid"})
                 result[field] = value.strip() if isinstance(value, str) else None
+        if "privacyMode" in data:
+            if not isinstance(data["privacyMode"], bool):
+                raise ValidationError("privacyMode must be a boolean.", {"privacyMode": "invalid"})
+            result["privacy_mode"] = data["privacyMode"]
         if not result:
             raise ValidationError("Provide at least one profile field.")
         return result

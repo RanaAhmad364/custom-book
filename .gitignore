@@ -6,3 +6,14 @@ backend/.pytest_cache/
 backend/.coverage
 backend/htmlcov/
 backend/*.egg-info/
+
+.env
+.env.*
+!.env.example
+!.env.production.example
+node_modules/
+dist/
+instance/
+__pycache__/
+.venv/
+uploads/

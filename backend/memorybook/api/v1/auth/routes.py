@@ -177,6 +177,8 @@ def update_profile():
         user.full_name = profile["name"]
     if "phone" in profile:
         user.phone = profile["phone"]
+    if "privacy_mode" in profile:
+        user.privacy_mode = profile["privacy_mode"]
     db.session.commit()
     return jsonify({"user": user.public_dict()})
 

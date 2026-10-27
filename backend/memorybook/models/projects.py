@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from memorybook.extensions import db
@@ -24,6 +24,7 @@ class UserProject(IdMixin, TimestampMixin, db.Model):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     document: Mapped[dict | None] = mapped_column(db.JSON)
     cover_settings: Mapped[dict | None] = mapped_column(db.JSON)
+    privacy_override: Mapped[bool | None] = mapped_column(Boolean)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -59,6 +60,7 @@ class ProjectAsset(IdMixin, db.Model):
     original_filename: Mapped[str | None] = mapped_column(String(255))
     width_px: Mapped[int | None] = mapped_column(Integer)
     height_px: Mapped[int | None] = mapped_column(Integer)
+    original_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 

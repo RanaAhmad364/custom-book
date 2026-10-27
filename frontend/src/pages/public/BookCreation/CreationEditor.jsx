@@ -21,10 +21,12 @@ import { refreshAssetSources } from "../../../features/bookEditor/assetPreview.j
 import { getPageThumbnailSize } from "../../../features/bookEditor/pageThumbnail.js";
 import { createSaveQueue } from "../../../features/bookEditor/saveQueue.js";
 import {
-  cloneDocument, createPage, createPhotoElement, createShapeElement, createTextElement,
-  duplicatePageRecord, formatBytes, pageLayouts, removePage, reorderPageIds,
+  cloneDocument, createPage, createPhotoElement, createPreviewDocument, createShapeElement, createTextElement,
+  duplicatePageRecord, formatBytes, pageLayouts, pagesWithoutPhotoSlots, placePhotoOnPage, removePage,
+  reorderPageIds, resizeBookPageCount,
 } from "../../../features/bookEditor/editorDocument.js";
 import { getPageLabel, getPagePosition } from "../../../features/bookEditor/pageNavigation.js";
+import { formatCurrency } from "../../../services/money.js";
 import CoverDesigner from "../../../features/bookEditor/CoverDesigner.jsx";
 import BookPreview, { PageArtwork } from "../../../features/bookEditor/BookPreview.jsx";
 import BookReview from "../../../features/bookEditor/BookReview.jsx";
@@ -51,11 +53,14 @@ const editorImageTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
 
 function SidebarPanel({
   panel, document, page, activePageId, setActivePageId, setSelectedId, setMobilePanel, inputRef, onAddText, onAddShape, onAddPhoto, onUpload,
-  onApplyLayout, onBackground, onReorderPage, onAddPage, onDuplicatePage, onDeletePage, onClose,
+  onApplyLayout, onBackground, onPageBorderChange, onThemeChange, onReorderPage, onAddPage, onSetPageCount,
+  onDuplicatePage, onDeletePage, onClose, adminMode,
 }) {
   const readyAssets = document.assets.filter((asset) => asset.src);
   const [dragPage, setDragPage] = useState(null);
+  const [pageCountValue, setPageCountValue] = useState(String(document.book.pageCount));
   const pageRefs = useRef(new Map());
+  useEffect(() => setPageCountValue(String(document.book.pageCount)), [document.book.pageCount]);
   useEffect(() => {
     pageRefs.current.get(activePageId)?.scrollIntoView({ block: "nearest" });
   }, [activePageId, document.pageOrder.length]);
@@ -89,13 +94,26 @@ function SidebarPanel({
       <div className="editor-text-presets"><button type="button" onClick={() => onAddText("heading")}><strong>Heading</strong><small>Add a title</small></button><button type="button" onClick={() => onAddText("subheading")}><strong className="text-subheading">Subheading</strong><small>Add a section title</small></button><button type="button" onClick={() => onAddText("paragraph")}><span>Paragraph text</span><small>Tell a little more</small></button></div>
     </div> : null}
     {panel === "elements" ? <div className="editor-panel-content">
-      <p className="editor-panel-note">Subtle shapes add a little structure to your page.</p>
+      <p className="editor-panel-note">{adminMode ? "Add a photo slot for customers, or use shapes as page decoration." : "Subtle shapes add a little structure to your page."}</p>
+      {adminMode ? <button className="editor-upload-inline" type="button" onClick={() => onAddShape("photo-placeholder")}><ImagePlus size={16} /> Add photo slot</button> : null}
       <div className="editor-shape-actions"><button type="button" onClick={() => onAddShape("rectangle")}><span className="editor-shape-preview" />Rectangle</button><button type="button" onClick={() => onAddShape("circle")}><Circle size={24} />Circle</button></div>
     </div> : null}
     {panel === "background" || panel === "styles" ? <div className="editor-panel-content">
-      <p className="editor-panel-note">{panel === "styles" ? "Set a calm paper tone for this page." : "Choose a paper color for the active page."}</p>
+      <p className="editor-panel-note">{panel === "styles" ? "Set the book-wide defaults used by newly added text and pages." : "Choose a paper color for the active page."}</p>
+      {adminMode && panel === "styles" ? <>
+        <label className="editor-field-label">Theme typography<select value={document.styles?.fontFamily ?? "DM Sans"} onChange={(event) => onThemeChange({ fontFamily: event.target.value })}><option>DM Sans</option><option>Georgia</option><option>Arial</option><option>Times New Roman</option></select></label>
+        <label className="editor-field-label">Theme text color<input type="color" value={document.styles?.color ?? "#20352d"} onChange={(event) => onThemeChange({ color: event.target.value })} /></label>
+        <label className="editor-field-label">Default paper color<input type="color" value={document.styles?.background ?? "#fffdf9"} onChange={(event) => onThemeChange({ background: event.target.value })} /></label>
+      </> : null}
       <div className="editor-background-swatches">{colorSwatches.map((color) => <button key={color} className={page.background?.color === color ? "selected" : ""} type="button" style={{ backgroundColor: color }} onClick={() => onBackground(color)} aria-label={`Set page background to ${color}`} />)}</div>
       <label className="editor-field-label">Custom color<input type="color" value={page.background?.color ?? "#fffdf9"} onChange={(event) => onBackground(event.target.value)} /></label>
+      {adminMode ? <>
+        <div className="editor-field-pair">
+          <label className="editor-field-label">Page border<input type="color" value={page.background?.borderColor ?? "#d8ded8"} onChange={(event) => onPageBorderChange({ borderColor: event.target.value })} /></label>
+          <label className="editor-field-label">Border style<select value={page.background?.borderStyle ?? "solid"} onChange={(event) => onPageBorderChange({ borderStyle: event.target.value })}><option value="solid">Solid</option><option value="dashed">Dashed</option><option value="dotted">Dotted</option><option value="none">None</option></select></label>
+        </div>
+        <p className="editor-panel-note">Page borders are included in preview and print output.</p>
+      </> : null}
       {document.book.template ? <div className="editor-template-current"><span className="eyebrow">Your template</span><strong>{document.book.template.title}</strong><small>Page colors and text remain fully editable.</small></div> : null}
     </div> : null}
     {panel === "pages" ? <div className="editor-panel-content-pages">
@@ -122,6 +140,10 @@ function SidebarPanel({
           <div><button type="button" aria-label={`Move ${label} earlier`} disabled={index === 0} onClick={() => onReorderPage(id, document.pageOrder[index - 1])}><ArrowUp size={14} /></button><button type="button" aria-label={`Move ${label} later`} disabled={index === document.pageOrder.length - 1} onClick={() => onReorderPage(id, document.pageOrder[index + 2] ?? null)}><ArrowDown size={14} /></button></div>
         </div>;
       })}</div>
+        {adminMode ? <form className="editor-base-page-count" onSubmit={(event) => { event.preventDefault(); onSetPageCount(Number(pageCountValue)); }}>
+          <label className="editor-field-label">Base page count<input type="number" min="1" max="500" value={pageCountValue} onChange={(event) => setPageCountValue(event.target.value)} /></label>
+          <button type="submit" className="editor-upload-inline">Set page count</button>
+        </form> : null}
         <div className="editor-page-actions">
           <button className="editor-upload-inline" type="button" onClick={onAddPage}><Plus size={16} /> Add a page</button>
           <button className="editor-upload-inline" type="button" onClick={() => onDuplicatePage(page.id)}><Copy size={15} /> Duplicate this page</button>
@@ -131,7 +153,7 @@ function SidebarPanel({
   </aside>;
 }
 
-function ElementInspector({ element, pageHeight, onChange, onDelete, onDuplicate, onShowPhotos, onClose, assets }) {
+function ElementInspector({ element, pageHeight, onChange, onAlign, adminMode, onDelete, onDuplicate, onShowPhotos, onClose, assets }) {
   if (!element) return <aside className="editor-inspector"><header className="editor-panel-heading"><div><span className="eyebrow">Page settings</span><h2>Make it yours</h2></div><button className="editor-panel-close" type="button" onClick={onClose} aria-label="Close properties panel"><X size={17} /></button></header><p className="editor-panel-note">Select a photo, text, or shape to see its editing controls. Changes are saved to your book document.</p>
     <div className="editor-inspector-tip"><span className="eyebrow">A small tip</span><p>Drag an object to move it. Use its corner handles to resize, or the round handle to rotate.</p></div>
     <div className="editor-inspector-section"><span className="eyebrow">Photos in this book</span>{assets.length ? <button className="editor-inspector-photo-action" type="button" onClick={() => onAddPhoto(assets[0])}><img src={assets[0].src} alt="" /><span>Place {assets[0].name}</span><Plus size={15} /></button> : <p>Upload a photo to start creating.</p>}</div>
@@ -166,6 +188,9 @@ function ElementInspector({ element, pageHeight, onChange, onDelete, onDuplicate
       <label className="editor-field-label">Rotation<input type="number" min="-180" max="180" value={Math.round(element.rotation)} onChange={(event) => onChange({ rotation: Number(event.target.value) })} /></label>
     </>}
     <div className="editor-inspector-section"><span className="eyebrow">Position & size</span>
+      {adminMode ? <div className="editor-align-actions editor-object-align-actions">
+        {["left", "center", "right", "top", "middle", "bottom"].map((alignment) => <button key={alignment} type="button" onClick={() => onAlign(alignment)}>{alignment}</button>)}
+      </div> : null}
       <div className="editor-field-pair"><label className="editor-field-label">X<input type="number" min="0" max="100" value={Math.round(element.x * 100)} onChange={(event) => onChange({ x: Math.min(1, Math.max(0, Number(event.target.value) / 100)) })} /></label><label className="editor-field-label">Y<input type="number" min="0" max="100" value={Math.round(element.y * 100)} onChange={(event) => onChange({ y: Math.min(1, Math.max(0, Number(event.target.value) / 100)) })} /></label></div>
       <div className="editor-field-pair"><label className="editor-field-label">Width<input type="number" min="1" max="100" value={Math.round(element.width * 100)} onChange={(event) => onChange({ width: Math.min(1, Math.max(0.01, Number(event.target.value) / 100)) })} /></label><label className="editor-field-label">Height<input type="number" min="1" max="100" value={Math.round(element.height * 100)} onChange={(event) => onChange({ height: Math.min(1, Math.max(0.01, Number(event.target.value) / 100)) })} /></label></div>
       <label className="editor-field-label">Rotation<input type="number" min="-180" max="180" value={Math.round(element.rotation)} onChange={(event) => onChange({ rotation: Number(event.target.value) })} /></label>
@@ -206,6 +231,7 @@ function CreationEditorSession({ adminMode }) {
     queryFn: () => adminMode ? getAdminBookDesign(bookId) : projectService.getProject(user.email, projectId),
   });
   const [document, setDocument] = useState(null);
+  const [quotePageCount, setQuotePageCount] = useState(null);
   const documentRef = useRef(null);
   const [activePageId, setActivePageId] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
@@ -213,6 +239,7 @@ function CreationEditorSession({ adminMode }) {
   const [renderToken, setRenderToken] = useState(0);
   const [zoom, setZoom] = useState(75);
   const [guides, setGuides] = useState(true);
+  const [snapToGrid, setSnapToGrid] = useState(true);
   const [preview, setPreview] = useState(false);
   const [coverDesignerOpen, setCoverDesignerOpen] = useState(false);
   const [bookPreviewOpen, setBookPreviewOpen] = useState(false);
@@ -224,6 +251,12 @@ function CreationEditorSession({ adminMode }) {
   const [publishing, setPublishing] = useState(false);
   const [recoveryNotice, setRecoveryNotice] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const pricingQuote = useQuery({
+    queryKey: ["project-pricing-quote", projectId, quotePageCount],
+    queryFn: () => projectService.getPricingQuote(user.email, projectId, quotePageCount),
+    enabled: !adminMode && Boolean(query.data?.productId) && Number.isInteger(quotePageCount),
+    staleTime: 30_000,
+  });
   const fileInputRef = useRef(null);
   const canvasApi = useRef(null);
   const undoStack = useRef([]);
@@ -234,6 +267,12 @@ function CreationEditorSession({ adminMode }) {
   const dirtyRef = useRef(false);
   const saveQueueRef = useRef(null);
   if (!saveQueueRef.current) saveQueueRef.current = createSaveQueue();
+
+  useEffect(() => {
+    if (adminMode || !Number.isInteger(document?.book?.pageCount)) return undefined;
+    const timer = window.setTimeout(() => setQuotePageCount(document.book.pageCount), 300);
+    return () => window.clearTimeout(timer);
+  }, [adminMode, document?.book?.pageCount]);
 
   useEffect(() => {
     if (!query.data?.document) return;
@@ -546,6 +585,8 @@ function CreationEditorSession({ adminMode }) {
 
   function addText(kind) {
     const element = createTextElement(kind);
+    element.fontFamily = documentRef.current.styles?.fontFamily ?? element.fontFamily;
+    element.color = documentRef.current.styles?.color ?? element.color;
     updatePage(page.id, (target) => target.elements.push(element));
     setSelectedId(element.id);
     setRenderToken((value) => value + 1);
@@ -561,29 +602,22 @@ function CreationEditorSession({ adminMode }) {
 
   function addPhoto(asset) {
     if (!asset) return;
-    const selected = selectedElement;
-    if (selected?.type === "shape" && selected.shape === "photo-placeholder") {
-      updatePage(page.id, (target) => {
-        const index = target.elements.findIndex((item) => item.id === selected.id);
-        if (index !== -1) target.elements[index] = { ...createPhotoElement(asset, selected.x, selected.y, selected.width, selected.height), id: selected.id };
-      });
-      setSelectedId(null);
-    } else if (selected?.type === "image") {
-      updatePage(page.id, (target) => {
-        const index = target.elements.findIndex((item) => item.id === selected.id);
-        if (index !== -1) target.elements[index] = { ...createPhotoElement(asset, selected.x, selected.y, selected.width, selected.height), id: selected.id };
-      });
-    } else {
-      const photo = createPhotoElement(asset, 0.1, 0.1, 0.8, 0.8);
-      updatePage(page.id, (target) => target.elements.push(photo));
-      setSelectedId(photo.id);
-    }
+    const next = cloneDocument(documentRef.current);
+    const target = next.pages.find((item) => item.id === activePageId);
+    if (!target) return;
+    const placed = placePhotoOnPage(target.elements, asset, selectedId);
+    target.elements = placed.elements;
+    next.metadata.updatedAt = new Date().toISOString();
+    commit(next);
+    setSelectedId(placed.photo.id);
     setRenderToken((value) => value + 1);
     setPanel("photos");
   }
 
   async function addUploadedFiles(fileList) {
     const files = Array.from(fileList ?? []);
+    const targetPageId = activePageId;
+    let targetElementId = selectedId;
     for (const file of files) {
       if (!editorImageTypes.has(file.type.toLowerCase())) { setSaveError(`${file.name} is not a supported image.`); return; }
       if (file.size > 15 * 1024 * 1024) { setSaveError(`${file.name} is larger than 15 MB.`); return; }
@@ -604,10 +638,13 @@ function CreationEditorSession({ adminMode }) {
         const next = cloneDocument(documentRef.current);
         next.assets.push(asset);
         next.metadata.updatedAt = new Date().toISOString();
-        const photo = createPhotoElement(asset);
-        next.pages.find((item) => item.id === activePageId)?.elements.push(photo);
+        const target = next.pages.find((item) => item.id === targetPageId);
+        if (!target) throw new Error("The selected page is no longer available.");
+        const placed = placePhotoOnPage(target.elements, asset, targetElementId);
+        target.elements = placed.elements;
+        targetElementId = null;
         commit(next);
-        setSelectedId(photo.id);
+        setSelectedId(placed.photo.id);
         setRenderToken((value) => value + 1);
         setPanel("photos");
         setSaveError("");
@@ -641,11 +678,58 @@ function CreationEditorSession({ adminMode }) {
   }
 
   function changeBackground(color) {
-    updatePage(page.id, (target) => { target.background = { color }; });
+    updatePage(page.id, (target) => { target.background = { ...target.background, color }; });
+  }
+
+  function changePageBorder(changes) {
+    updatePage(page.id, (target) => { target.background = { ...target.background, ...changes }; });
+  }
+
+  function changeTheme(changes) {
+    const next = cloneDocument(documentRef.current);
+    next.styles = { ...next.styles, ...changes };
+    next.metadata.updatedAt = new Date().toISOString();
+    commit(next);
+  }
+
+  function setBasePageCount(pageCount) {
+    const current = documentRef.current;
+    const next = resizeBookPageCount(current, pageCount);
+    if (!next) {
+      setSaveError("Base page count must be between 1 and 500.");
+      return;
+    }
+    if (pageCount < current.book.pageCount) {
+      const retainedIds = new Set(next.pageOrder);
+      const removedPages = current.pageOrder
+        .filter((id) => !retainedIds.has(id))
+        .map((id) => current.pages.find((item) => item.id === id))
+        .filter((item) => item?.elements?.length);
+      if (removedPages.length && !window.confirm(`This removes ${removedPages.length} page(s) with content. Continue?`)) return;
+    }
+    next.metadata.updatedAt = new Date().toISOString();
+    commit(next);
+    if (!next.pageOrder.includes(activePageId)) setActivePageId(next.pageOrder[0]);
+    setSelectedId(null);
+    setRenderToken((value) => value + 1);
+    setSaveError("");
+  }
+
+  function alignSelected(alignment) {
+    if (!selectedElement) return;
+    const positions = {
+      left: { x: 0 },
+      center: { x: (1 - selectedElement.width) / 2 },
+      right: { x: 1 - selectedElement.width },
+      top: { y: 0 },
+      middle: { y: (1 - selectedElement.height) / 2 },
+      bottom: { y: 1 - selectedElement.height },
+    };
+    updateSelected(positions[alignment] ?? {});
   }
 
   function addPage() {
-    const newPage = createPage("page", document.pageOrder.length, "#fffdf9");
+    const newPage = createPage("page", document.pageOrder.length, document.styles?.background ?? "#fffdf9");
     const next = cloneDocument(documentRef.current);
     const currentIndex = next.pageOrder.indexOf(activePageId);
     next.pages.push(newPage);
@@ -783,6 +867,10 @@ function CreationEditorSession({ adminMode }) {
         await unpublishAdminBookDesign(targetId);
         setBookPublished(false);
       } else {
+        const pagesWithoutSlots = pagesWithoutPhotoSlots(documentRef.current);
+        if (pagesWithoutSlots.length && !window.confirm(
+          `These pages have no photo slot or image: ${pagesWithoutSlots.join(", ")}. Customers may not be able to add a photo to them. Publish anyway?`,
+        )) return;
         await publishAdminBookDesign(targetId);
         setBookPublished(true);
       }
@@ -813,6 +901,7 @@ function CreationEditorSession({ adminMode }) {
         </button>
       </> : null}
       {!previewOnly ? <button type="button" className={`editor-top-icon${guides ? " active" : ""}`} onClick={() => setGuides((value) => !value)} aria-label="Toggle safe margin guides"><span className="editor-guide-icon" /></button> : null}
+      {adminMode && !previewOnly ? <button type="button" className={`editor-top-icon${snapToGrid ? " active" : ""}`} onClick={() => setSnapToGrid((value) => !value)} aria-label="Toggle 5 percent grid snapping" aria-pressed={snapToGrid}>Grid</button> : null}
       {!previewOnly ? <button type="button" className="editor-preview-button" onClick={() => setCoverDesignerOpen(true)}><BookOpen size={15} />Cover</button> : null}
       {!previewOnly ? <button type="button" className="editor-preview-button" onClick={() => setBookReviewOpen(true)}><Check size={15} />Final review</button> : null}
       <button type="button" className={`editor-preview-button${preview ? " active" : ""}`} onClick={() => { if (!previewOnly) setPreview(false); setBookPreviewOpen(true); }}><Eye size={15} />Full preview</button>
@@ -824,17 +913,29 @@ function CreationEditorSession({ adminMode }) {
     </div> : null}
     <div className="editor-workspace">
       {!previewOnly ? <nav className="editor-toolbar" aria-label="Editor tools">{tools.map(({ id, label, Icon }) => <button type="button" key={id} className={panel === id ? "active" : ""} onClick={() => { setPanel(id); setMobilePanel(true); }} aria-label={label}><Icon size={19} /><span>{label}</span></button>)}{selectedElement ? <button type="button" className="editor-mobile-properties-button" onClick={() => { setPanel("properties"); setMobilePanel(true); }} aria-label="Selected item properties"><Paintbrush size={19} /><span>Edit</span></button> : null}</nav> : null}
-      {!preview && panel !== "properties" ? <SidebarPanel panel={panel} document={document} page={page} activePageId={activePageId} setActivePageId={setActivePageId} setSelectedId={setSelectedId} setMobilePanel={setMobilePanel} inputRef={fileInputRef} onAddText={addText} onAddShape={addShape} onAddPhoto={addPhoto} onUpload={addUploadedFiles} onApplyLayout={applyLayout} onBackground={changeBackground} onReorderPage={reorderPage} onAddPage={addPage} onDuplicatePage={duplicatePage} onDeletePage={deletePage} onClose={() => setMobilePanel(false)} /> : null}
+      {!preview && panel !== "properties" ? <SidebarPanel panel={panel} document={document} page={page} activePageId={activePageId} setActivePageId={setActivePageId} setSelectedId={setSelectedId} setMobilePanel={setMobilePanel} inputRef={fileInputRef} onAddText={addText} onAddShape={addShape} onAddPhoto={addPhoto} onUpload={addUploadedFiles} onApplyLayout={applyLayout} onBackground={changeBackground} onPageBorderChange={changePageBorder} onThemeChange={changeTheme} onReorderPage={reorderPage} onAddPage={addPage} onSetPageCount={setBasePageCount} onDuplicatePage={duplicatePage} onDeletePage={deletePage} onClose={() => setMobilePanel(false)} adminMode={adminMode} /> : null}
       <section className="editor-stage">
-        <div className="editor-stage-topline"><span>{getPageLabel(page, document)} <small>· {document.book.size.width} × {document.book.size.height} in</small></span><button className="editor-mobile-pages-button" type="button" onClick={() => { setPanel("pages"); setMobilePanel(true); }}>Pages</button><button className="editor-mobile-panel-close" type="button" onClick={() => setMobilePanel(false)}><X size={17} /> Close</button><span className="editor-page-counter">{getPagePosition(page, document)}</span></div>
+        <div className="editor-stage-topline">
+          <span>{getPageLabel(page, document)} <small>· {document.book.size.width} × {document.book.size.height} in</small></span>
+          {!adminMode ? <div className="editor-price-estimate" aria-live="polite">
+            {pricingQuote.isFetching ? <span>Updating estimate…</span> : null}
+            {pricingQuote.isError ? <button type="button" onClick={() => pricingQuote.refetch()}>Price estimate unavailable · Try again</button> : null}
+            {!pricingQuote.isFetching && !pricingQuote.isError && pricingQuote.data
+              ? <span>PDF {formatCurrency(pricingQuote.data.pdfPrice, pricingQuote.data.currency)} · Print from {formatCurrency(pricingQuote.data.hardCopyEstimate, pricingQuote.data.currency)} <small>before shipping</small></span>
+              : null}
+          </div> : null}
+          <button className="editor-mobile-pages-button" type="button" onClick={() => { setPanel("pages"); setMobilePanel(true); }}>Pages</button>
+          <button className="editor-mobile-panel-close" type="button" onClick={() => setMobilePanel(false)}><X size={17} /> Close</button>
+          <span className="editor-page-counter">{getPagePosition(page, document)}</span>
+        </div>
         <div className="editor-canvas-scroll">
           <div className="editor-canvas-mat" style={{ width: `${zoom}%`, maxWidth: "760px" }}>
-            <EditorCanvas document={document} page={page} activePageId={activePageId} pageTitle={getPageLabel(page, document)} onElementsChange={(elements, pageId, history) => updatePage(pageId, (target) => { target.elements = elements; }, history)} onSelectionChange={setSelectedId} onCanvasError={(failure) => setSaveError(`The page preview could not be rendered: ${failure.message}`)} canvasApi={canvasApi} renderToken={renderToken} guides={guides && !preview} zoom={100} selectedId={selectedId} preview={preview} />
+            <EditorCanvas document={document} page={page} activePageId={activePageId} pageTitle={getPageLabel(page, document)} onElementsChange={(elements, pageId, history) => updatePage(pageId, (target) => { target.elements = elements; }, history)} onSelectionChange={setSelectedId} onCanvasError={(failure) => setSaveError(`The page preview could not be rendered: ${failure.message}`)} canvasApi={canvasApi} renderToken={renderToken} guides={guides && !preview} zoom={100} selectedId={selectedId} preview={preview} adminMode={adminMode} snapToGrid={snapToGrid} />
           </div>
         </div>
         <div className="editor-zoom-controls"><button type="button" onClick={() => setZoom((value) => Math.max(35, value - 10))} aria-label="Zoom out"><Minus size={14} /></button><span>{zoom}%</span><button type="button" onClick={() => setZoom((value) => Math.min(100, value + 10))} aria-label="Zoom in"><Plus size={14} /></button><i /><button type="button" onClick={fitZoom}>Fit</button><button type="button" onClick={() => setZoom(100)}>100%</button></div>
       </section>
-      {!preview ? <ElementInspector element={selectedElement} pageHeight={Math.round(760 * (document.book.size.height / document.book.size.width))} onChange={updateSelected} onDelete={deleteSelected} onDuplicate={duplicateSelected} onShowPhotos={() => { setPanel("photos"); setMobilePanel(true); }} onClose={() => setMobilePanel(false)} assets={document.assets.filter((asset) => asset.src)} /> : null}
+      {!preview ? <ElementInspector element={selectedElement} pageHeight={Math.round(760 * (document.book.size.height / document.book.size.width))} onChange={updateSelected} onAlign={alignSelected} adminMode={adminMode} onDelete={deleteSelected} onDuplicate={duplicateSelected} onShowPhotos={() => { setPanel("photos"); setMobilePanel(true); }} onClose={() => setMobilePanel(false)} assets={document.assets.filter((asset) => asset.src)} /> : null}
     </div>
     <footer className="editor-page-strip">
       <div className="editor-strip-label"><span className="eyebrow">Your book</span><small>{document.pageOrder.filter((id) => document.pages.find((item) => item.id === id)?.type !== "cover").length} interior pages</small></div>
@@ -878,7 +979,7 @@ function CreationEditorSession({ adminMode }) {
     <input ref={fileInputRef} className="editor-visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={(event) => addUploadedFiles(event.target.files)} />
     {helpOpen ? <div className="editor-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}><section className="editor-help-dialog" role="dialog" aria-modal="true" aria-labelledby="editor-help-title"><button className="editor-help-close" type="button" onClick={() => setHelpOpen(false)} aria-label="Close help"><X size={17} /></button><span className="eyebrow">A few helpful things</span><h2 id="editor-help-title">Made for your memories.</h2><p>Drag objects to move them, and use the corners to resize. Your work is saved automatically on this device.</p><ul><li><kbd>Delete</kbd> removes the selected item</li><li><kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>Z</kbd> undo</li><li><kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>D</kbd> duplicate</li><li><kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>S</kbd> save now</li></ul><button className="button button-dark" type="button" onClick={() => setHelpOpen(false)}>Back to my book</button></section></div> : null}
     {coverDesignerOpen ? <CoverDesigner document={document} onChange={changeCover} onClose={() => setCoverDesignerOpen(false)} /> : null}
-    {bookPreviewOpen ? <BookPreview document={document} initialPageId={activePageId} onClose={() => setBookPreviewOpen(false)} onEditPage={navigateFromPreview} onContinueReview={() => { setBookPreviewOpen(false); setBookReviewOpen(true); }} onAssetError={refreshAssetUrls} /> : null}
+    {bookPreviewOpen ? <BookPreview document={adminMode ? createPreviewDocument(document) : document} initialPageId={activePageId} onClose={() => setBookPreviewOpen(false)} onEditPage={navigateFromPreview} onContinueReview={() => { setBookPreviewOpen(false); setBookReviewOpen(true); }} onAssetError={refreshAssetUrls} /> : null}
     {bookReviewOpen ? <BookReview document={document} onClose={() => setBookReviewOpen(false)} onGoToPage={navigateToReviewedPage} adminMode={adminMode} /> : null}
   </main>;
 }

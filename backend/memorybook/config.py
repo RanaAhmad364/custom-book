@@ -31,12 +31,24 @@ class BaseConfig:
     SMTP_USERNAME = os.getenv("SMTP_USERNAME")
     SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
     SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL")
-    SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
+    SMTP_USE_SSL = os.getenv(
+        "SMTP_USE_SSL",
+        "true" if SMTP_PORT == 465 else "false",
+    ).lower() == "true"
+    SMTP_USE_TLS = os.getenv(
+        "SMTP_USE_TLS",
+        "false" if SMTP_USE_SSL else "true",
+    ).lower() == "true"
     AUTH_EMAIL_MODE = os.getenv("AUTH_EMAIL_MODE", "smtp").strip().lower()
     PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "http://localhost:5173")
     PUBLIC_API_URL = os.getenv("PUBLIC_API_URL", "")
     PAYMENT_DEFAULT_CURRENCY = os.getenv("PAYMENT_DEFAULT_CURRENCY", "PKR").upper()
-    PAYMENT_PRIMARY_GATEWAY = os.getenv("PAYMENT_PRIMARY_GATEWAY", "payfast").strip().lower()
+    PAYMENT_PRIMARY_GATEWAY = os.getenv("PAYMENT_PRIMARY_GATEWAY", "manual").strip().lower()
+    MANUAL_BANK_NAME = os.getenv("MANUAL_BANK_NAME", "")
+    MANUAL_BANK_ACCOUNT_TITLE = os.getenv("MANUAL_BANK_ACCOUNT_TITLE", "")
+    MANUAL_BANK_ACCOUNT_NUMBER = os.getenv("MANUAL_BANK_ACCOUNT_NUMBER", "")
+    MANUAL_JAZZCASH_NUMBER = os.getenv("MANUAL_JAZZCASH_NUMBER", "")
+    MANUAL_EASYPAISA_NUMBER = os.getenv("MANUAL_EASYPAISA_NUMBER", "")
     PAYFAST_ENABLED = os.getenv("PAYFAST_ENABLED", "false").lower() == "true"
     PAYFAST_MODE = os.getenv("PAYFAST_MODE", "sandbox").strip().lower()
     PAYFAST_MERCHANT_ID = os.getenv("PAYFAST_MERCHANT_ID")
@@ -58,7 +70,7 @@ class BaseConfig:
     EASYPAISA_MODE = os.getenv("EASYPAISA_MODE", "sandbox").strip().lower()
     EASYPAISA_STORE_ID = os.getenv("EASYPAISA_STORE_ID")
     EASYPAISA_MERCHANT_SECRET = os.getenv("EASYPAISA_MERCHANT_SECRET")
-    STRIPE_ENABLED = os.getenv("STRIPE_ENABLED", "true").lower() == "true"
+    STRIPE_ENABLED = os.getenv("STRIPE_ENABLED", "false").lower() == "true"
     STRIPE_PAYMENT_METHODS = os.getenv("STRIPE_PAYMENT_METHODS", "card")
     STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
     STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
@@ -77,10 +89,12 @@ class BaseConfig:
     SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True}
-    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    BACKGROUND_JOB_BACKEND = os.getenv("BACKGROUND_JOB_BACKEND", "inprocess").strip().lower()
+    BACKGROUND_JOB_WORKERS = int(os.getenv("BACKGROUND_JOB_WORKERS", "2"))
+    REDIS_URL = os.getenv("REDIS_URL")
     CELERY = {
-        "broker_url": REDIS_URL,
-        "result_backend": REDIS_URL,
+        "broker_url": os.getenv("CELERY_BROKER_URL") or REDIS_URL or "redis://localhost:6379/0",
+        "result_backend": os.getenv("CELERY_RESULT_BACKEND") or REDIS_URL or "redis://localhost:6379/0",
         "task_serializer": "json",
         "result_serializer": "json",
         "accept_content": ["json"],
@@ -127,6 +141,7 @@ class BaseConfig:
     PDF_PRINT_SAFE_MARGIN_INCHES = float(os.getenv("PDF_PRINT_SAFE_MARGIN_INCHES", "0.25"))
     PDF_DOWNLOAD_MAX_COUNT = int(os.getenv("PDF_DOWNLOAD_MAX_COUNT", "5"))
     PDF_DOWNLOAD_TTL_DAYS = int(os.getenv("PDF_DOWNLOAD_TTL_DAYS", "30"))
+    PROJECT_UPLOAD_RETENTION_DAYS = int(os.getenv("PROJECT_UPLOAD_RETENTION_DAYS", "30"))
     ENVIRONMENT = os.getenv("FLASK_ENV", "development").lower()
     MIGRATIONS_DIRECTORY = str(BASE_DIRECTORY / "migrations")
 

@@ -1,6 +1,6 @@
 import hashlib
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import time
 from decimal import Decimal
 from urllib.parse import urlsplit
@@ -10,6 +10,8 @@ from PIL import Image
 
 from memorybook.extensions import db
 from memorybook.models import (
+    AdminActivityLog,
+    BackgroundJob,
     BookCategory,
     BookCollection,
     BookProduct,
@@ -18,10 +20,16 @@ from memorybook.models import (
     BookTemplateVersion,
     CoverType,
     DiscountCode,
+    DownloadEntitlement,
+    DownloadHistory,
+    GeneratedFile,
     EmailLog,
+    Notification,
     PaperType,
     PagePricing,
     Payment,
+    PaymentAttempt,
+    OrderStatusHistory,
     PdfOrder,
     ProjectAsset,
     PricingTier,
@@ -29,6 +37,7 @@ from memorybook.models import (
     ProjectRevision,
     Role,
     ShippingAddress,
+    Shipment,
     ShippingRate,
     SupportTicket,
     User,
@@ -58,6 +67,12 @@ class FakeStorage:
 
     def delete(self, key):
         self.objects.pop(key, None)
+
+    def download(self, key):
+        return self.objects[key][0]
+
+    def content_type(self, key):
+        return self.objects[key][1]
 
 
 def create_category(client, csrf, *, slug="category-test"):
@@ -89,6 +104,151 @@ def create_draft_book(client, csrf, category_id):
     )
     assert response.status_code == 201, response.get_json()
     return response.json["book"]
+
+
+def test_admin_purchases_downloads_and_analytics_are_server_filtered_and_protected(app):
+    admin, csrf = admin_client(app, "admin-history@example.test")
+    normal_user, _ = admin_client(app, "customer-history@example.test", assign_admin=False)
+    with app.app_context():
+        user = db.session.scalar(db.select(User).where(User.email == "customer-history@example.test"))
+        project = UserProject(
+            user_id=user.id,
+            title="Filterable test project",
+            page_count=24,
+            document={"schemaVersion": 1, "pages": [{"id": "page-history", "elements": []}]},
+        )
+        db.session.add(project)
+        db.session.flush()
+        revision = ProjectRevision(
+            project_id=project.id,
+            revision_number=1,
+            document_version=1,
+            document=project.document,
+            checksum_sha256="b" * 64,
+        )
+        db.session.add(revision)
+        db.session.flush()
+        order = PdfOrder(
+            order_number="PDF-HISTORY-1",
+            user_id=user.id,
+            project_id=project.id,
+            project_revision_id=revision.id,
+            status="paid",
+            currency="PKR",
+            service_price=Decimal("100.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("100.00"),
+            price_snapshot={"total": "100.00"},
+            page_count=24,
+            paid_at=datetime.now(UTC),
+        )
+        db.session.add(order)
+        db.session.flush()
+        payment = Payment(
+            user_id=user.id,
+            pdf_order_id=order.id,
+            provider="manual",
+            status="successful",
+            amount=Decimal("100.00"),
+            currency="PKR",
+        )
+        generated = GeneratedFile(
+            pdf_order_id=order.id,
+            generation_profile="digital",
+            storage_key="test/history.pdf",
+            file_type="application/pdf",
+            byte_size=20,
+            checksum_sha256="c" * 64,
+        )
+        db.session.add_all([payment, generated])
+        db.session.flush()
+        entitlement = DownloadEntitlement(
+            user_id=user.id,
+            pdf_order_id=order.id,
+            generated_file_id=generated.id,
+            download_count=1,
+        )
+        db.session.add(entitlement)
+        db.session.flush()
+        db.session.add(DownloadHistory(
+            entitlement_id=entitlement.id,
+            generated_file_id=generated.id,
+        ))
+        db.session.commit()
+        order_id = order.id
+
+    forbidden_orders = normal_user.get("/api/v1/admin/purchases")
+    forbidden_downloads = normal_user.get("/api/v1/admin/downloads")
+    forbidden_dashboard = normal_user.get("/api/v1/admin/dashboard")
+    forbidden_analytics = normal_user.get("/api/v1/admin/analytics/overview")
+    forbidden_purchases = normal_user.get("/api/v1/admin/orders")
+    forbidden_exports = [
+        normal_user.get(path).status_code
+        for path in (
+            "/api/v1/admin/purchases/export.csv",
+            "/api/v1/admin/orders/export.csv",
+            "/api/v1/admin/downloads/export.csv",
+            "/api/v1/admin/analytics/revenue-chart",
+            "/api/v1/admin/analytics/download-chart",
+            "/api/v1/admin/analytics/top-selling",
+            "/api/v1/admin/analytics/most-downloaded",
+            "/api/v1/admin/analytics/most-favorited",
+            "/api/v1/admin/analytics/recent-payments",
+            "/api/v1/admin/analytics/recent-users",
+        )
+    ]
+    assert forbidden_orders.status_code == 403
+    assert forbidden_downloads.status_code == 403
+    assert forbidden_dashboard.status_code == 403
+    assert forbidden_analytics.status_code == 403
+    assert forbidden_purchases.status_code == 403
+    assert forbidden_exports == [403] * len(forbidden_exports)
+
+    purchases = admin.get(
+        "/api/v1/admin/purchases?type=pdf&user=customer-history&book=Filterable%20test&paymentStatus=successful"
+    )
+    assert purchases.status_code == 200, purchases.get_json()
+    assert purchases.json["pagination"]["totalItems"] == 1
+    assert purchases.json["items"][0]["userName"] == "Name not provided"
+    assert purchases.json["items"][0]["paymentStatus"] == "successful"
+    assert purchases.json["items"][0]["pageCount"] == 24
+    assert admin.get("/api/v1/admin/purchases?type=print").json["pagination"]["totalItems"] == 0
+    assert admin.get("/api/v1/admin/purchases?dateFrom=2026-30-99").status_code == 400
+    assert admin.get("/api/v1/admin/orders?dateFrom=not-a-date").status_code == 400
+
+    downloads = admin.get("/api/v1/admin/downloads?user=customer-history&book=Filterable%20test")
+    assert downloads.status_code == 200, downloads.get_json()
+    assert downloads.json["pagination"]["totalItems"] == 1
+    assert downloads.json["items"][0]["orderNumber"] == "PDF-HISTORY-1"
+    assert downloads.json["items"][0]["type"] == "pdf"
+
+    analytics = admin.get("/api/v1/admin/dashboard?days=7")
+    assert analytics.status_code == 200, analytics.get_json()
+    assert len(analytics.json["revenueSeries"]) == 7
+    assert len(analytics.json["downloadsSeries"]) == 7
+    assert analytics.json["mostDownloadedBooks"] == []
+    assert admin.get("/api/v1/admin/dashboard?days=0").status_code == 400
+    assert admin.get("/api/v1/admin/analytics/overview?days=7").status_code == 200
+    assert admin.get("/api/v1/admin/analytics/revenue-chart?days=7").json["items"]
+    assert len(admin.get("/api/v1/admin/analytics/download-chart?days=7").json["items"]) == 7
+    assert admin.get("/api/v1/admin/analytics/most-downloaded").json["items"] == []
+    assert admin.get("/api/v1/admin/analytics/top-selling").json["items"] == []
+    assert admin.get("/api/v1/admin/analytics/most-favorited").json["items"] == []
+    assert admin.get("/api/v1/admin/analytics/recent-users").json["items"]
+    assert admin.get("/api/v1/admin/analytics/recent-payments").json["items"]
+
+    export = admin.get("/api/v1/admin/orders/export.csv?type=pdf&user=customer-history")
+    assert export.status_code == 200
+    assert export.mimetype == "text/csv"
+    assert "PDF-HISTORY-1" in export.get_data(as_text=True)
+    download_export = admin.get("/api/v1/admin/downloads/export.csv?user=customer-history")
+    assert download_export.status_code == 200
+    assert "PDF-HISTORY-1" in download_export.get_data(as_text=True)
+    timeline = admin.get(f"/api/v1/admin/orders/pdf/{order_id}/history")
+    assert timeline.status_code == 200
+    assert timeline.json["items"] == []
+    assert normal_user.get(f"/api/v1/admin/orders/pdf/{order_id}/history").status_code == 403
 
 
 def test_collections_require_category_and_books_reject_category_mismatches(app):
@@ -444,14 +604,14 @@ def test_pricing_catalog_crud_validation_and_variant_compatibility(app):
 
     tier_response = client.post(
         "/api/v1/admin/pricing/tier",
-        json={"code": "BASIC", "name": "Basic", "description": "Standard print tier", "basePrice": "9.00", "currency": "USD"},
+        json={"code": "BASIC", "name": "Basic", "description": "Standard print tier", "basePrice": "9.00", "currency": "PKR"},
         headers=csrf,
     )
     assert tier_response.status_code == 201
     tier_id = tier_response.json["item"]["id"]
     duplicate_tier = client.post(
         "/api/v1/admin/pricing/tier",
-        json={"code": "BASIC", "name": "Another basic", "basePrice": "0", "currency": "USD"},
+        json={"code": "BASIC", "name": "Another basic", "basePrice": "0", "currency": "PKR"},
         headers=csrf,
     )
     assert duplicate_tier.status_code == 409
@@ -478,7 +638,7 @@ def test_pricing_catalog_crud_validation_and_variant_compatibility(app):
         "/api/v1/admin/pricing/shipping",
         json={
             "countryCode": "us", "serviceCode": "standard", "serviceName": "Standard",
-            "price": "5.25", "currency": "USD", "estimatedDaysMin": 3, "estimatedDaysMax": 7,
+            "price": "5.25", "currency": "PKR", "estimatedDaysMin": 3, "estimatedDaysMax": 7,
         },
         headers=csrf,
     )
@@ -494,7 +654,7 @@ def test_pricing_catalog_crud_validation_and_variant_compatibility(app):
         "/api/v1/admin/pricing/shipping",
         json={
             "countryCode": "US", "serviceCode": "express", "serviceName": "Express",
-            "price": "8.00", "currency": "USD",
+            "price": "8.00", "currency": "PKR",
         },
         headers=csrf,
     )
@@ -531,7 +691,7 @@ def test_pricing_catalog_crud_validation_and_variant_compatibility(app):
         "coverTypeId": cover.json["item"]["id"],
         "paperTypeId": paper.json["item"]["id"],
         "basePrice": "20.00",
-        "currency": "USD",
+        "currency": "PKR",
     }
     variant = client.post("/api/v1/admin/pricing/variants", json=variant_payload, headers=csrf)
     assert variant.status_code == 201
@@ -540,20 +700,20 @@ def test_pricing_catalog_crud_validation_and_variant_compatibility(app):
     assert duplicate_variant.status_code == 409
     currency_mismatch = client.patch(
         f"/api/v1/admin/pricing/variant/{variant_id}",
-        json={"currency": "PKR"},
+        json={"currency": "USD"},
         headers=csrf,
     )
     assert currency_mismatch.status_code == 400
 
 
-def test_print_quote_uses_catalog_price_components_and_product_page_limits(app):
+def test_print_quote_uses_catalog_price_components_and_product_page_limits(app, monkeypatch):
     client, csrf = admin_client(app, "pricing-quote-admin@example.test")
     category = create_category(client, csrf, slug="pricing-quote-category")
     book = create_draft_book(client, csrf, category["id"])
     with app.app_context():
         product = db.session.get(BookProduct, book["id"])
         product.is_active = True
-        product.currency = "USD"
+        product.currency = "PKR"
         product.starting_price = Decimal("10.10")
         product.page_count_min = 24
         product.page_count_max = 80
@@ -561,13 +721,16 @@ def test_print_quote_uses_catalog_price_components_and_product_page_limits(app):
             "dimensions": {"widthMm": "203.20", "heightMm": "203.20"},
             "printingTiers": ["BASIC"],
             "productionDays": 5,
+            "basePageCount": 30,
+            "extraPagePrice": "0.33",
+            "pdfPrice": "12.50",
         }
         user = db.session.scalar(db.select(User).where(User.email == "pricing-quote-admin@example.test"))
         project = UserProject(
             user_id=user.id,
             product_id=product.id,
             title="Configured quote",
-            page_count=26,
+            page_count=30,
             version=1,
             document={"book": {"size": {"width": "8", "height": "8"}}, "pages": []},
         )
@@ -592,12 +755,12 @@ def test_print_quote_uses_catalog_price_components_and_product_page_limits(app):
     ).json["item"]
     tier = client.post(
         "/api/v1/admin/pricing/tier",
-        json={"code": "BASIC", "name": "Quote Basic", "basePrice": "999.99", "currency": "USD"},
+        json={"code": "BASIC", "name": "Quote Basic", "basePrice": "999.99", "currency": "PKR"},
         headers=csrf,
     ).json["item"]
     band = client.post(
         "/api/v1/admin/pricing/pagePricing",
-        json={"tierId": tier["id"], "minimumPages": 24, "maximumPages": 40, "pricePerPage": "0.33"},
+        json={"tierId": tier["id"], "minimumPages": 24, "maximumPages": 80, "pricePerPage": "0.33"},
         headers=csrf,
     )
     assert band.status_code == 201
@@ -605,7 +768,7 @@ def test_print_quote_uses_catalog_price_components_and_product_page_limits(app):
         "/api/v1/admin/pricing/shipping",
         json={
             "countryCode": "US", "serviceCode": "quote-standard", "serviceName": "Quote standard",
-            "price": "4.50", "currency": "USD", "estimatedDaysMin": 3, "estimatedDaysMax": 7,
+            "price": "4.50", "currency": "PKR", "estimatedDaysMin": 3, "estimatedDaysMax": 7,
         },
         headers=csrf,
     )
@@ -619,12 +782,18 @@ def test_print_quote_uses_catalog_price_components_and_product_page_limits(app):
             "coverTypeId": cover["id"],
             "paperTypeId": paper["id"],
             "basePrice": "20.20",
-            "currency": "USD",
+            "currency": "PKR",
         },
         headers=csrf,
     )
     assert variant.status_code == 201
 
+    discount = client.post(
+        "/api/v1/admin/discount-codes",
+        json={"code": "SAVE5", "type": "fixed", "value": "5.00", "currency": "PKR"},
+        headers=csrf,
+    )
+    assert discount.status_code == 201, discount.get_json()
     quote_payload = {
         "projectId": project_id,
         "configuration": {
@@ -632,6 +801,7 @@ def test_print_quote_uses_catalog_price_components_and_product_page_limits(app):
             "cover": "Quote Linen hardback",
             "paper": "Quote Premium matte",
             "quantity": 2,
+            "discountCode": "SAVE5",
         },
         "shippingAddress": {
             "fullName": "MemoryBook Admin",
@@ -648,10 +818,49 @@ def test_print_quote_uses_catalog_price_components_and_product_page_limits(app):
     assert quote.status_code == 200, quote.get_json()
     assert quote.json["bookPrice"] == "20.20"
     assert quote.json["printingCharge"] == "40.40"
-    assert quote.json["additionalPages"] == "1.32"
+    assert quote.json["additionalPages"] == "0.00"
     assert quote.json["shipping"] == "9.00"
-    assert quote.json["total"] == "70.92"
-    assert quote.json["currency"] == "USD"
+    assert quote.json["discount"] == "5.00"
+    assert quote.json["total"] == "64.60"
+    assert quote.json["currency"] == "PKR"
+    editor_quote = client.get(f"/api/v1/projects/{project_id}/pricing-quote?pageCount=50")
+    assert editor_quote.status_code == 200, editor_quote.get_json()
+    assert editor_quote.json["pdfPrice"] == "12.50"
+    assert editor_quote.json["extraPageCount"] == 20
+    assert editor_quote.json["hardCopyEstimate"] == "36.90"
+
+    from memorybook.services import orders, payments
+
+    monkeypatch.setattr(orders, "provider_for", lambda *args: None)
+    monkeypatch.setattr(
+        payments,
+        "create_payment",
+        lambda order, *args, **kwargs: {"id": order.id, "total": str(order.total_amount)},
+    )
+    tampered_total = client.post(
+        "/api/v1/print/orders",
+        json={
+            **quote_payload,
+            "quoteId": quote.json["id"],
+            "total": "0.01",
+        },
+        headers={**csrf, "Idempotency-Key": "tampered-price-check"},
+    )
+    assert tampered_total.status_code == 201, tampered_total.get_json()
+    assert tampered_total.json["total"] == quote.json["total"]
+    with app.app_context():
+        discount_record = db.session.scalar(db.select(DiscountCode).where(DiscountCode.code == "SAVE5"))
+        assert discount_record.uses_count == 1
+
+    with app.app_context():
+        project = db.session.get(UserProject, project_id)
+        project.page_count = 50
+        db.session.commit()
+    updated_page_count_quote = client.post("/api/v1/print/quotes", json=quote_payload, headers=csrf)
+    assert updated_page_count_quote.status_code == 200, updated_page_count_quote.get_json()
+    assert updated_page_count_quote.json["pageCount"] == 50
+    assert updated_page_count_quote.json["additionalPages"] == "13.20"
+    assert updated_page_count_quote.json["total"] == "77.80"
 
     with app.app_context():
         product = db.session.get(BookProduct, book["id"])
@@ -670,7 +879,7 @@ def test_print_quote_uses_catalog_price_components_and_product_page_limits(app):
         db.session.commit()
     out_of_range = client.post("/api/v1/print/quotes", json=quote_payload, headers=csrf)
     assert out_of_range.status_code == 409
-    assert "maximum page count" in out_of_range.json["error"]["message"]
+    assert "cannot exceed" in out_of_range.json["error"]["message"]
 
 
 def add_design_element(document):
@@ -774,14 +983,14 @@ def configure_product_for_publication(app, client, csrf, product, *, sku):
         size = BookSize(code=f"{sku.lower()}-size", name=f"{sku} size", width_mm=203, height_mm=203)
         cover = CoverType(name=f"{sku} cover")
         paper = PaperType(name=f"{sku} paper", weight_gsm=170)
-        tier = PricingTier(code="BASIC", name="Basic", base_price=Decimal("10.00"), currency="USD")
+        tier = PricingTier(code="BASIC", name="Basic", base_price=Decimal("10.00"), currency="PKR")
         db.session.add_all([size, cover, paper, tier])
         db.session.flush()
         db.session.add_all([
             PagePricing(tier_id=tier.id, minimum_pages=24, maximum_pages=80, price_per_page=Decimal("0.50")),
             ShippingRate(
                 country_code="US", service_code=f"{sku.lower()}-standard", service_name="Standard",
-                price=Decimal("5.00"), currency="USD", is_active=True,
+                price=Decimal("5.00"), currency="PKR", is_active=True,
             ),
         ])
         size_id, cover_id, paper_id = size.id, cover.id, paper.id
@@ -812,7 +1021,7 @@ def configure_product_for_publication(app, client, csrf, product, *, sku):
         "/api/v1/admin/pricing/variants",
         json={
             "sku": sku, "productId": product["id"], "sizeId": size_id, "coverTypeId": cover_id,
-            "paperTypeId": paper_id, "basePrice": "40.00", "currency": "USD",
+            "paperTypeId": paper_id, "basePrice": "40.00", "currency": "PKR",
         },
         headers=csrf,
     )
@@ -966,7 +1175,7 @@ def test_admin_book_and_template_workflow_preserves_published_template_versions(
         "/api/v1/admin/pricing/shipping",
         json={
             "countryCode": "US", "serviceCode": "alpine-standard", "serviceName": "Standard",
-            "price": "5.00", "currency": "USD",
+            "price": "5.00", "currency": "PKR",
         },
         headers=csrf,
     ).status_code == 201
@@ -1089,6 +1298,51 @@ def test_book_design_requires_admin_and_saved_valid_design_before_publication(ap
     ).status_code == 428
 
     document = initial.json["template"]["designDocument"]
+    invalid_document = dict(document)
+    invalid_document["pages"] = [dict(page) for page in document["pages"]]
+    invalid_document["pageOrder"] = list(document["pageOrder"])
+    invalid_document["pages"][1]["elements"] = [{
+        "id": "invalid-slot",
+        "type": "shape",
+        "shape": "photo-placeholder",
+        "x": 0.8,
+        "y": 0.1,
+        "width": 0.3,
+        "height": 0.5,
+    }]
+    out_of_bounds = admin.put(
+        design_url,
+        json={"document": invalid_document},
+        headers={**csrf, "If-Match": '"1"'},
+    )
+    assert out_of_bounds.status_code == 400
+    assert out_of_bounds.json["error"]["details"]["slot"] == "out_of_bounds"
+
+    invalid_document["pages"][1]["elements"][0]["x"] = 0.1
+    invalid_document["pages"][1]["elements"][0]["width"] = -0.2
+    negative_size = admin.put(
+        design_url,
+        json={"document": invalid_document},
+        headers={**csrf, "If-Match": '"1"'},
+    )
+    assert negative_size.status_code == 400
+
+    invalid_document["pages"][1]["elements"] = [{
+        "id": f"element-{index}",
+        "type": "text",
+        "text": "Design element",
+        "x": 0.1,
+        "y": 0.1,
+        "width": 0.8,
+        "height": 0.1,
+    } for index in range(201)]
+    too_many_elements = admin.put(
+        design_url,
+        json={"document": invalid_document},
+        headers={**csrf, "If-Match": '"1"'},
+    )
+    assert too_many_elements.status_code == 400
+
     add_design_element(document)
     saved = admin.put(
         design_url,
@@ -1293,13 +1547,13 @@ def test_admin_manages_print_orders_support_settings_pricing_and_notifications(a
             currency="USD", book_amount=Decimal("20.00"), printing_amount=Decimal("15.00"),
             shipping_amount=Decimal("5.00"), discount_amount=Decimal("0.00"),
             tax_amount=Decimal("0.00"), total_amount=Decimal("40.00"),
-            price_snapshot={"total": "40.00"},
+            price_snapshot={"total": "40.00"}, paid_at=datetime.now(UTC),
         )
         db.session.add(order)
         db.session.flush()
         payment = Payment(
             user_id=user.id, print_order_id=order.id, provider="test-provider",
-            status="failed", amount=Decimal("40.00"), currency="USD",
+            status="successful", amount=Decimal("40.00"), currency="USD",
         )
         pdf_order = PdfOrder(
             order_number="PDF-101", user_id=user.id, project_id=project.id,
@@ -1336,13 +1590,41 @@ def test_admin_manages_print_orders_support_settings_pricing_and_notifications(a
     orders = client.get("/api/v1/admin/orders?type=print")
     assert orders.status_code == 200
     assert orders.json["items"][0]["projectRevision"]["document"]["pages"][0]["id"] == "page-a"
+    assert orders.json["items"][0]["photosAvailable"] is False
     shipment_update = client.patch(
         f"/api/v1/admin/orders/print/{order_id}",
-        json={"status": "in_production", "carrier": "MemoryShip", "trackingNumber": "TRACK-101"},
+        json={"status": "printed"},
+        headers=csrf,
+    )
+    assert shipment_update.status_code == 409
+    shipment_update = client.patch(
+        f"/api/v1/admin/orders/print/{order_id}",
+        json={"status": "processing"},
+        headers=csrf,
+    )
+    assert shipment_update.status_code == 200
+    assert client.patch(
+        f"/api/v1/admin/orders/print/{order_id}",
+        json={"status": "printed"},
+        headers=csrf,
+    ).status_code == 200
+    assert client.patch(
+        f"/api/v1/admin/orders/print/{order_id}",
+        json={"status": "shipped", "carrier": "MemoryShip"},
+        headers=csrf,
+    ).status_code == 400
+    shipment_update = client.patch(
+        f"/api/v1/admin/orders/print/{order_id}",
+        json={"status": "shipped", "carrier": "MemoryShip", "trackingNumber": "TRACK-101"},
         headers=csrf,
     )
     assert shipment_update.status_code == 200
     assert shipment_update.json["order"]["shipment"]["trackingNumber"] == "TRACK-101"
+    assert client.patch(
+        f"/api/v1/admin/orders/print/{order_id}",
+        json={"status": "delivered"},
+        headers=csrf,
+    ).status_code == 200
     assert client.get("/api/v1/admin/orders?type=pdf").json["items"][0]["orderNumber"] == "PDF-101"
     assert client.patch(
         f"/api/v1/admin/orders/pdf/{pdf_order_id}",
@@ -1379,10 +1661,18 @@ def test_admin_manages_print_orders_support_settings_pricing_and_notifications(a
             )
         )
         assert event_email.status == "queued"
-        task = app.extensions["celery"].tasks["memorybook.send_admin_event_email"]
-        task.apply(args=[event_email.id, "Print order placed", "A print order was placed."], throw=True)
+        job = db.session.scalar(
+            db.select(BackgroundJob).where(
+                BackgroundJob.job_type == "send_admin_email",
+                BackgroundJob.reference_id == event_email.id,
+            )
+        )
+        assert job.status == "queued"
+        app.extensions["background_jobs"]._run_job(job.id)
         db.session.refresh(event_email)
         assert event_email.status == "sent"
+        db.session.refresh(job)
+        assert job.status == "completed"
     assert client.get("/api/v1/admin/reports").status_code == 200
     assert client.get("/api/v1/admin/activity").json["pagination"]["totalItems"] >= 2
     email = client.post(
@@ -1392,3 +1682,122 @@ def test_admin_manages_print_orders_support_settings_pricing_and_notifications(a
     )
     assert email.status_code == 202
     assert email.json["email"]["status"] == "sent"
+
+
+def test_private_print_photos_are_gated_and_every_access_is_logged(app):
+    admin, _ = admin_client(app, "private-photo-admin@example.test")
+    customer, _ = admin_client(app, "private-photo-customer@example.test", assign_admin=False)
+    logged_out = app.test_client()
+    storage = FakeStorage()
+    app.extensions["asset_storage"] = storage
+    photo_bytes = valid_png()
+
+    with app.app_context():
+        owner = db.session.scalar(db.select(User).where(User.email == "private-photo-customer@example.test"))
+        project = UserProject(
+            user_id=owner.id,
+            title="Private production book",
+            status="in_progress",
+            page_count=1,
+            version=1,
+            privacy_override=True,
+        )
+        db.session.add(project)
+        db.session.flush()
+        asset = ProjectAsset(
+            project_id=project.id,
+            storage_key=f"projects/{owner.id}/{project.id}/private.png",
+            mime_type="image/png",
+            byte_size=len(photo_bytes),
+            checksum_sha256=hashlib.sha256(photo_bytes).hexdigest(),
+            original_filename="private.png",
+        )
+        db.session.add(asset)
+        db.session.flush()
+        document = {
+            "assets": [{"id": asset.id}],
+            "pages": [{"id": "private-page", "elements": [{"type": "image", "assetId": asset.id}]}],
+        }
+        revision = ProjectRevision(
+            project_id=project.id,
+            revision_number=1,
+            document_version=1,
+            document=document,
+            checksum_sha256=hashlib.sha256(b"private-revision").hexdigest(),
+        )
+        address = ShippingAddress(
+            user_id=owner.id,
+            recipient_name="Private Customer",
+            address_line_1="1 Main Street",
+            city="Lahore",
+            postal_code="54000",
+            country_code="PK",
+        )
+        db.session.add_all([revision, address])
+        db.session.flush()
+        order = PrintOrder(
+            order_number="PRIVATE-PRINT-1",
+            user_id=owner.id,
+            project_id=project.id,
+            project_revision_id=revision.id,
+            shipping_address_id=address.id,
+            shipping_address_snapshot={"city": "Lahore"},
+            status="in_production",
+            currency="PKR",
+            book_amount=Decimal("1000.00"),
+            printing_amount=Decimal("500.00"),
+            shipping_amount=Decimal("100.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("1600.00"),
+            price_snapshot={"total": "1600.00"},
+            paid_at=datetime.now(UTC),
+        )
+        db.session.add(order)
+        db.session.commit()
+        order_id, asset_id = order.id, asset.id
+        storage.objects[asset.storage_key] = (photo_bytes, "image/png")
+
+    photo_list_path = f"/api/v1/admin/orders/print/{order_id}/photos"
+    assert logged_out.get(photo_list_path).status_code == 401
+    assert customer.get(photo_list_path).status_code == 403
+    listed = admin.get("/api/v1/admin/orders?type=print")
+    assert listed.status_code == 200
+    item = listed.json["items"][0]
+    assert item["privateProject"] is True
+    assert item["photosAvailable"] is True
+    assert "projectRevision" not in item
+
+    photo_list = admin.get(photo_list_path)
+    assert photo_list.status_code == 200
+    assert [photo["id"] for photo in photo_list.json["items"]] == [asset_id]
+    image = admin.get(f"/api/v1{photo_list.json['items'][0]['url']}")
+    assert image.status_code == 200
+    assert image.data == photo_bytes
+
+    with app.app_context():
+        order = db.session.get(PrintOrder, order_id)
+        order.status = "payment_confirmed"
+        db.session.commit()
+        assert db.session.scalar(
+            db.select(db.func.count(AdminActivityLog.id)).where(
+                AdminActivityLog.target_id == order_id,
+                AdminActivityLog.action == "private_print_order.photos_accessed",
+            )
+        ) == 2
+    assert admin.get(photo_list_path).status_code == 404
+    with app.app_context():
+        order = db.session.get(PrintOrder, order_id)
+        order.status = "delivered"
+        db.session.add(Shipment(
+            print_order_id=order_id,
+            status="delivered",
+            delivered_at=datetime.now(UTC) - timedelta(days=31),
+        ))
+        db.session.commit()
+    cleanup = app.test_cli_runner().invoke(args=["cleanup-delivered-uploads", "--days", "30"])
+    assert cleanup.exit_code == 0, cleanup.output
+    with app.app_context():
+        persisted_asset = db.session.get(ProjectAsset, asset_id)
+        assert persisted_asset.original_deleted_at is not None
+    assert storage.objects == {}

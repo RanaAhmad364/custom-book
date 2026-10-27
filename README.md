@@ -2,13 +2,13 @@
 
 Memorybook public website frontend.
 
-## Run locally
+## Run locally in 5 steps
 
-```powershell
-cd frontend
-npm install
-npm run dev -- --host 127.0.0.1
-```
+1. Install PostgreSQL natively (no Docker). Create a `memorybook` role and database using the instructions below.
+2. Create the backend virtual environment, install its development dependencies, copy `backend\.env.example` to `backend\.env`, and fill in the local database password and two unique signing keys.
+3. Install frontend dependencies with `npm install` in `frontend`.
+4. Run `scripts\dev.ps1` on Windows or `bash scripts/dev.sh` on Linux/macOS. The script checks config/database access, upgrades migrations, seeds the repeatable demo catalog, provisions the local administrator, then starts Flask and Vite.
+5. Open `http://127.0.0.1:5173`, test `http://127.0.0.1:5000/api/v1/health/live`, and sign in with the administrator provisioned by the script. The verification code is available with `flask --app wsgi dev-mailbox --email you@example.com`.
 
 Create a production bundle with `npm run build` from `frontend`.
 
@@ -32,84 +32,119 @@ The design currently uses Google Fonts and Unsplash-hosted photography.
 
 ## Flask backend
 
-The backend foundation lives in `backend/` and requires Python 3.11+, PostgreSQL,
-and Redis. No database password or signing key is stored in source control.
+The backend uses Python 3.11+, Flask, and PostgreSQL installed directly on the
+machine. Docker, Redis, and Celery are not required for local development.
+PostgreSQL remains the system of record. The default rate limiter uses
+in-memory storage, and background PDF, event-email, and daily expired-auth
+cleanup work uses a database-tracked `ThreadPoolExecutor` runner.
+
+### Install PostgreSQL natively
+
+- **Windows:** Install PostgreSQL with the official Windows installer. Keep the
+  PostgreSQL service running (for example, `postgresql-x64-18`) and use pgAdmin
+  or SQL Shell (`psql`) to create a login role and database. In pgAdmin's Query
+  Tool, connected as the install-time administrator, run:
+
+  ```sql
+  CREATE ROLE memorybook LOGIN PASSWORD 'SET_A_LOCAL_PASSWORD';
+  CREATE DATABASE memorybook OWNER memorybook;
+  ```
+
+  Or use `psql -U postgres -h 127.0.0.1` and run the same SQL statements.
+- **Linux (Debian/Ubuntu):** install the distribution PostgreSQL package, start
+  the service, then run `sudo -u postgres createuser --pwprompt memorybook` and
+  `sudo -u postgres createdb --owner=memorybook memorybook`.
+- **macOS:** install with Homebrew (`brew install postgresql@16`), start the
+  service (`brew services start postgresql@16`), then run
+  `createuser --pwprompt memorybook` and
+  `createdb --owner=memorybook memorybook`.
+
+Use your chosen role password only in the ignored local `.env` file. Do not put
+it in shell history, source code, or documentation.
+
+### Backend setup
 
 ```powershell
 Set-Location backend
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
-if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+Copy-Item .env.example .env
 ```
 
-Edit the ignored local `.env` file with your PostgreSQL connection string and
-unique signing secrets. Keep credentials out of source files and commit history.
-Use the password configured for your PostgreSQL role only in that local
-environment file or an environment-variable manager. Do not put it in
-`.env.example`, Python source, or documentation.
-For example, use `postgresql+psycopg://postgres:<URL-ENCODED-PASSWORD>@localhost:5432/memorybook`.
-Generate signing secrets with:
+Edit `backend/.env`: use the PostgreSQL URL format
+`postgresql+psycopg://memorybook:CHANGE_ME@127.0.0.1:5432/memorybook`, replace
+`CHANGE_ME` with the local role password, and set distinct signing keys. Generate
+keys with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. The
+example already selects file-based development email, PKR, in-memory rate
+limiting, the Vite origin, and in-process background jobs. Its signing-key
+values are placeholders and must be replaced before using the app.
+
+Install frontend dependencies once:
 
 ```powershell
-python -c "import secrets; print(secrets.token_urlsafe(48))"
+Set-Location ..\frontend
+npm install
 ```
 
-Set different values for `SECRET_KEY` and `JWT_SECRET_KEY`. The Flask CLI loads
-`.env` locally through `python-dotenv`; `.env.example` contains placeholders only.
-Create the `memorybook` PostgreSQL database and ensure the configured role can
-connect before applying migrations:
+The Vite proxy forwards `/api/*` to `http://127.0.0.1:5000`; the frontend API
+base defaults to `/api/v1`, so no CORS override or frontend `.env` is needed.
+`GET http://127.0.0.1:5000/api/v1/health/live` is the local API health check.
 
-```powershell
-flask --app wsgi config-check
-flask --app wsgi db-check
-flask --app wsgi db upgrade
-flask --app wsgi run --host 127.0.0.1 --port 5000
-```
+### Start the complete local stack
 
-Run the Celery worker in another activated backend terminal:
+From the repository root, run `scripts\dev.ps1` on Windows or
+`bash scripts/dev.sh` on Linux/macOS. The scripts verify configuration and the
+PostgreSQL connection, run `flask db upgrade`, run the repeatable guarded demo
+seed, prompt to create or promote the local administrator, then start Flask on
+port 5000 and Vite on port 5173. Stop Vite with Ctrl+C; the scripts stop the API
+process as well. The first seed writes demo catalog data to the configured
+loopback database, so use only a dedicated local development database.
 
-```powershell
-celery -A wsgi:celery worker --loglevel=INFO
-```
+For manual startup, from `backend/` run `flask --app wsgi config-check`,
+`flask --app wsgi db-check`, `flask --app wsgi db upgrade`, then
+`python run.py`. In another terminal run `npm run dev -- --host 127.0.0.1`
+from `frontend/`. Use `flask --app wsgi retry-failed-jobs` to requeue failed
+in-process jobs; PDF jobs can also be requested again from their existing API.
 
-### Local frontend and API integration
+### PostgreSQL troubleshooting
 
-The frontend's centralized `VITE_API_BASE_URL` accepts either a backend origin
-(for example `http://127.0.0.1:5000`) or an API base ending in `/api/v1`.
-Without it, frontend requests use the Vite `/api` proxy to
-`http://127.0.0.1:5000`, avoiding browser CORS during local development. To set
-the API prefix explicitly in PowerShell:
+- **Port in use:** confirm PostgreSQL is listening on 5432 and the API on 5000;
+  Vite uses 5173. Stop the conflicting local process or configure Vite's port.
+- **Wrong password / connection refused:** check that PostgreSQL is running, the
+  role and database exist, and the ignored `backend/.env` URL matches them.
+  `flask --app wsgi db-check` verifies access without printing credentials.
+- **Migration errors:** confirm the connection targets the intended empty or
+  development database, then inspect the Alembic error and current revision
+  with `flask --app wsgi db current` and `flask --app wsgi db heads`. Do not
+  delete or reset an existing database to resolve a migration failure.
+- **No books appear:** check that the demo seed completed and query the public
+  catalog after the API health endpoint responds.
+- **Admin redirects to unauthorized:** create/promote the administrator with
+  `flask --app wsgi dev-provision-admin --email you@example.com` for a local
+  development account, or `flask --app wsgi grant-admin you@example.com` for
+  an existing account. In development, read a new account's verification code
+  using `flask --app wsgi dev-mailbox --email you@example.com`, verify the
+  email, and sign in again so the frontend receives the admin role.
+- **SMTP mail not delivered:** inspect the server log for the SMTP exception.
+  For port 587 set `SMTP_USE_TLS=true` and `SMTP_USE_SSL=false`; for port 465
+  set `SMTP_USE_TLS=false` and `SMTP_USE_SSL=true`. Confirm the sender address
+  is permitted by the provider and outbound SMTP is not blocked by the host or
+  network. Never enable both TLS modes.
 
-```powershell
-Set-Location frontend
-$env:VITE_API_BASE_URL = "/api/v1"
-npm run dev -- --host 127.0.0.1
-```
-
-The proxy target can be changed with `VITE_BACKEND_ORIGIN` before starting Vite.
-For the directly configured backend URL, set `VITE_API_BASE_URL` to
-`http://127.0.0.1:5000/api/v1`; do not add the prefix twice. `VITE_*` values
-are public frontend configuration and must never contain credentials.
-
-On Windows, start the installed PostgreSQL service from an elevated PowerShell
-when it is stopped:
-
-```powershell
-Start-Service postgresql-x64-18
-```
-
-Redis is required for Celery-backed PDF jobs and queued notifications. A Redis
-server was not available in the inspected local environment; do not start the
-Celery worker until Redis is installed and reachable at the configured
-`REDIS_URL` (the development default is `redis://localhost:6379/0`). The Flask
-API and PostgreSQL-backed catalog/project endpoints can run independently.
+Celery is an optional alternate job backend only. To use it, install the
+`celery` extra, configure `BACKGROUND_JOB_BACKEND=celery` plus a reachable
+`CELERY_BROKER_URL`, and run a Celery worker. Redis is only needed if Redis is
+chosen for Celery or `RATE_LIMIT_STORAGE_URI`; neither is part of the default
+local setup. Authentication verification/reset emails are delivered directly
+because their one-time codes and reset tokens are intentionally not persisted
+in the background-job queue.
 
 ### Backend architecture
 
 `backend/memorybook/` uses the Flask application factory and separates API
 blueprints, SQLAlchemy models, schemas, repositories, services, permissions,
-integrations, and Celery tasks. Alembic/Flask-Migrate revisions are stored in
+integrations, and background tasks (with optional Celery integration). Alembic/Flask-Migrate revisions are stored in
 `backend/migrations/`; do not use `db.create_all()` to provision a deployment.
 
 The normalized schema groups account, catalog, project, pricing, PDF/print
@@ -120,6 +155,21 @@ reference an immutable project revision. Project images and generated documents
 are represented by object-storage keys and metadata; binaries are not stored in
 PostgreSQL. PostgreSQL blocks updates and deletes to project revisions.
 
+### Pricing policy
+
+The catalog and pricing endpoints use `PAYMENT_DEFAULT_CURRENCY` (PKR by
+default). Admin price records must use that currency. The server computes PDF
+prices, print base prices, extra-page charges, discounts, and shipping; browser
+totals are never accepted as checkout authority. Print checkout consumes a
+short-lived server quote snapshot. The editor uses
+`GET /api/v1/projects/<project_id>/pricing-quote?pageCount=<count>` for a
+current PDF price and print estimate before shipping.
+
+The current server plan ceilings are Basic 80 pages, Medium 120 pages, and
+Premium 200 pages. Products may set lower limits. Print products can also
+require even page counts, and product metadata may explicitly restrict cover
+finishes by plan.
+
 The catalog APIs expose only active, non-deleted products, categories,
 collections, and templates. The project APIs require an authenticated session,
 scope every read and write to its owner, and use the current project version in
@@ -128,15 +178,17 @@ CONFLICT`; clients should reload and reconcile rather than overwrite newer
 work. Project documents are validated, normalized into project/page/element
 records, and can be saved as immutable revisions and restored later.
 
-Project photos and unpublished admin-design images use private object storage;
+Project photos and unpublished admin-design images use private storage;
 PostgreSQL stores only object keys, metadata, and checksums. S3-compatible
-storage is configured with `ASSET_S3_*`; local filesystem storage is available
-only in development and testing. Credentials are read from the environment or
-the configured AWS credential provider, never from source control. Uploads
-accept decoded JPEG, PNG, and WebP images up to 15 MB and reject images above
-40 megapixels. Private editor URLs are short-lived and require an
-authorized session when retrieved. Catalog images use stable API URLs and are
-publicly readable. Set `PUBLIC_API_URL` when clients need absolute asset URLs.
+storage is configured with `ASSET_S3_*`; filesystem storage uses
+`ASSET_LOCAL_DIRECTORY`, which must be outside the application tree in
+production and must never be exposed directly by nginx. Use S3 for multiple
+application hosts. Credentials are read from the environment or the configured
+AWS credential provider, never from source control. Uploads accept decoded
+JPEG, PNG, and WebP images up to 15 MB and reject images above 40 megapixels.
+Private editor URLs are short-lived and require an authorized session when
+retrieved. Catalog images use stable API URLs and are publicly readable. Set
+`PUBLIC_API_URL` when clients need absolute asset URLs.
 User-facing records with history are protected by restrictive foreign keys or
 soft deletion rather than destructive cascading deletes.
 
@@ -157,9 +209,13 @@ intentionally identical for existing and unknown email addresses.
 | `SECRET_KEY` | Flask signing secret; use a unique secret outside tests. |
 | `JWT_SECRET_KEY` | JWT signing secret; use a different unique secret. |
 | `DATABASE_URL` | PostgreSQL SQLAlchemy URL using the `psycopg` driver. |
-| `REDIS_URL` | Redis broker and Celery result backend URL. |
+| `BACKGROUND_JOB_BACKEND` | `inprocess` (default) or optional `celery`. |
+| `BACKGROUND_JOB_WORKERS` | In-process worker thread count (default `2`). |
+| `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND` | Optional Celery connection settings; no effect on the default backend. |
 | `CORS_ORIGINS` | Comma-separated allowed frontend origins. |
-| `RATE_LIMIT_STORAGE_URI` | Flask-Limiter storage, normally Redis in production. |
+| `RATE_LIMIT_STORAGE_URI` | Flask-Limiter storage; defaults to `memory://`; set a Redis URL to opt into Redis. |
+| `ASSET_STORAGE_BACKEND` | Private `filesystem` or `s3`; production filesystem storage must live outside the code directory. |
+| `ASSET_LOCAL_DIRECTORY` | Persistent filesystem asset root; production default example is `/var/lib/memorybook/assets`. |
 | `LOG_LEVEL` | Structured application log threshold. |
 | `TRUSTED_PROXY_HOPS` | Number of controlled reverse proxies that overwrite forwarded headers; default `0`. |
 | `JWT_ACCESS_TOKEN_MINUTES` | Access-token lifetime. |
@@ -169,43 +225,23 @@ intentionally identical for existing and unknown email addresses.
 | `JWT_COOKIE_DOMAIN` | Optional shared cookie domain when the frontend and API use sibling subdomains. |
 | `AUTH_OTP_TTL_MINUTES` | Email verification code lifetime. |
 | `AUTH_RESET_TTL_MINUTES` | Password-reset link lifetime. |
-| `AUTH_EMAIL_MODE` | `smtp` for normal mail delivery; `file` enables the CLI-only mailbox in development and is rejected elsewhere. |
+| `AUTH_EMAIL_MODE` | `smtp` for normal mail delivery; `file` enables the CLI-only mailbox in development. |
 | `PUBLIC_APP_URL` | Frontend origin used to compose password-reset links. |
-| `PUBLIC_API_URL` | Canonical HTTPS API origin used for absolute service links. |
+| `PUBLIC_API_URL` | API origin used to create absolute service links. |
 | `PAYMENT_DEFAULT_CURRENCY` | Currency policy for payment checkout (default `PKR`). |
-| `PAYMENT_PRIMARY_GATEWAY` | Preferred gateway identifier only; does not enable a provider. |
+| `PAYMENT_PRIMARY_GATEWAY` | Preferred gateway (`manual` by default); manual transfer is always available for PKR. |
+| `MANUAL_BANK_NAME`, `MANUAL_BANK_ACCOUNT_TITLE`, `MANUAL_BANK_ACCOUNT_NUMBER`, `MANUAL_JAZZCASH_NUMBER`, `MANUAL_EASYPAISA_NUMBER` | Shop-owned transfer destinations shown during manual checkout. Configure before accepting customer payments. |
 | `STRIPE_ENABLED`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Explicit Stripe enablement and server-only API/webhook secrets. Do not expose either secret to Vite. |
-| `PAYFAST_ENABLED`, `PAYFAST_MODE`, `PAYFAST_MERCHANT_ID`, `PAYFAST_MERCHANT_SECRET`, `PAYFAST_API_BASE_URL`, `PAYFAST_CONTRACT_VERIFIED`, `PAYFAST_PAYMENT_METHODS` | Illustrative disabled-by-default PayFast settings; no PayFast adapter is active until merchant-specific checkout/callback details are verified and implemented. |
+| `PAYFAST_ENABLED`, `PAYFAST_MODE`, `PAYFAST_MERCHANT_ID`, `PAYFAST_MERCHANT_SECRET`, `PAYFAST_API_BASE_URL`, `PAYFAST_CONTRACT_VERIFIED`, `PAYFAST_PAYMENT_METHODS` | Illustrative disabled-by-default PayFast settings; no adapter is active until merchant-specific checkout/callback details are verified and implemented. |
 | `JAZZCASH_ENABLED`, `JAZZCASH_MODE`, `JAZZCASH_CHECKOUT_CONTRACT_VERIFIED`, `JAZZCASH_CALLBACK_CONTRACT_VERIFIED`, `JAZZCASH_API_URL`, `JAZZCASH_MERCHANT_ID`, `JAZZCASH_PASSWORD`, `JAZZCASH_INTEGRITY_SALT`, `JAZZCASH_PAYMENT_METHODS` | Merchant-specific configuration only; JazzCash is not advertised because server-side status inquiry is not implemented. |
 | `EASYPAISA_ENABLED`, `EASYPAISA_MODE`, `EASYPAISA_STORE_ID`, `EASYPAISA_MERCHANT_SECRET` | Reserved configuration examples only; no Easypaisa adapter exists. |
-| `SMTP_HOST`, `SMTP_PORT` | Outbound mail server settings. |
-| `SMTP_USERNAME`, `SMTP_PASSWORD` | Optional SMTP credentials. |
-| `SMTP_FROM_EMAIL` | Sender address for verification and reset mail. |
-| `SMTP_USE_TLS` | Enable STARTTLS for SMTP. |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, `SMTP_USE_TLS`, `SMTP_USE_SSL` | Outbound mail configuration for environments using SMTP. Port 587 normally uses STARTTLS; port 465 uses implicit SSL. Enable one mode only. |
 
 When using the development mailbox, run
 `flask --app wsgi dev-mailbox --email user@example.test` to view a test message.
 This command is local-only and never creates an HTTP inbox. Reset the dedicated
 test-account password interactively, without echoing it, with
 `flask --app wsgi dev-reset-test-password user1.test@memorybook.local`.
-| `ASSET_S3_ENDPOINT_URL` | Optional custom S3-compatible endpoint (for example, MinIO or R2). |
-| `ASSET_S3_REGION` | S3 signing region. |
-| `ASSET_S3_BUCKET` | Private bucket for project photos. Required for asset uploads. |
-| `ASSET_S3_ACCESS_KEY_ID`, `ASSET_S3_SECRET_ACCESS_KEY` | Optional explicit storage credentials; otherwise use the SDK credential provider. |
-| `ASSET_S3_PRESIGNED_URL_TTL` | Lifetime in seconds for signed project-photo URLs. |
-| `PDF_FONT_DIR` | Optional directory of operator-licensed font files. Supported family file names are listed in `backend/memorybook/services/pdf_renderer.py`; regular, bold, italic, and bold-italic files must all be present to enable a family. |
-| `PDF_MAX_OUTPUT_BYTES` | Maximum generated PDF size (default 100 MiB). |
-| `PDF_MIN_PRINT_DPI` | Required effective image resolution for print PDFs (default 300 DPI). |
-| `PDF_PRINT_BLEED_INCHES` | Default print bleed (default 0.125 in); a larger bleed may be saved with the book or order. |
-| `PDF_PRINT_SAFE_MARGIN_INCHES` | Default text safe margin (default 0.25 in). |
-| `PDF_DOWNLOAD_MAX_COUNT` | Maximum downloads per generated file (default 5). |
-| `PDF_DOWNLOAD_TTL_DAYS` | Download entitlement lifetime (default 30 days). |
-| `PAYMENT_WEBHOOK_TOLERANCE_SECONDS` | Maximum accepted Stripe webhook signature age. |
-
-Production startup rejects non-PostgreSQL databases, missing/short secrets, and
-non-Redis rate-limit storage. Configure TLS termination and set
-`TRUSTED_PROXY_HOPS` only when the configured number of controlled proxies
-overwrites forwarded headers.
 
 ### API versioning and frontend compatibility
 
@@ -221,13 +257,22 @@ Catalog and project services now consume the versioned APIs; browser local
 storage is retained only for editor recovery copies. The existing frontend
 `/api/print/*` and `/api/pdf/*` paths remain mounted as compatibility routes.
 PDF and print checkout uses server-calculated prices and selected methods from
-`GET /api/v1/payments/methods?currency=PKR`; method discovery fails closed when
-no enabled, implemented, verified provider is available. No Pakistan gateway
-is currently activated. For an existing paid PDF order, the authenticated
+`GET /api/v1/payments/methods?currency=PKR`. Manual bank transfer, JazzCash, and
+Easypaisa instructions are the default; customers submit the transaction
+reference at `/api/v1/payments/{paymentId}/manual-confirmation`, and an admin
+must approve it in Admin → Payments before the order becomes paid. Configure
+the `MANUAL_*` destinations above; blank destinations instruct customers to
+contact support. Stripe remains optional (`STRIPE_ENABLED=true`) and requires
+server-side secret and webhook credentials. PayFast, JazzCash API checkout,
+and Easypaisa API checkout remain unavailable until their merchant contracts
+are implemented and verified. Print production advances through
+payment-confirmed → processing → printed → shipped (tracking required) →
+delivered; every transition is recorded and notifies the customer.
+
+For an existing paid PDF order, the authenticated
 owner can request `POST /api/v1/pdf/orders/{id}/generate` with
 `{"profile":"digital"}`; print-profile generation is allowed only when the
-server-side order price snapshot includes that profile. Generation is queued
-to Celery and reported by `GET /api/v1/pdf/jobs/{jobId}` or the order endpoint.
+server-side order price snapshot includes that profile. Generation is queued to the selected background-job backend and reported by `GET /api/v1/pdf/jobs/{jobId}` or the order endpoint.
 Only an order with a server-confirmed `paid_at` timestamp can be rendered.
 Failed jobs can be retried by requesting generation again. Downloads are
 available through owner-scoped entitlements at `GET /api/v1/pdf/downloads` and
@@ -248,7 +293,7 @@ PDF fonts.
 
 Generated documents are stored in the configured private S3-compatible bucket
 under the `generated/pdf/` prefix; the bucket must not allow public access.
-Celery workers use the existing Redis broker. The renderer supports JPEG, PNG,
+The optional Celery backend uses its configured broker. The renderer supports JPEG, PNG,
 and WebP image assets; an unsupported/corrupt image or inadequate print
 resolution fails the job with a retryable status only when the failure is
 transient.
@@ -266,15 +311,24 @@ flask --app wsgi grant-admin admin@example.com
 
 The command is idempotent and grants a role to an existing account only. Ask
 the administrator to sign out and back in to refresh the frontend role data.
-For the dedicated local administrator (`ra7514770@gmail.com`), use the
-development-only provisioning flow from the `backend` directory:
+Use the development-only provision command to create or promote an account and
+send its email-verification code through the local mailbox:
 
 ```powershell
-$env:AUTH_EMAIL_MODE = "file"
-flask --app wsgi db upgrade
 flask --app wsgi dev-provision-admin
-flask --app wsgi dev-mailbox --email ra7514770@gmail.com
+flask --app wsgi dev-mailbox --email you@example.com
 ```
+
+The provision command prompts for the administrator email and, for a new
+account, an initial password. `--email you@example.com` may be supplied to skip
+the email prompt.
+
+The auth pages cover registration, OTP verification/resend, login, and
+password reset. The API client sends cookie credentials and CSRF headers,
+attempts one refresh after an expired access token, retries the original
+request once, and returns to login if refresh fails. Password-reset requests
+use the same response for existing and unknown addresses to avoid exposing
+which email addresses have accounts.
 
 On first creation, enter and confirm the initial password at the hidden prompt;
 it is hashed with the normal registration password utility and is never printed.
@@ -294,16 +348,41 @@ queries continue to filter on active/published state. Template publication
 requires at least one page with an editable placeholder. Updating a published
 template saves its prior document as an immutable version; projects record the
 template version used at creation and keep their own project document. Admin
-order views include the immutable project revision attached to each order.
+order lists redact project revision documents for private projects; non-private
+order behavior is preserved. Private photos are available through a separately
+audited flow only for paid print orders in production.
 Payment state is read-only in admin and must be verified by the configured
 payment provider; the dashboard does not mark payments successful. Customer
 refund requests require admin review; refunds without an implemented automated
 provider contract require manual processing and verified provider confirmation.
 
 Order, payment, cancellation, and support-ticket model events create admin
-notifications and queued email-log entries. The Celery worker sends those
-event emails through the configured SMTP service. The admin email form sends
+notifications and queued email-log entries. The background-job runner sends those event emails through the configured SMTP service. The admin email form sends
 transactional messages immediately and requires SMTP configuration.
+
+### Customer photo privacy and retention
+
+Customers can enable **Full privacy** in Dashboard Settings. It is off by
+default to preserve existing account behavior. A project can inherit the account
+setting or explicitly choose Private or Standard in the project list. Project
+pages and uploaded photos remain owner-authenticated; they are not exposed in
+public catalog or shared listings.
+
+Opening the private photo list and each individual photo is recorded in
+`admin_activity_logs`. Administrators can view those photos only when the print
+order is paid and `in_production`.
+
+The cleanup command removes original project uploads for delivered print orders
+after 30 days by default. Set `PROJECT_UPLOAD_RETENTION_DAYS` to change the
+retention period, then schedule this command with Windows Task Scheduler or cron:
+
+```powershell
+flask --app wsgi cleanup-delivered-uploads
+```
+
+Use `--days N` to override the configured period for a one-time run. Cleanup
+does not delete project records or shared catalog assets. Removed photos remain
+as unavailable references in the saved project and cannot be downloaded again.
 
 ### Tests
 
@@ -319,17 +398,21 @@ npm run build
 
 Tests use isolated SQLite databases; run `flask --app wsgi db-check` and
 `flask --app wsgi db upgrade` with your configured PostgreSQL service to validate
-the real database connection and migration. Current test and release limitations,
-production configuration, backups, deployment commands, rollback guidance, and
-acceptance gates are documented in [backend/DEPLOYMENT.md](backend/DEPLOYMENT.md).
+the real database connection and migration. Production configuration,
+backups, deployment commands, rollback guidance, and acceptance gates are in
+[backend/DEPLOYMENT.md](backend/DEPLOYMENT.md). For a single Linux VPS, use
+[docs/DEPLOYMENT_LINUX_VPS.md](docs/DEPLOYMENT_LINUX_VPS.md); the production
+environment template is [backend/.env.production.example](backend/.env.production.example).
+Run the end-to-end checks in [docs/FINAL_QA_CHECKLIST.md](docs/FINAL_QA_CHECKLIST.md)
+before accepting traffic or payments.
 Provider contract findings are in [backend/PAYMENT_GATEWAYS.md](backend/PAYMENT_GATEWAYS.md).
 
-### Module 20 validation status
+### Deployment readiness
 
-Automated local validation: backend **59 passed**, frontend **18 passed**, and
-payment-method service **2 passed**; production Vite build succeeds with a
-large-main-chunk advisory. These are unit/contract tests, not full deployed
-end-to-end tests. Real PostgreSQL, Redis/Celery, object storage, external email,
-provider sandbox transactions, large-project load, and backup restore have not
-been verified. Production readiness remains **BLOCKED** until the critical
-acceptance gates in the deployment runbook pass.
+The deployment checklist tracks which local browser steps have been exercised
+and which release gates still require production-like services. Unit and
+contract tests do not substitute for real PostgreSQL migration/restore,
+authenticated browser journeys, SMTP delivery, private storage, payment
+provider sandbox transactions, or operational rollback drills. Production
+readiness remains **BLOCKED** until the acceptance gates in the deployment
+runbook pass.

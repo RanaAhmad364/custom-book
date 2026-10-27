@@ -1,4 +1,4 @@
-import { apiUrl } from "./apiClient.js";
+import { apiRequest, apiUrl } from "./apiClient.js";
 
 export const paymentMethodService = {
   async list(currency) {
@@ -30,5 +30,19 @@ export const paymentMethodService = {
       }
       return { ...method, id: `${method.provider}:${method.method}` };
     });
+  },
+
+  async submitManualReference(paymentId, reference) {
+    if (typeof paymentId !== "string" || !paymentId || typeof reference !== "string" || !reference.trim()) {
+      throw new Error("Enter the transfer reference shown on your receipt.");
+    }
+    const { data } = await apiRequest(`/payments/${encodeURIComponent(paymentId)}/manual-confirmation`, {
+      method: "POST",
+      body: { reference: reference.trim() },
+    });
+    if (!data?.payment || data.payment.status !== "pending") {
+      throw new Error("The payment service returned an invalid manual payment status.");
+    }
+    return data.payment;
   },
 };

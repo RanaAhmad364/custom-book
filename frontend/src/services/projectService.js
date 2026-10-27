@@ -199,6 +199,20 @@ export const projectService = {
     return responseProject({ data }, key);
   },
 
+  async getPricingQuote(owner, projectId, pageCount) {
+    ownerKey(owner);
+    if (!Number.isInteger(pageCount) || pageCount < 1) {
+      throw new Error("Choose a valid page count to see the price estimate.");
+    }
+    const { data } = await apiRequest(
+      `${projectPath(projectId)}/pricing-quote?pageCount=${encodeURIComponent(pageCount)}`,
+    );
+    if (data?.pageCount !== pageCount || typeof data?.currency !== "string") {
+      throw new Error("The pricing service returned an invalid estimate.");
+    }
+    return data;
+  },
+
   async saveDocument(owner, projectId, document) {
     const key = ownerKey(owner);
     if (document.schemaVersion !== 1 || document.metadata?.id !== projectId || document.metadata?.owner?.toLowerCase() !== key) {

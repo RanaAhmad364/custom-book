@@ -61,6 +61,7 @@ EXPECTED_SCHEMA_TABLES = {
     "platform_settings",
     "support_tickets",
     "support_messages",
+    "background_jobs",
 }
 
 
@@ -89,6 +90,7 @@ def test_initial_migration_upgrades_database(tmp_path):
         assert {
             "full_name",
             "phone",
+            "privacy_mode",
             "email_verified_at",
             "updated_at",
             "deleted_at",
@@ -109,6 +111,8 @@ def test_initial_migration_upgrades_database(tmp_path):
         )
         assert "admin_metadata" in {column["name"] for column in inspector.get_columns("book_products")}
         assert "template_version" in {column["name"] for column in inspector.get_columns("user_projects")}
+        assert "privacy_override" in {column["name"] for column in inspector.get_columns("user_projects")}
+        assert "original_deleted_at" in {column["name"] for column in inspector.get_columns("project_assets")}
         assert "idempotency_key" in {column["name"] for column in inspector.get_columns("payments")}
         assert "checkout_url" in {column["name"] for column in inspector.get_columns("payment_attempts")}
         assert "event_key" in {column["name"] for column in inspector.get_columns("notifications")}

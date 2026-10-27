@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, ArrowRight, Bell, Check, Clock3, Download, FileText, Filter, Mail, MapPin, PackageCheck, Plus, Search, Settings, Trash2, UserRound } from "lucide-react";
+import { ArrowLeft, ArrowRight, Bell, Check, Clock3, Download, FileText, Filter, Heart, Mail, MapPin, PackageCheck, Plus, Search, Settings, Trash2, UserRound } from "lucide-react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { useAuth } from "../../features/auth/AuthContext.jsx";
 import { useDashboard } from "../../features/dashboard/DashboardContext.jsx";
 import { DashboardEmptyState, DashboardPageHeading, OrderRow, ProjectCard } from "../../features/dashboard/DashboardUI.jsx";
+import { SafeImage } from "../../components/common/SafeImage.jsx";
 import { PdfDownloadDetails, PdfDownloadHistory } from "../public/PdfPurchase/PdfPurchase.jsx";
 import { apiRequest } from "../../services/apiClient.js";
 
@@ -12,6 +13,7 @@ const titles = {
   recent: ["Your workspace", "Recent projects", "Pick up a story you have been shaping lately."],
   drafts: ["Still in progress", "Saved drafts", "Your unfinished stories are safely waiting here."],
   completed: ["Ready to keep", "Completed books", "The stories you have brought to life."],
+  favorites: ["Saved for later", "Favorite books", "The designs you love, ready when you are."],
   downloads: ["Your digital library", "Downloads", "Purchased PDFs and your recent download activity."],
   orders: ["Made with care", "Orders", "Follow each printed book from checkout to your doorstep."],
   notifications: ["A little note from us", "Notifications", "Updates about your books, orders, and account."],
@@ -26,7 +28,7 @@ export default function DashboardSection({ section }) {
   const location = useLocation();
   const params = useParams();
   const { user } = useAuth();
-  const { data, updateProject, duplicateProject, deleteProject, setNotifications, updateProfile, updateSettings, addAddress, deleteAddress } = useDashboard();
+  const { data, updateProject, duplicateProject, deleteProject, removeFavorite, setNotifications, updateProfile, updateSettings, addAddress, deleteAddress } = useDashboard();
   if (section === "download-detail") return <PdfDownloadDetails />;
   if (section === "order-detail") return <OrderDetails data={data} id={params.orderId} tracking={location.pathname.endsWith("/tracking")} />;
   if (section === "profile") return <Profile data={data} updateProfile={updateProfile} email={user.email} />;
@@ -37,7 +39,21 @@ export default function DashboardSection({ section }) {
   if (section === "billing") return <Billing billing={data.billing} />;
   if (section === "downloads") return <PdfDownloadHistory />;
   if (section === "orders") return <Orders orders={data.orders} />;
+  if (section === "favorites") return <Favorites books={data.favorites} removeFavorite={removeFavorite} />;
   return <Projects section={section} data={data} updateProject={updateProject} duplicateProject={duplicateProject} deleteProject={deleteProject} />;
+}
+
+function Favorites({ books, removeFavorite }) {
+  const [removingId, setRemovingId] = useState(null);
+  return <div className="dashboard-page">
+    <DashboardPageHeading eyebrow="Saved for later" title="Favorite books" description="Keep the designs you love close, and start creating whenever you are ready." action={<Link className="button button-outline" to="/books">Explore books <ArrowRight size={14} /></Link>} />
+    {books.length ? <div className="dashboard-favorites-grid">{books.map((book) => <article className="dashboard-favorite-card" key={book.id}>
+      <Link to={`/books/${book.id}`} aria-label={`View ${book.title}`}><SafeImage src={book.image} alt={book.imageAlt || book.title} /></Link>
+      <div><span className="dashboard-card-eyebrow">{book.category} · {book.pages}</span><h2><Link to={`/books/${book.id}`}>{book.title}</Link></h2><p>{book.description}</p>
+        <div className="dashboard-favorite-actions"><Link className="button button-dark" to={`/create/${book.id}`} state={{ book }}>Start creating <ArrowRight size={14} /></Link><button className="dashboard-secondary-action" type="button" disabled={removingId === book.id} onClick={async () => { setRemovingId(book.id); try { await removeFavorite(book.id); } finally { setRemovingId(null); } }}><Heart size={14} /> {removingId === book.id ? "Removing…" : "Remove"}</button></div>
+      </div>
+    </article>)}</div> : <DashboardEmptyState title="Your favorites are waiting." description="Save book designs you love and they will be collected here." action={<Link className="button button-dark" to="/books">Explore book designs <ArrowRight size={14} /></Link>} />}
+  </div>;
 }
 
 function Projects({ section, data, updateProject, duplicateProject, deleteProject }) {
@@ -61,7 +77,7 @@ function Projects({ section, data, updateProject, duplicateProject, deleteProjec
       <label className="dashboard-select-label"><select value={sort} onChange={(event) => setSort(event.target.value)} aria-label="Sort projects"><option value="recent">Recently updated</option><option value="title">Title A–Z</option></select></label>
       <div className="dashboard-view-switch" role="group" aria-label="Project display"><button type="button" className={view === "grid" ? "active" : ""} onClick={() => setView("grid")}>Grid</button><button type="button" className={view === "list" ? "active" : ""} onClick={() => setView("list")}>List</button></div>
     </div>
-    {projects.length ? <div className={`dashboard-project-grid${view === "list" ? " is-list" : ""}`}>{projects.map((project) => <ProjectCard key={project.id} project={project} compact={view === "list"} onRename={(id, title) => updateProject(id, { title })} onDuplicate={duplicateProject} onDelete={(id) => setConfirmDelete(id)} />)}</div> : <DashboardEmptyState icon={Search} title={search ? "No matching projects." : section === "drafts" ? "No saved drafts yet." : section === "completed" ? "Your first finished book is waiting." : "Your project library is ready."} description={search ? "Try a different title or clear your filters." : "Explore the designs and make your next story your own."} action={<Link className="button button-outline" to="/books">Explore designs</Link>} />}
+    {projects.length ? <div className={`dashboard-project-grid${view === "list" ? " is-list" : ""}`}>{projects.map((project) => <ProjectCard key={project.id} project={project} compact={view === "list"} onRename={(id, title) => updateProject(id, { title })} onPrivacyChange={(id, privacyOverride) => updateProject(id, { privacyOverride })} onDuplicate={duplicateProject} onDelete={(id) => setConfirmDelete(id)} />)}</div> : <DashboardEmptyState icon={Search} title={search ? "No matching projects." : section === "drafts" ? "No saved drafts yet." : section === "completed" ? "Your first finished book is waiting." : "Your project library is ready."} description={search ? "Try a different title or clear your filters." : "Explore the designs and make your next story your own."} action={<Link className="button button-outline" to="/books">Explore designs</Link>} />}
     {confirmDelete ? <div className="dashboard-confirm-backdrop" role="presentation" onClick={() => { if (!deleting) setConfirmDelete(null); }}><div className="dashboard-confirm" role="dialog" aria-modal="true" aria-labelledby="delete-project-title" onClick={(event) => event.stopPropagation()}><span className="dashboard-confirm-icon"><Trash2 size={20} /></span><h2 id="delete-project-title">Delete this project?</h2><p>This removes the saved project from your account. Shared designs and copied projects are not removed.</p><div><button className="button button-outline" type="button" disabled={deleting} onClick={() => setConfirmDelete(null)}>Keep project</button><button className="button button-dark" type="button" disabled={deleting} onClick={async () => { setDeleting(true); try { if (await deleteProject(confirmDelete)) setConfirmDelete(null); } finally { setDeleting(false); } }}>{deleting ? "Deleting…" : "Delete project"}</button></div></div></div> : null}
   </div>;
 }
@@ -126,7 +142,9 @@ function Profile({ data, updateProfile, email }) {
 function SettingsPage({ data, updateSettings }) {
   const items = [["orderEmails", "Order updates", "Receive email when your book moves through production."], ["productNews", "News & inspiration", "Occasional updates about new designs and ideas."]];
   return <div className="dashboard-page"><DashboardPageHeading eyebrow={titles.settings[0]} title={titles.settings[1]} description={titles.settings[2]} />
-    <section className="dashboard-form-card"><div className="dashboard-section-heading"><div><span className="eyebrow">Your preferences</span><h2>Privacy & notifications</h2></div><Settings size={20} /></div>{items.map(([key, title, description]) => <label className="dashboard-setting-row" key={key}><span><strong>{title}</strong><small>{description}</small></span><input type="checkbox" checked={data.settings[key]} onChange={(event) => updateSettings({ [key]: event.target.checked })} /></label>)}</section>
+    <section className="dashboard-form-card"><div className="dashboard-section-heading"><div><span className="eyebrow">Your preferences</span><h2>Privacy & notifications</h2></div><Settings size={20} /></div>
+      <label className="dashboard-setting-row"><span><strong>Full privacy</strong><small>Keep your uploaded photos and project pages private. Admins may view photos only for a paid print order in production. Original uploads are removed after the configured retention period once an order is delivered.</small></span><input type="checkbox" checked={Boolean(data.settings.privacyMode)} onChange={(event) => updateSettings({ privacyMode: event.target.checked })} /></label>
+      {items.map(([key, title, description]) => <label className="dashboard-setting-row" key={key}><span><strong>{title}</strong><small>{description}</small></span><input type="checkbox" checked={data.settings[key]} onChange={(event) => updateSettings({ [key]: event.target.checked })} /></label>)}</section>
     <div className="dashboard-info-note"><Settings size={17} /> These preferences are saved to your account.</div>
   </div>;
 }

@@ -62,9 +62,21 @@ class BookProduct(IdMixin, TimestampMixin, SoftDeleteMixin, db.Model):
     is_featured: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     cover_asset_key: Mapped[str | None] = mapped_column(String(1024))
     starting_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=Decimal("0"))
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD", server_default="USD")
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="PKR", server_default="PKR")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     admin_metadata: Mapped[dict | None] = mapped_column(db.JSON)
+
+
+class Favorite(IdMixin, db.Model):
+    __tablename__ = "favorites"
+    __table_args__ = (
+        UniqueConstraint("user_id", "book_id", name="uq_favorites_user_book"),
+        Index("ix_favorites_user_id", "user_id"),
+    )
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    book_id: Mapped[str] = mapped_column(ForeignKey("book_products.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class BookTemplate(IdMixin, TimestampMixin, SoftDeleteMixin, db.Model):
@@ -170,5 +182,5 @@ class BookVariant(IdMixin, TimestampMixin, db.Model):
     paper_type_id: Mapped[str] = mapped_column(ForeignKey("paper_types.id", ondelete="RESTRICT"), nullable=False)
     sku: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
     base_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD", server_default="USD")
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="PKR", server_default="PKR")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")

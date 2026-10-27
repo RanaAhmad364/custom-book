@@ -2,30 +2,38 @@
 
 This is an operator runbook, not a claim that this repository is production
 ready. No production infrastructure, merchant account, PostgreSQL service,
-Redis service, SMTP service, or object-storage bucket is provisioned or
+Redis service, SMTP service, or private asset storage is provisioned or
 verified by this project. Complete the release gates below before accepting
 traffic or payments.
 
 ## Production topology
 
 - Serve the built Vite application from a CDN or static web host over HTTPS.
-- Run the Flask API as Linux containers/instances behind an HTTPS reverse
-  proxy or managed load balancer. Use Gunicorn; do not use `flask run`.
+- Run the Flask API as a Linux service behind an HTTPS reverse proxy or managed
+  load balancer. Use Gunicorn; do not use `flask run`.
 - Use managed PostgreSQL with TLS, automated backups, point-in-time recovery,
-  and a least-privilege application role.
-- Use shared managed Redis with TLS for Celery and Flask-Limiter. Run one or
-  more separate Celery worker processes; do not run workers in web processes.
-- Use a private S3-compatible bucket for uploaded assets and generated PDFs.
-  Block public access and use narrowly scoped service credentials.
+  a separate migration role, and a least-privilege runtime role.
+- Use shared Redis with TLS for rate limits when running production processes.
+  Redis is not a requirement for the default in-process background job runner.
+- Store uploaded assets and generated PDFs in private S3-compatible storage, or
+  in an external persistent filesystem directory for a single-host deployment.
+  Keep filesystem assets outside the application tree and never expose the
+  directory through the reverse proxy. Use S3 for multiple application hosts.
 - Use an SMTP provider or transactional-mail service for verification,
   password-reset, order, and admin notifications.
-- Centralize JSON stdout/stderr logs, web/worker health, database and Redis
-  metrics, queue depth, failed jobs, storage errors, and payment reconciliation.
+- Centralize JSON stdout/stderr logs, web health, database and Redis metrics,
+  database-tracked job failures, storage errors, and payment reconciliation.
 
 The repository does not define a cloud provider, container image, infrastructure
 as code, frontend hosting workflow, or monitoring provider. Choose and operate
 those services in the target environment; never put credentials in Git or
 frontend `VITE_*` variables.
+
+For a complete single-VPS procedure, see
+[`docs/DEPLOYMENT_LINUX_VPS.md`](../docs/DEPLOYMENT_LINUX_VPS.md). The
+production environment template is
+[`backend/.env.production.example`](.env.production.example). The executable
+acceptance checklist is [`docs/FINAL_QA_CHECKLIST.md`](../docs/FINAL_QA_CHECKLIST.md).
 
 ## Environment configuration
 
@@ -42,8 +50,9 @@ Required for the Flask production process:
 | `SECRET_KEY` | Random secret, at least 32 characters; keep stable across instances and rotations planned. |
 | `JWT_SECRET_KEY` | Independent random secret, at least 32 characters. |
 | `DATABASE_URL` | `postgresql+psycopg://...` URL for managed PostgreSQL; URL-encode reserved password characters and require TLS per database provider. |
-| `REDIS_URL` | Shared Redis URL; use `rediss://` when supported/required. |
-| `RATE_LIMIT_STORAGE_URI` | Shared Redis storage URL, not `memory://`; set independently if it differs from `REDIS_URL`. |
+| `RATE_LIMIT_STORAGE_URI` | Shared Redis URL for multi-process production; use `rediss://` when supported/required. The default local backend is in-memory. |
+| `BACKGROUND_JOB_BACKEND` | `inprocess` (default) for the database-tracked `ThreadPoolExecutor`; set `celery` only when the optional Celery extra and worker are deliberately deployed. |
+| `BACKGROUND_JOB_WORKERS` | Number of in-process background worker threads per Flask process. Use one Gunicorn worker until cross-process job claiming is validated. |
 | `CORS_ORIGINS` | Exact HTTPS frontend origins, comma-separated; no wildcard for credentialed requests. |
 | `PUBLIC_APP_URL` | Canonical HTTPS frontend origin. |
 | `PUBLIC_API_URL` | Canonical HTTPS API origin, used for absolute links/callbacks where configured. |
@@ -54,7 +63,9 @@ Required for the Flask production process:
 | `TRUSTED_PROXY_HOPS` | Number of trusted reverse proxies that overwrite forwarded headers; leave `0` when the API is reached directly. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, `SMTP_USE_TLS` | Provider-issued mail settings and sender authorization. Verify delivery and bounce handling. |
 | `AUTH_EMAIL_MODE` | Keep `smtp` in production. The `file` mode is development-only and writes authentication mail to a local CLI mailbox; it is rejected outside development. |
-| `ASSET_S3_BUCKET`, `ASSET_S3_REGION` | Private bucket and signing region. |
+| `ASSET_STORAGE_BACKEND` | `s3` for multi-host deployment, or `filesystem` for one host with an external persistent directory. |
+| `ASSET_LOCAL_DIRECTORY` | Absolute persistent path outside the application directory, e.g. `/var/lib/memorybook/assets`; restrict write/read access to the service account and never serve it directly. |
+| `ASSET_S3_BUCKET`, `ASSET_S3_REGION` | Private bucket and signing region when `ASSET_STORAGE_BACKEND=s3`. |
 | `ASSET_S3_ENDPOINT_URL` | Set only for a non-AWS S3-compatible service. |
 | `ASSET_S3_ACCESS_KEY_ID`, `ASSET_S3_SECRET_ACCESS_KEY` | Optional explicit credentials; prefer workload identity/credential provider if available. |
 | `ASSET_S3_PRESIGNED_URL_TTL` | Short lifetime suitable for private photo and file access. |
@@ -81,8 +92,10 @@ without echoing the password and revokes that account's existing sessions.
 
 ## Release procedure
 
-1. Provision and separately validate PostgreSQL, Redis, SMTP, and private object
-   storage. Confirm backups, access policies, TLS, monitoring, and alert routes.
+1. Provision and separately validate PostgreSQL, shared Redis rate-limit
+   storage, SMTP, and private asset storage. For filesystem storage, verify the
+   persistent directory is outside the release tree and inaccessible to nginx.
+   Confirm backups, access policies, TLS, monitoring, and alert routes.
 2. Build the frontend in CI using the production API base URL, if configured:
 
    ```powershell
@@ -96,10 +109,10 @@ without echoing the password and revokes that account's existing sessions.
    same-origin `/api` proxy or set `VITE_API_BASE_URL` at build time to the
    canonical API origin. The Vite dev proxy is not a production proxy.
 3. Build/install the backend from a reviewed commit on a supported Linux/Python
-   runtime:
+   runtime. Install the Redis extra when using shared Redis rate-limit storage:
 
    ```sh
-   python -m pip install .
+   python -m pip install '.[redis]'
    ```
 
 4. Inject runtime secrets and configuration into a one-off release/migration
@@ -123,28 +136,32 @@ without echoing the password and revokes that account's existing sessions.
 6. Start the API with Gunicorn and production environment variables:
 
    ```sh
-   gunicorn --bind 0.0.0.0:8000 --workers 2 --threads 4 --timeout 120 wsgi:app
+   gunicorn --bind 0.0.0.0:8000 --workers 1 --threads 4 --timeout 120 wsgi:app
    ```
 
-   Set worker counts/timeouts from measured workload and instance limits. The
-   reverse proxy must terminate HTTPS, forward the correct host/protocol, apply
-   request-size limits, and preserve the application request ID. Set
+   Keep one Gunicorn worker while using the default in-process job runner; its
+   job poller is process-local. Set timeouts from measured workload and
+   instance limits. The reverse proxy must terminate HTTPS, forward the correct
+   host/protocol, apply request-size limits, and preserve the application request ID. Set
    `TRUSTED_PROXY_HOPS` to the exact number of controlled proxies that overwrite
    forwarded headers; do not trust client-supplied forwarding headers.
-7. Start separate Celery worker(s):
+7. The default database-tracked job runner starts in the Flask process and uses
+   a `ThreadPoolExecutor`; inspect failed jobs and retry them using the CLI.
+   Celery is an optional alternate and is not required for the default setup.
+   Only when deliberately selecting `BACKGROUND_JOB_BACKEND=celery`, install
+   the optional extra and start a worker:
 
    ```sh
    celery -A wsgi:celery worker --loglevel=INFO --concurrency=2
    ```
 
-   Tune concurrency against memory use, PDF size, CPU, and queue latency. Avoid
-   starting the worker until Redis, database, and object-storage permissions
-   are ready.
+   Tune concurrency against memory use, PDF size, CPU, and queue latency. This
+   optional mode requires a broker; it is separate from Redis rate-limit storage.
 8. Verify `GET /api/v1/health/live` and `/api/v1/health/ready`, static asset
-   delivery, CORS/cookie/CSRF behavior over HTTPS, email delivery, object
-   upload/download authorization, worker task execution, and log/alert delivery.
-   The readiness endpoint currently verifies PostgreSQL only; separately test
-   Redis, Celery, SMTP, and object storage.
+   delivery, CORS/cookie/CSRF behavior over HTTPS, email delivery, private
+   upload/download authorization, in-process job execution and retry, and
+   log/alert delivery. The readiness endpoint currently verifies PostgreSQL
+   only; separately test Redis, SMTP, and asset storage.
 9. Keep payments disabled until the provider-specific acceptance criteria below
    pass. Reconcile provider transaction IDs and settlement records before
    opening checkout to customers.
@@ -160,9 +177,17 @@ without echoing the password and revokes that account's existing sessions.
   credentials and storage destination to the hosting provider) is:
 
   ```sh
-  pg_dump --format=custom --no-owner --file=memorybook-pre-release.dump "$DATABASE_URL"
+  PGPASSFILE=/etc/memorybook/pgpass pg_dump \
+    --host=db.example.com --port=5432 --username=memorybook_backup \
+    --dbname=memorybook --format=custom --no-owner \
+    --file=memorybook-pre-release.dump
   pg_restore --list memorybook-pre-release.dump
   ```
+
+  `pg_dump` uses libpq connection parameters (or a standard
+  `postgresql://` URI), not SQLAlchemy's `postgresql+psycopg://` URL. Keep the
+  password in a mode-`0600` passfile or the hosting secret manager, not in the
+  command line.
 
 - Test backup restore and point-in-time recovery in a separate environment
   regularly. Encrypt backups, restrict access, and set retention according to
@@ -182,15 +207,15 @@ without echoing the password and revokes that account's existing sessions.
 
 ## Observability and operations
 
-- Collect JSON logs from API and worker processes. Redact authorization,
+- Collect JSON logs from API processes and any optional Celery worker. Redact authorization,
   cookies, passwords, OTP/reset codes, payment credentials, and full callback
   payloads. Use `X-Request-ID` to correlate requests.
 - Alert on API 5xx and readiness failure, database connection exhaustion,
-  Redis/worker unavailability, growing Celery queues, repeated PDF failures,
-  SMTP errors, storage authorization failures, and payment webhook/reconciliation
-  mismatches.
-- The included health checks do not validate Celery, SMTP, Redis, object
-  storage, external payment providers, or backup freshness. Configure external
+  Redis rate-limit storage unavailability, queued/failed background jobs,
+  repeated PDF failures, SMTP errors, storage authorization failures, and
+  payment webhook/reconciliation mismatches.
+- The included health checks do not validate background jobs, SMTP, Redis,
+  asset storage, external payment providers, or backup freshness. Configure external
   checks for those dependencies.
 - Establish incident playbooks for provider callback delays, duplicate
   callbacks, failed PDF jobs, leaked/revoked signed URLs, credential rotation,
@@ -208,8 +233,8 @@ environment with synthetic/test accounts:
   deployed HTTPS frontend and API.
 - Private asset upload/download/deletion and authorized PDF download against
   production-equivalent object storage.
-- Celery delivery and retry for large multi-page PDF generation, with actual
-  output validation, page order, images, fonts, and print constraints.
+- Database-tracked job delivery and retry for large multi-page PDF generation,
+  with actual output validation, page order, images, fonts, and print constraints.
 - Payment initiation, valid/invalid/delayed/duplicate callbacks, server-side
   status verification, failure/retry, amount/currency/reference mismatch,
   refund, and order/entitlement transitions using provider-approved sandbox

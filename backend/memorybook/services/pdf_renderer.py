@@ -232,6 +232,7 @@ def _draw_page(
 ) -> None:
     if paint_background:
         page_background = page.get("background")
+        background_options = page_background if isinstance(page_background, dict) else {}
         if isinstance(page_background, dict):
             page_background = page_background.get("color")
         background_left = 0 if context.profile == "print" else offset_x
@@ -244,6 +245,28 @@ def _draw_page(
             (width + 2 * context.bleed) * 72,
             (height + 2 * context.bleed) * 72,
         )
+        border_style = background_options.get("borderStyle", "solid")
+        border_color = background_options.get("borderColor")
+        if border_style != "none" and isinstance(border_color, str):
+            context.canvas.saveState()
+            context.canvas.setStrokeColor(_color(border_color, "#20352d"))
+            context.canvas.setLineWidth(1.5)
+            if border_style == "dashed":
+                context.canvas.setDash(5, 3)
+            elif border_style == "dotted":
+                context.canvas.setDash(1, 2)
+            border_offset = context.bleed if context.profile == "print" else 0
+            inset_x = width * 0.03
+            inset_y = height * 0.03
+            context.canvas.rect(
+                (offset_x + border_offset + inset_x) * 72,
+                (offset_y + border_offset + inset_y) * 72,
+                (width - inset_x * 2) * 72,
+                (height - inset_y * 2) * 72,
+                fill=0,
+                stroke=1,
+            )
+            context.canvas.restoreState()
     for element in page.get("elements", []):
         if not isinstance(element, dict):
             continue
@@ -457,6 +480,15 @@ def _wrap_text(text: str, font_name: str, font_size: float, max_width: float, le
 
 def _draw_shape(context: _RenderContext, element: dict[str, Any], width: float, height: float, left: float, bottom: float) -> None:
     shape = element.get("shape", "rectangle")
+    if shape == "photo-placeholder":
+        context.canvas.saveState()
+        context.canvas.setFillColor(_color(element.get("fill"), "#edf0eb"))
+        context.canvas.setStrokeColor(_color(element.get("stroke"), "#9ba99f"))
+        context.canvas.setLineWidth(max(0.75, float(element.get("strokeWidth", 0.001)) * context.page_width * 72))
+        context.canvas.setDash(4, 3)
+        context.canvas.rect(left, bottom, width, height, fill=1, stroke=1)
+        context.canvas.restoreState()
+        return
     if shape not in {"rectangle", "circle"}:
         raise PdfRenderError("invalid_shape", "This design contains an unsupported shape.")
     fill = element.get("fill", "#dce8e1")

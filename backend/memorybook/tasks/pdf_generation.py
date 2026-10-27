@@ -3,12 +3,39 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from flask import current_app
-
 from memorybook.errors import ServiceUnavailableError
 from memorybook.extensions import db
 from memorybook.models import PdfJob
 from memorybook.services.pdf_generation import generate_pdf_job
 from memorybook.services.pdf_renderer import PdfRenderError
+from memorybook.tasks.background_jobs import PermanentJobError
+
+
+def generate_pdf_in_process(job_id: str, attempt: int, maximum: int) -> dict:
+    try:
+        return generate_pdf_job(job_id)
+    except Exception as failure:
+        db.session.rollback()
+        job = db.session.get(PdfJob, job_id)
+        if job is None:
+            current_app.logger.exception("PDF generation failed because the job disappeared.")
+            raise
+        retryable = not isinstance(failure, PdfRenderError) or failure.retryable
+        will_retry = retryable and attempt < maximum
+        job.status = "queued" if will_retry else "failed"
+        job.finished_at = None if will_retry else datetime.now(UTC)
+        job.error_code = failure.code if isinstance(failure, PdfRenderError) else (
+            "storage_unavailable" if isinstance(failure, ServiceUnavailableError) else "generation_failed"
+        )
+        job.error_message = (
+            str(failure)[:500]
+            if isinstance(failure, (PdfRenderError, ServiceUnavailableError))
+            else "PDF generation failed unexpectedly. Please retry."
+        )
+        db.session.commit()
+        if not retryable:
+            raise PermanentJobError(job.error_message) from failure
+        raise
 
 
 def register_pdf_generation_task(celery) -> None:

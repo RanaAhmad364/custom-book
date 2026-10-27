@@ -19,6 +19,7 @@ def app():
         "ENVIRONMENT": "testing",
         "MIGRATIONS_DIRECTORY": "../migrations",
         "CORS_ORIGINS": ["http://localhost:5173"],
+        "PAYMENT_DEFAULT_CURRENCY": "PKR",
         "LOG_LEVEL": "CRITICAL",
         "CELERY": {
             "broker_url": "memory://",

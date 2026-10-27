@@ -46,6 +46,7 @@ test("dashboard data is composed from authenticated API resources", async () => 
       { channel: "email", category: "order", enabled: true },
       { channel: "email", category: "product_news", enabled: false },
     ] },
+    "/favorites": { items: [{ id: "book-1", title: "A favorite story", is_favorite: true }] },
   };
 
   globalThis.fetch = async (url) => {
@@ -59,7 +60,7 @@ test("dashboard data is composed from authenticated API resources", async () => 
   };
 
   try {
-    const dashboard = await loadDashboardData({ email: "member@example.test", name: "Memory Member", phone: "03001234567" });
+    const dashboard = await loadDashboardData({ email: "member@example.test", name: "Memory Member", phone: "03001234567", privacyMode: true });
     assert.deepEqual(new Set(requests), new Set(Object.keys(responses)));
     assert.equal(dashboard.profile.name, "Memory Member");
     assert.equal(dashboard.projects[0].title, "My saved book");
@@ -69,7 +70,8 @@ test("dashboard data is composed from authenticated API resources", async () => 
     assert.equal(dashboard.downloads[0].status, "Ready");
     assert.equal(dashboard.notifications[0].read, false);
     assert.equal(dashboard.addresses[0].countryCode, "PK");
-    assert.deepEqual(dashboard.settings, { orderEmails: true, productNews: false });
+    assert.deepEqual(dashboard.settings, { orderEmails: true, productNews: false, privacyMode: true });
+    assert.equal(dashboard.favorites[0].id, "book-1");
   } finally {
     globalThis.fetch = originalFetch;
   }

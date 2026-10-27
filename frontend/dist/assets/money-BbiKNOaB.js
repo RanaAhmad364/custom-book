@@ -1,1 +1,0 @@
-function o(r,e="USD"){const t=Number(r);if(!Number.isFinite(t))return"Price unavailable";const n=typeof e=="string"&&/^[A-Za-z]{3}$/.test(e)?e.toUpperCase():"USD";return new Intl.NumberFormat("en-PK",{style:"currency",currency:n}).format(t)}export{o as f};

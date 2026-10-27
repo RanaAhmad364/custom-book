@@ -48,6 +48,11 @@ export function PageArtwork({
 }) {
   const elements = page.elements ?? [];
   return <div className={`book-preview-page ${className}`} style={{ ...style, backgroundColor: page.background?.color ?? "#fffdf9" }}>
+    {page.background?.borderColor && page.background?.borderStyle !== "none" ? <span
+      className="book-preview-page-border"
+      style={{ borderColor: page.background.borderColor, borderStyle: page.background.borderStyle ?? "solid" }}
+      aria-hidden="true"
+    /> : null}
     {emptyPlaceholder && elements.length === 0 ? <span className="editor-thumb-empty"><span>Empty page</span></span> : null}
     {elements.map((element) => {
       const style = {
@@ -79,7 +84,7 @@ export function PageArtwork({
       return <span key={element.id} className="book-preview-element book-preview-shape" style={{
         ...style,
         backgroundColor: element.fill,
-        border: `${Math.max(0, (element.strokeWidth ?? 0) * previewWidth)}px solid ${element.stroke}`,
+        border: `${Math.max(0, (element.strokeWidth ?? 0) * previewWidth)}px ${element.shape === "photo-placeholder" ? "dashed" : "solid"} ${element.stroke}`,
         borderRadius: element.shape === "circle" ? "50%" : `${(element.rx ?? 0) * previewWidth}px`,
       }} />;
     })}

@@ -260,6 +260,54 @@
   aspect-ratio: 1.2 / 1;
 }
 
+.favorite-control {
+  position: absolute;
+  z-index: 2;
+  top: 9px;
+  right: 9px;
+  display: inline-flex;
+}
+
+.favorite-button {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  padding: 0;
+  color: var(--green);
+  border: 1px solid rgba(32, 53, 45, .13);
+  border-radius: 50%;
+  background: rgba(255, 253, 249, .96);
+  box-shadow: 0 2px 8px rgba(35, 45, 36, .12);
+  cursor: pointer;
+  transition: color 150ms ease, transform 150ms ease, background 150ms ease;
+}
+
+.favorite-button:hover {
+  transform: scale(1.06);
+}
+
+.favorite-button.is-favorite {
+  color: #a94f4a;
+}
+
+.favorite-button:disabled {
+  cursor: wait;
+}
+
+.favorite-error {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  width: max-content;
+  max-width: 220px;
+  padding: 6px 8px;
+  color: #8d3531;
+  background: #fff8f6;
+  box-shadow: 0 2px 8px rgba(35, 45, 36, .15);
+  font-size: 10px;
+}
+
 .discovery-book-card .book-card-meta {
   align-items: flex-end;
   padding: 11px 4px 0;

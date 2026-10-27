@@ -80,7 +80,9 @@ def request_generation(order_id: str):
     job, dispatch = queue_pdf_generation(order, profile)
     if dispatch:
         try:
-            current_app.extensions["celery"].send_task("memorybook.generate_pdf", args=[job.id])
+            from memorybook.tasks.dispatch import dispatch_pdf_generation
+
+            dispatch_pdf_generation(job.id)
         except Exception as failure:
             db.session.rollback()
             failed_job = db.session.get(PdfJob, job.id)

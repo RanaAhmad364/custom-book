@@ -15,6 +15,7 @@ from memorybook.models.catalog import (
     BookTemplateVersion,
     BookVariant,
     CoverType,
+    Favorite,
     PaperType,
     TemplateElement,
     TemplatePage,
@@ -45,6 +46,7 @@ from memorybook.models.commerce import (
 )
 from memorybook.models.operations import (
     AdminActivityLog,
+    BackgroundJob,
     EmailLog,
     Notification,
     NotificationPreference,
@@ -65,6 +67,7 @@ from memorybook.models.user import User
 
 __all__ = [
     "AdminActivityLog",
+    "BackgroundJob",
     "BookCategory",
     "BookCollection",
     "BookProduct",
@@ -74,6 +77,7 @@ __all__ = [
     "BookVariant",
     "CoverType",
     "DiscountCode",
+    "Favorite",
     "DownloadEntitlement",
     "DownloadHistory",
     "EmailLog",

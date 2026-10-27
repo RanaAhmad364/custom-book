@@ -31,7 +31,7 @@ class PricingTier(IdMixin, TimestampMixin, db.Model):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     base_price: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD", server_default="USD")
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="PKR", server_default="PKR")
     is_active: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=True, server_default="true")
 
 
@@ -78,7 +78,7 @@ class ShippingRate(IdMixin, TimestampMixin, db.Model):
     service_code: Mapped[str] = mapped_column(String(40), nullable=False)
     service_name: Mapped[str] = mapped_column(String(100), nullable=False)
     price: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD", server_default="USD")
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="PKR", server_default="PKR")
     estimated_days_min: Mapped[int | None] = mapped_column(Integer)
     estimated_days_max: Mapped[int | None] = mapped_column(Integer)
     is_active: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=True, server_default="true")

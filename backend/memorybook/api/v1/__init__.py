@@ -8,6 +8,7 @@ from memorybook.api.v1.contracts.pdf import pdf_blueprint
 from memorybook.api.v1.contracts.payments import payments_blueprint
 from memorybook.api.v1.contracts.printing import print_blueprint
 from memorybook.api.v1.health.routes import health_blueprint
+from memorybook.api.v1.favorites.routes import favorites_blueprint
 from memorybook.api.v1.projects.routes import projects_blueprint
 
 
@@ -17,6 +18,7 @@ def create_v1_blueprint() -> Blueprint:
     versioned.register_blueprint(auth_blueprint, url_prefix="/auth")
     versioned.register_blueprint(admin_blueprint, url_prefix="/admin")
     versioned.register_blueprint(catalog_blueprint)
+    versioned.register_blueprint(favorites_blueprint, url_prefix="/favorites")
     versioned.register_blueprint(assets_blueprint, url_prefix="/assets")
     versioned.register_blueprint(projects_blueprint, url_prefix="/projects")
     versioned.register_blueprint(print_blueprint, url_prefix="/print")

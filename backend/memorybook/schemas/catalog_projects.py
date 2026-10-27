@@ -27,6 +27,14 @@ def _validate_elements(elements: object) -> None:
             raise ValidationError("Element position is outside the supported page coordinate range.", {"position": "out_of_range"})
         if not 0 < element["width"] <= 2 or not 0 < element["height"] <= 2:
             raise ValidationError("Element dimensions are outside the supported normalized range.", {"dimensions": "out_of_range"})
+        if element.get("type") == "shape" and element.get("shape") == "photo-placeholder":
+            if (
+                element["x"] < 0
+                or element["y"] < 0
+                or element["x"] + element["width"] > 1
+                or element["y"] + element["height"] > 1
+            ):
+                raise ValidationError("Photo slots must remain within the page bounds.", {"slot": "out_of_bounds"})
         source = element.get("src")
         if isinstance(source, str) and source.startswith("data:"):
             raise ValidationError("Image data must be uploaded as a project asset.", {"assets": "upload_required"})
@@ -58,6 +66,7 @@ class ProjectCreateSchema:
             "template_id": _optional_id(data.get("templateId"), "templateId"),
             "page_count": page_count,
             "document": document,
+            "privacy_override": _privacy_override(data.get("privacyOverride"), required=False),
         }
 
 
@@ -67,6 +76,14 @@ def _optional_id(value: object, field: str) -> str | None:
     if not isinstance(value, str) or not value.strip() or len(value) > 36:
         raise ValidationError(f"{field} is invalid.", {field: "invalid"})
     return value.strip()
+
+
+def _privacy_override(value: object, *, required: bool) -> bool | None:
+    if value is None and not required:
+        return None
+    if not isinstance(value, bool):
+        raise ValidationError("privacyOverride must be true, false, or null.", {"privacyOverride": "invalid"})
+    return value
 
 
 class ProjectDocumentSchema:
@@ -127,6 +144,11 @@ class ProjectDocumentSchema:
                 raise ValidationError("Project page layout is invalid.", {"pages": "invalid"})
             if background is not None and not isinstance(background, dict):
                 raise ValidationError("Project page background must be a JSON object.", {"pages": "invalid"})
+            if (
+                isinstance(background, dict)
+                and background.get("borderStyle", "solid") not in {"solid", "dashed", "dotted", "none"}
+            ):
+                raise ValidationError("Page border style is invalid.", {"background": "invalid"})
             page_ids.add(page["id"])
             _validate_elements(page.get("elements", []))
         if set(page_order) != page_ids:
@@ -168,6 +190,8 @@ class ProjectUpdateSchema:
                 raise ValidationError("Page count must be 500 or less.", {"pageCount": "out_of_range"})
         if "document" in data:
             result["document"] = ProjectDocumentSchema.load(data["document"])
+        if "privacyOverride" in data:
+            result["privacy_override"] = _privacy_override(data["privacyOverride"], required=False)
         if not result:
             raise ValidationError("Provide at least one project field to update.")
         return result

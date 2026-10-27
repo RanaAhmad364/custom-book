@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
+from flask_jwt_extended import get_jwt_identity, jwt_required
 from sqlalchemy import select
 
 from memorybook.errors import ValidationError
 from memorybook.extensions import db
-from memorybook.models import BookCategory, BookCollection, BookProduct
+from memorybook.models import BookCategory, BookCollection, BookProduct, Favorite
 from memorybook.schemas.catalog_projects import CatalogQuerySchema
 from memorybook.services.catalog_projects import (
     get_template,
@@ -17,6 +18,7 @@ from memorybook.services.catalog_projects import (
     serialize_category,
     serialize_collection,
 )
+from memorybook.services.pricing import public_plan_catalog
 
 catalog_blueprint = Blueprint("catalog", __name__)
 
@@ -34,13 +36,26 @@ def _page_response(items: list[dict], total: int, page: int, per_page: int):
 
 
 @catalog_blueprint.get("/books")
+@jwt_required(optional=True)
 def books():
     filters = CatalogQuerySchema.load(request.args)
-    items, total = list_books(filters)
+    items, total = list_books(filters, get_jwt_identity())
     return jsonify(_page_response(items, total, filters["page"], filters["per_page"]))
 
 
+@catalog_blueprint.get("/pricing/tiers")
+def pricing_tiers():
+    products = db.session.scalars(
+        select(BookProduct).where(
+            BookProduct.is_active.is_(True),
+            BookProduct.deleted_at.is_(None),
+        )
+    ).all()
+    return jsonify({"items": public_plan_catalog(products)})
+
+
 @catalog_blueprint.get("/books/<string:book_id>")
+@jwt_required(optional=True)
 def book_details(book_id: str):
     book = db.session.scalar(
         select(BookProduct).join(BookCategory, BookProduct.category_id == BookCategory.id).where(
@@ -53,7 +68,13 @@ def book_details(book_id: str):
     )
     if book is None:
         return jsonify({"error": {"code": "NOT_FOUND", "message": "Book was not found."}}), 404
-    return jsonify({"book": serialize_book(book, include_gallery=True)})
+    user_id = get_jwt_identity()
+    favorite_ids = set()
+    if user_id and db.session.scalar(
+        select(Favorite.id).where(Favorite.user_id == user_id, Favorite.book_id == book.id)
+    ):
+        favorite_ids.add(book.id)
+    return jsonify({"book": serialize_book(book, include_gallery=True, favorite_ids=favorite_ids)})
 
 
 @catalog_blueprint.get("/categories")

@@ -30,6 +30,7 @@ from memorybook.services.catalog_projects import (
     update_project,
     upload_asset,
 )
+from memorybook.services.orders import quote_project_prices
 
 projects_blueprint = Blueprint("projects", __name__)
 
@@ -143,6 +144,19 @@ def list_projects():
 @active_user_required
 def get_project(project_id: str):
     return _project_response(_owned_project(project_id))
+
+
+@projects_blueprint.get("/<string:project_id>/pricing-quote")
+@active_user_required
+def project_pricing_quote(project_id: str):
+    raw_page_count = request.args.get("pageCount")
+    try:
+        page_count = int(raw_page_count) if raw_page_count is not None else None
+    except ValueError as failure:
+        raise ValidationError("pageCount must be a whole number.", {"pageCount": "invalid"}) from failure
+    if page_count is None:
+        raise ValidationError("pageCount is required.", {"pageCount": "required"})
+    return jsonify(quote_project_prices(project_id, get_authenticated_user().id, page_count))
 
 
 @projects_blueprint.post("/<string:project_id>/duplicate")

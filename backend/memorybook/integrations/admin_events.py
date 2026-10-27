@@ -68,9 +68,13 @@ def _before_flush(session: Session, *_args) -> None:
                 "Refund request received",
                 f"A customer requested a refund for payment {row.payment_id}.",
             )
-        elif isinstance(row, OrderStatusHistory) and row.status == "cancellation_requested":
-            order_number = row.pdf_order_id or row.print_order_id
-            _queue_admin_event(session, f"cancellation_requested:{order_number}", "Cancellation requested", f"Cancellation requested for order {order_number}.")
+        elif isinstance(row, OrderStatusHistory):
+            if row.status == "cancellation_requested":
+                order_number = row.pdf_order_id or row.print_order_id
+                _queue_admin_event(session, f"cancellation_requested:{order_number}", "Cancellation requested", f"Cancellation requested for order {order_number}.")
+            elif row.status == "payment_failed":
+                order_id = row.pdf_order_id or row.print_order_id or row.changed_by_user_id or row.id
+                _queue_admin_event(session, f"payment_failed:{row.id}", "Payment failed", f"Payment for order {order_id} failed.")
     for row in tuple(session.dirty):
         if isinstance(row, Payment) and inspect(row).attrs.status.history.has_changes():
             _payment_event(session, row)
@@ -83,6 +87,18 @@ def _payment_event(session: Session, payment: Payment) -> None:
         _queue_admin_event(session, f"payment_confirmed:{payment.id}", "Payment confirmed", f"Payment for order {order_id} was confirmed.")
         if payment.pdf_order_id:
             _queue_admin_event(session, f"pdf_purchased:{payment.pdf_order_id}", "PDF purchased", f"PDF order {payment.pdf_order_id} was paid.")
+
+        failed_history = session.scalar(
+            select(OrderStatusHistory.id).where(
+                OrderStatusHistory.pdf_order_id == payment.pdf_order_id,
+                OrderStatusHistory.print_order_id == payment.print_order_id,
+                OrderStatusHistory.status == "payment_failed",
+            ).limit(1)
+        )
+        if failed_history is not None:
+            _queue_admin_event(session, f"payment_failed:{payment.id}:history", "Payment failed", f"Payment for order {order_id} failed.")
+
+        _queue_admin_event(session, f"payment_failed:{payment.id}:legacy", "Payment failed", f"Payment for order {order_id} failed.")
     elif status in {"failed", "declined"}:
         _queue_admin_event(session, f"payment_failed:{payment.id}", "Payment failed", f"Payment for order {order_id} failed.")
 
@@ -93,24 +109,16 @@ def _after_commit(session: Session) -> None:
     session.info.pop("memorybook_admin_event_keys", None)
     if not jobs and not user_jobs or not has_app_context():
         return
-    celery = current_app.extensions.get("celery")
-    if celery is None:
-        current_app.logger.error("Event emails could not be queued because Celery is unavailable.")
-        return
-    for email_id, subject, body in jobs:
+    from memorybook.tasks.dispatch import dispatch_email_log
+
+    for email_id, _subject, _body in jobs:
         try:
-            celery.send_task(
-                "memorybook.send_admin_event_email",
-                args=[email_id, subject, body],
-            )
+            dispatch_email_log(email_id, admin=True)
         except Exception:
             current_app.logger.exception("Could not queue an admin event email.")
-    for email_id, subject, body in user_jobs:
+    for email_id, _subject, _body in user_jobs:
         try:
-            celery.send_task(
-                "memorybook.send_notification_email",
-                args=[email_id, subject, body],
-            )
+            dispatch_email_log(email_id, admin=False)
         except Exception:
             current_app.logger.exception("Could not queue a user notification email.")
 

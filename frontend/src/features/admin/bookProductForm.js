@@ -8,6 +8,8 @@ const DEFAULT_BOOK_METADATA = {
   printingTiers: [],
   pdfPrice: "0.00",
   printingPrice: "0.00",
+  extraPagePrice: "",
+  evenPageCountRequired: false,
   productionDays: 10,
 };
 
@@ -29,7 +31,7 @@ export function bookFormValues(record = {}) {
     pageCountMin: record.pageCountMin ?? 24,
     pageCountMax: record.pageCountMax ?? 80,
     startingPrice: String(record.startingPrice ?? "0.00"),
-    currency: record.currency ?? "USD",
+    currency: record.currency ?? "PKR",
     featured: record.featured ?? false,
     coverAssetKey: record.coverAssetKey ?? "",
     adminMetadata: {
@@ -49,6 +51,9 @@ export function bookFormValues(record = {}) {
       printingTiers: arrayOrDefault(metadata.printingTiers, DEFAULT_BOOK_METADATA.printingTiers),
       pdfPrice: metadata.pdfPrice ?? DEFAULT_BOOK_METADATA.pdfPrice,
       printingPrice: metadata.printingPrice ?? DEFAULT_BOOK_METADATA.printingPrice,
+      basePageCount: metadata.basePageCount ?? record.pageCountMin ?? 24,
+      extraPagePrice: metadata.extraPagePrice ?? DEFAULT_BOOK_METADATA.extraPagePrice,
+      evenPageCountRequired: metadata.evenPageCountRequired ?? DEFAULT_BOOK_METADATA.evenPageCountRequired,
       productionDays: metadata.productionDays ?? DEFAULT_BOOK_METADATA.productionDays,
     },
   };
@@ -79,6 +84,10 @@ export function validateBookForm(values) {
       errors[field] = "Enter a non-negative amount with up to two decimal places.";
     }
   }
+  if (String(values.adminMetadata.extraPagePrice).trim() &&
+      !/^\d+(?:\.\d{1,2})?$/.test(String(values.adminMetadata.extraPagePrice).trim())) {
+    errors.extraPagePrice = "Enter a non-negative amount with up to two decimal places, or leave blank to use tier pricing.";
+  }
 
   const minimum = Number(values.pageCountMin);
   const maximum = Number(values.pageCountMax);
@@ -86,6 +95,13 @@ export function validateBookForm(values) {
   if (!Number.isInteger(maximum) || maximum < 1) errors.pageCountMax = "Enter a positive maximum page count.";
   if (Number.isInteger(minimum) && Number.isInteger(maximum) && minimum > maximum) {
     errors.pageCountMax = "Maximum pages must be at least the minimum.";
+  }
+  const basePageCount = Number(values.adminMetadata.basePageCount);
+  if (!Number.isInteger(basePageCount) || basePageCount < minimum || basePageCount > maximum) {
+    errors.basePageCount = "Base pages must be within the product page range.";
+  }
+  if (typeof values.adminMetadata.evenPageCountRequired !== "boolean") {
+    errors.evenPageCountRequired = "Choose whether print orders require an even page count.";
   }
 
   const { widthMm, heightMm } = values.adminMetadata.dimensions;
@@ -139,6 +155,9 @@ export function buildBookPayload(values) {
       pageCountOptions: values.adminMetadata.pageCountOptions.map(Number),
       pdfPrice: String(values.adminMetadata.pdfPrice).trim(),
       printingPrice: String(values.adminMetadata.printingPrice).trim(),
+      basePageCount: Number(values.adminMetadata.basePageCount),
+      extraPagePrice: String(values.adminMetadata.extraPagePrice).trim(),
+      evenPageCountRequired: values.adminMetadata.evenPageCountRequired,
       productionDays: Number(values.adminMetadata.productionDays),
       sizeOptions: [...values.adminMetadata.sizeOptions],
       coverOptions: [...values.adminMetadata.coverOptions],

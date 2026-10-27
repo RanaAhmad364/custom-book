@@ -11,17 +11,17 @@ const priceItems = [
   {
     title: "Digital PDF service",
     description: "A high-resolution PDF of your completed book.",
-    amount: "Not configured",
+    amount: "Book-specific price",
   },
   {
     title: "Printing",
     description: "Depends on book size, cover, paper, page count, and quantity.",
-    amount: "Calculated after options",
+    amount: "Quoted before checkout",
   },
   {
     title: "Additional pages",
     description: "Any price beyond a tier’s included pages will be shown with final options.",
-    amount: "Not configured",
+    amount: "Calculated per extra page",
   },
   {
     title: "Shipping",
@@ -57,8 +57,8 @@ function PricingPage() {
             <span className="eyebrow">{tier.tagline}</span>
             <h2>{tier.name}</h2>
             <p className="pricing-tier-price">
-              <small>Example catalog starting price</small>
-              <strong>{formatCurrency(tier.startingPrice, tier.currency)}<span>+</span></strong>
+              <small>Catalog starting price</small>
+              <strong>{tier.startingPrice === null ? "Explore books" : <>{formatCurrency(tier.startingPrice, tier.currency)}<span>+</span></>}</strong>
             </p>
             <ul>
               {tier.features.map((feature) => (
@@ -73,15 +73,14 @@ function PricingPage() {
       </section>
 
       <p className="pricing-disclaimer" role="note">
-        <strong>Preview only:</strong> these starting prices are sample catalog data,
-        not final offers or checkout prices. Confirmed pricing is not configured yet.
+        <strong>Starting prices are indicative.</strong> Final print totals are calculated by the server from the selected book, page count, print options, discounts, and shipping.
       </p>
 
       <section className="pricing-components">
         <div className="book-details-section-heading">
           <span className="eyebrow">A clear view of the total</span>
           <h2>What goes into your price?</h2>
-          <p>Each part of the order should be visible before purchase. The following amounts still need configuration.</p>
+          <p>PDF and print estimates come from the catalog and backend pricing rules. Your final order total is confirmed before checkout.</p>
         </div>
         <div className="pricing-component-list">
           {priceItems.map((item) => (

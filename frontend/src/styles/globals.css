@@ -23,6 +23,31 @@ body {
   background: var(--warm);
 }
 
+.site-shell {
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
+}
+
+.site-shell-full {
+  min-height: 100dvh;
+}
+
+.site-content {
+  min-width: 0;
+  flex: 1 0 auto;
+}
+
+.site-content > * {
+  min-width: 0;
+}
+
+@supports (min-height: 100svh) {
+  .site-shell {
+    min-height: 100svh;
+  }
+}
+
 button,
 input {
   font: inherit;
@@ -48,6 +73,8 @@ input:focus-visible {
 img {
   display: block;
   width: 100%;
+  max-width: 100%;
+  height: auto;
 }
 
 .announcement {

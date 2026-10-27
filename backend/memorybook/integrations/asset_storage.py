@@ -206,7 +206,7 @@ def get_asset_storage() -> LocalFilesystemAssetStorage | S3AssetStorage:
     if configured is not None:
         return configured
     backend = current_app.config.get("ASSET_STORAGE_BACKEND", "s3")
-    if backend == "filesystem" and current_app.config.get("ENVIRONMENT") in {"development", "testing"}:
+    if backend == "filesystem":
         return LocalFilesystemAssetStorage()
     if backend != "s3":
         raise ServiceUnavailableError("The configured asset storage backend is unavailable.")

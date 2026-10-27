@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowRight, BadgeCheck, BookOpen, Check, CircleAlert, Clock3
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../../../features/auth/AuthContext.jsx";
 import { PaymentMethodSelect } from "../../../components/commerce/PaymentMethodSelect.jsx";
+import { ManualPaymentPanel } from "../../../components/commerce/ManualPaymentPanel.jsx";
 import { printOrderService } from "../../../services/printOrderService.js";
 import { projectService } from "../../../services/projectService.js";
 import "./PrintOrder.css";
@@ -38,13 +39,12 @@ const coverOptions = [
 const productionSteps = [
   ["order_placed", "Order placed"],
   ["payment_confirmed", "Payment confirmed"],
-  ["design_verified", "Design verified"],
-  ["in_production", "In production"],
-  ["quality_check", "Quality check"],
-  ["packed", "Packed"],
+  ["processing", "Processing"],
+  ["printed", "Printed"],
   ["shipped", "Shipped"],
-  ["out_for_delivery", "Out for delivery"],
   ["delivered", "Delivered"],
+  ["cancelled", "Cancelled"],
+  ["refunded", "Refunded"],
 ];
 
 const emptyAddress = { fullName: "", line1: "", line2: "", city: "", region: "", postalCode: "", country: "", phone: "" };
@@ -68,13 +68,14 @@ function readConfiguration(owner, projectId) {
   const key = `memorybook-print:${owner}::${projectId}`;
   try {
     const saved = sessionStorage.getItem(key);
-    if (!saved) return { tier: "basic", paper: "standard", cover: "hardcover", quantity: 1, address: emptyAddress };
+    if (!saved) return { tier: "basic", paper: "standard", cover: "hardcover", quantity: 1, discountCode: "", address: emptyAddress };
     const parsed = JSON.parse(saved);
     return {
       tier: tierOptions.some((item) => item.id === parsed.tier) ? parsed.tier : "basic",
       paper: paperOptions.some((item) => item.id === parsed.paper) ? parsed.paper : "standard",
       cover: coverOptions.some((item) => item.id === parsed.cover) ? parsed.cover : "hardcover",
       quantity: Number.isInteger(parsed.quantity) && parsed.quantity > 0 && parsed.quantity <= 100 ? parsed.quantity : 1,
+      discountCode: typeof parsed.discountCode === "string" ? parsed.discountCode.slice(0, 80) : "",
       address: { ...emptyAddress, ...(parsed.address ?? {}) },
     };
   } catch (failure) {
@@ -205,6 +206,7 @@ export function PrintOrderFlow() {
         paper: configuration.paper,
         cover: configuration.cover,
         quantity: configuration.quantity,
+        discountCode: configuration.discountCode,
       }, configuration.address).then((updatedQuote) => {
         if (active) setQuote(updatedQuote);
       }).catch((failure) => {
@@ -271,6 +273,7 @@ export function PrintOrderFlow() {
         paper: configuration.paper,
         cover: configuration.cover,
         quantity: configuration.quantity,
+        discountCode: configuration.discountCode,
       }, configuration.address, quote.id, selectedMethod);
       if (order.checkoutUrl) {
         window.location.assign(order.checkoutUrl);
@@ -325,7 +328,7 @@ export function PrintOrderFlow() {
             </div><button className="button button-dark print-address-submit" type="submit">Save address and review <ArrowRight size={15} /></button>
           </form> : null}
 
-          {step === "checkout" ? <><h2>Print order summary</h2><div className="print-choice-summary"><div><span>Tier</span><strong>{configuration.tier.toUpperCase()}</strong></div><div><span>Paper</span><strong>{paperOptions.find((item) => item.id === configuration.paper)?.title}</strong></div><div><span>Cover</span><strong>{coverOptions.find((item) => item.id === configuration.cover)?.title}</strong></div><div><span>Quantity</span><strong>{configuration.quantity}</strong></div><div><span>Delivery to</span><strong>{configuration.address.fullName}<br />{configuration.address.line1}, {configuration.address.city} {configuration.address.postalCode}</strong></div></div><button className="print-refresh-quote" type="button" onClick={() => updateConfiguration({})} disabled={quoteLoading}><RefreshCw size={14} /> Refresh server quote</button></> : null}
+          {step === "checkout" ? <><h2>Print order summary</h2><div className="print-choice-summary"><div><span>Tier</span><strong>{configuration.tier.toUpperCase()}</strong></div><div><span>Paper</span><strong>{paperOptions.find((item) => item.id === configuration.paper)?.title}</strong></div><div><span>Cover</span><strong>{coverOptions.find((item) => item.id === configuration.cover)?.title}</strong></div><div><span>Quantity</span><strong>{configuration.quantity}</strong></div><div><span>Delivery to</span><strong>{configuration.address.fullName}<br />{configuration.address.line1}, {configuration.address.city} {configuration.address.postalCode}</strong></div></div><label className="print-discount-field">Discount code<input value={configuration.discountCode} maxLength={80} autoCapitalize="characters" onChange={(event) => updateConfiguration({ discountCode: event.target.value })} placeholder="Enter code (optional)" /></label><p className="print-discount-note">Your code is validated by the server and reflected in the refreshed quote.</p><button className="print-refresh-quote" type="button" onClick={() => updateConfiguration({})} disabled={quoteLoading}><RefreshCw size={14} /> Refresh server quote</button></> : null}
 
           {step === "checkout" ? <><QuoteBreakdown quote={quote} /><PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading} />{methodsError ? <p className="print-inline-error" role="alert">{methodsError}</p> : null}</> : null}
           {quoteLoading ? <div className="print-message"><LoaderCircle className="print-spin" size={18} /> Requesting a current quote from the printing service…</div> : null}
@@ -417,10 +420,11 @@ export function PrintOrderResult() {
     {order ? <>
       <section className="print-order-status-card">
         <div className="print-order-status-heading"><span className={`print-order-status-icon${order.paymentStatus === "successful" ? " confirmed" : ""}`}>{order.paymentStatus === "successful" ? <BadgeCheck size={23} /> : <Clock3 size={23} />}</span><div><span className="eyebrow">Order {order.id}</span><h2>{order.paymentStatus === "successful" ? "Payment confirmed" : order.paymentStatus === "failed" ? "Payment failed" : "Payment pending"}</h2><p>{order.bookTitle || "Your MemoryBook"}{order.quantity ? ` · ${order.quantity} ${order.quantity === 1 ? "copy" : "copies"}` : ""}</p></div><strong>{order.quote ? formatPrice(order.quote.total, order.quote.currency) : ""}</strong></div>
-        {order.paymentStatus === "failed" ? <p className="print-inline-error"><CircleAlert size={15} /> Payment was not confirmed. Your book will not enter production until the payment service verifies the charge.</p> : null}
+        {order.paymentStatus === "failed" ? <p className="print-inline-error"><CircleAlert size={15} /> Payment was not confirmed. Your book will not enter production until payment is verified. <Link to={`/create/design/${encodeURIComponent(order.projectId)}/print`}>Start checkout again</Link>.</p> : null}
         {order.paymentStatus === "pending" ? <p className="print-order-note"><Clock3 size={15} /> We are waiting for the payment service to confirm your transaction.</p> : null}
         {!isTracking ? <div className="print-order-dates"><div><Clock3 size={16} /><span>Estimated production<strong>{formatDate(order.productionEstimate)}</strong></span></div><div><Truck size={16} /><span>Estimated delivery<strong>{formatDate(order.deliveryEstimate)}</strong></span></div></div> : null}
       </section>
+      <ManualPaymentPanel order={order} onSubmitted={refresh} />
       <section className="print-timeline-card"><div className="print-timeline-heading"><div><span className="eyebrow">{isTracking ? "Live order progress" : "What happens next"}</span><h2>{productionSteps[statusIndex]?.[1] || "Order status"}</h2></div><button className="print-refresh-quote" type="button" onClick={refresh}><RefreshCw size={14} /> Refresh status</button></div>
         <ol className="print-production-timeline">{productionSteps.map(([id, label], index) => <li className={index < statusIndex ? "complete" : index === statusIndex ? "current" : ""} key={id}><span>{index < statusIndex ? <Check size={13} /> : index === statusIndex ? <PackageCheck size={13} /> : null}</span><div><strong>{label}</strong>{id === "shipped" && order.trackingNumber ? <small>Tracking number: {order.trackingNumber}</small> : null}</div></li>)}</ol>
       </section>

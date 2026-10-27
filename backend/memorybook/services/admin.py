@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import copy
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
@@ -27,12 +27,18 @@ from memorybook.models import (
     BookVariant,
     CoverType,
     DiscountCode,
+    DownloadEntitlement,
+    DownloadHistory,
     EmailLog,
+    Favorite,
+    GeneratedFile,
     OrderStatusHistory,
     PagePricing,
     PaperType,
     Payment,
+    PaymentAttempt,
     PdfOrder,
+    ProjectAsset,
     PlatformSetting,
     PricingRule,
     PricingTier,
@@ -50,12 +56,21 @@ from memorybook.models import (
     UserProject,
 )
 from memorybook.schemas.catalog_projects import AssetMetadataSchema, ProjectDocumentSchema
-from memorybook.services.catalog_projects import serialize_book, serialize_category, serialize_collection, serialize_template
+from memorybook.services.catalog_projects import (
+    is_project_private,
+    serialize_book,
+    serialize_category,
+    serialize_collection,
+    serialize_template,
+)
 from memorybook.services.notifications import queue_order_event
+from memorybook.services.pricing import default_currency, validate_product_pricing
 
 ADMIN_PRINT_STATES = {
     "order_placed",
     "payment_confirmed",
+    "processing",
+    "printed",
     "design_verified",
     "in_production",
     "quality_check",
@@ -65,6 +80,21 @@ ADMIN_PRINT_STATES = {
     "delivered",
     "cancelled",
     "cancellation_requested",
+    "refunded",
+}
+
+PRINT_STATUS_TRANSITIONS = {
+    "order_placed": {"payment_confirmed", "cancellation_requested", "cancelled"},
+    "payment_confirmed": {"processing", "cancellation_requested"},
+    "processing": {"printed", "cancellation_requested"},
+    "printed": {"shipped"},
+    "design_verified": {"processing"},
+    "in_production": {"printed"},
+    "quality_check": {"printed", "packed"},
+    "packed": {"shipped"},
+    "shipped": {"out_for_delivery", "delivered"},
+    "out_for_delivery": {"delivered"},
+    "cancellation_requested": {"cancelled"},
 }
 
 
@@ -509,7 +539,160 @@ def _save_template_pages(template: BookTemplate, pages: list[dict]) -> None:
             ))
 
 
-def dashboard_metrics() -> dict:
+def _analytics_days(value: object) -> int:
+    try:
+        days = int(value or 30)
+    except (TypeError, ValueError) as failure:
+        raise ValidationError("Analytics days must be an integer from 1 to 366.", {"days": "invalid"}) from failure
+    if not 1 <= days <= 366:
+        raise ValidationError("Analytics days must be an integer from 1 to 366.", {"days": "invalid"})
+    return days
+
+
+def _daily_totals(model, amount_column, start: datetime, *, paid_only: bool = False) -> dict[str, Decimal]:
+    query = select(func.date(model.created_at), func.coalesce(func.sum(amount_column), 0)).where(
+        model.created_at >= start,
+    )
+    if paid_only:
+        query = query.where(model.paid_at.is_not(None))
+    rows = db.session.execute(query.group_by(func.date(model.created_at))).all()
+    return {str(day): Decimal(amount or 0) for day, amount in rows}
+
+
+def _book_sales(start: datetime) -> list[dict]:
+    sales: dict[str, dict] = {}
+    for model in (PdfOrder, PrintOrder):
+        rows = db.session.execute(
+            select(
+                BookProduct.id,
+                BookProduct.title,
+                func.count(model.id),
+                func.coalesce(func.sum(model.total_amount), 0),
+            )
+            .select_from(model)
+            .join(UserProject, UserProject.id == model.project_id)
+            .join(BookProduct, BookProduct.id == UserProject.product_id)
+            .where(model.paid_at.is_not(None), model.created_at >= start)
+            .group_by(BookProduct.id, BookProduct.title)
+        ).all()
+        for book_id, title, count, revenue in rows:
+            item = sales.setdefault(book_id, {"id": book_id, "title": title, "orders": 0, "revenue": Decimal("0")})
+            item["orders"] += count
+            item["revenue"] += Decimal(revenue or 0)
+    return [
+        {**item, "revenue": str(item["revenue"])}
+        for item in sorted(sales.values(), key=lambda row: (row["orders"], row["revenue"]), reverse=True)[:8]
+    ]
+
+
+def _downloaded_books(start: datetime) -> list[dict]:
+    rows = db.session.execute(
+        select(BookProduct.id, BookProduct.title, func.count(DownloadHistory.id))
+        .select_from(DownloadHistory)
+        .join(DownloadEntitlement, DownloadEntitlement.id == DownloadHistory.entitlement_id)
+        .join(PdfOrder, PdfOrder.id == DownloadEntitlement.pdf_order_id)
+        .join(UserProject, UserProject.id == PdfOrder.project_id)
+        .join(BookProduct, BookProduct.id == UserProject.product_id)
+        .where(DownloadHistory.downloaded_at >= start)
+        .group_by(BookProduct.id, BookProduct.title)
+        .order_by(func.count(DownloadHistory.id).desc(), BookProduct.title)
+        .limit(8)
+    ).all()
+    return [{"id": book_id, "title": title, "downloads": count} for book_id, title, count in rows]
+
+
+def _favorited_books() -> list[dict]:
+    rows = db.session.execute(
+        select(BookProduct.id, BookProduct.title, func.count(Favorite.id))
+        .select_from(Favorite)
+        .join(BookProduct, BookProduct.id == Favorite.book_id)
+        .group_by(BookProduct.id, BookProduct.title)
+        .order_by(func.count(Favorite.id).desc(), BookProduct.title)
+        .limit(8)
+    ).all()
+    return [{"id": book_id, "title": title, "favorites": count} for book_id, title, count in rows]
+
+
+def revenue_chart(days: object = 30) -> list[dict]:
+    count = _analytics_days(days)
+    start = datetime.now(UTC) - timedelta(days=count - 1)
+    pdf = _daily_totals(PdfOrder, PdfOrder.total_amount, start, paid_only=True)
+    printing = _daily_totals(PrintOrder, PrintOrder.total_amount, start, paid_only=True)
+    return [{
+        "date": (start + timedelta(days=offset)).date().isoformat(),
+        "revenue": str(
+            pdf.get((start + timedelta(days=offset)).date().isoformat(), Decimal("0"))
+            + printing.get((start + timedelta(days=offset)).date().isoformat(), Decimal("0"))
+        ),
+    } for offset in range(count)]
+
+
+def downloads_chart(days: object = 30) -> list[dict]:
+    count = _analytics_days(days)
+    start = datetime.now(UTC) - timedelta(days=count - 1)
+    rows = db.session.execute(
+        select(func.date(DownloadHistory.downloaded_at), func.count(DownloadHistory.id))
+        .where(DownloadHistory.downloaded_at >= start)
+        .group_by(func.date(DownloadHistory.downloaded_at))
+    ).all()
+    values = {str(day): total for day, total in rows}
+    return [{
+        "date": (start + timedelta(days=offset)).date().isoformat(),
+        "downloads": values.get((start + timedelta(days=offset)).date().isoformat(), 0),
+    } for offset in range(count)]
+
+
+def recent_admin_payments(limit: int = 10) -> list[dict]:
+    rows = db.session.execute(
+        select(Payment, User.full_name, User.email, PdfOrder.order_number, PrintOrder.order_number)
+        .join(User, User.id == Payment.user_id)
+        .outerjoin(PdfOrder, PdfOrder.id == Payment.pdf_order_id)
+        .outerjoin(PrintOrder, PrintOrder.id == Payment.print_order_id)
+        .order_by(Payment.created_at.desc())
+        .limit(max(1, min(limit, 50)))
+    ).all()
+    return [{
+        "id": payment.id,
+        "userName": name or "Name not provided",
+        "userEmail": email,
+        "orderNumber": pdf_number or print_number,
+        "status": payment.status,
+        "provider": payment.provider,
+        "amount": str(payment.amount),
+        "currency": payment.currency,
+        "createdAt": payment.created_at.isoformat(),
+    } for payment, name, email, pdf_number, print_number in rows]
+
+
+def top_selling_books(days: object = 30) -> list[dict]:
+    count = _analytics_days(days)
+    return _book_sales(datetime.now(UTC) - timedelta(days=count - 1))
+
+
+def most_downloaded_books(days: object = 30) -> list[dict]:
+    count = _analytics_days(days)
+    return _downloaded_books(datetime.now(UTC) - timedelta(days=count - 1))
+
+
+def most_favorited_books() -> list[dict]:
+    return _favorited_books()
+
+
+def recent_admin_users(limit: int = 10) -> list[dict]:
+    users = db.session.scalars(
+        select(User).where(User.deleted_at.is_(None)).order_by(User.created_at.desc()).limit(max(1, min(limit, 50)))
+    ).all()
+    return [{
+        "id": user.id,
+        "name": user.full_name or "Name not provided",
+        "email": user.email,
+        "createdAt": user.created_at.isoformat(),
+    } for user in users]
+
+
+def dashboard_metrics(days: object = 30) -> dict:
+    days = _analytics_days(days)
+    start = datetime.now(UTC) - timedelta(days=days - 1)
     revenue_pdf = db.session.scalar(select(func.coalesce(func.sum(PdfOrder.total_amount), 0)).where(PdfOrder.paid_at.is_not(None)))
     revenue_print = db.session.scalar(select(func.coalesce(func.sum(PrintOrder.total_amount), 0)).where(PrintOrder.paid_at.is_not(None)))
     pdf_count = db.session.scalar(select(func.count()).select_from(PdfOrder).where(PdfOrder.paid_at.is_not(None))) or 0
@@ -526,6 +709,23 @@ def dashboard_metrics() -> dict:
         for kind, rows in (("print", recent_prints), ("pdf", recent_pdfs)) for row in rows
     ]
     recent.sort(key=lambda item: item["createdAt"], reverse=True)
+    revenue_series = revenue_chart(days)
+    downloads_series = downloads_chart(days)
+    pending_manual = db.session.scalar(
+        select(func.count(func.distinct(Payment.id)))
+        .join(PaymentAttempt, PaymentAttempt.payment_id == Payment.id)
+        .where(
+            Payment.provider == "manual",
+            Payment.status == "pending",
+            PaymentAttempt.status == "submitted",
+        )
+    ) or 0
+    orders_to_ship = db.session.scalar(
+        select(func.count()).select_from(PrintOrder).where(PrintOrder.status.in_(("printed", "packed")))
+    ) or 0
+    recent_users = db.session.scalars(
+        select(User).where(User.deleted_at.is_(None)).order_by(User.created_at.desc()).limit(8)
+    ).all()
     return {
         "totalUsers": db.session.scalar(select(func.count()).select_from(User).where(User.deleted_at.is_(None))) or 0,
         "activeProjects": db.session.scalar(select(func.count()).select_from(UserProject).where(UserProject.status != "deleted")) or 0,
@@ -534,7 +734,22 @@ def dashboard_metrics() -> dict:
         "revenue": str(Decimal(revenue_pdf or 0) + Decimal(revenue_print or 0)),
         "pendingOrders": pending,
         "booksInProduction": production,
+        "favoritesCount": db.session.scalar(select(func.count()).select_from(Favorite)) or 0,
         "recentOrders": recent[:8],
+        "currency": default_currency(),
+        "analyticsDays": days,
+        "revenueSeries": revenue_series,
+        "downloadsSeries": downloads_series,
+        "bestSellingBooks": _book_sales(start),
+        "mostDownloadedBooks": _downloaded_books(start),
+        "mostFavoritedBooks": _favorited_books(),
+        "recentUsers": [{
+            "id": user.id,
+            "name": user.full_name or "Name not provided",
+            "email": user.email,
+            "createdAt": user.created_at.isoformat(),
+        } for user in recent_users],
+        "needsAttention": {"manualPayments": pending_manual, "ordersToShip": orders_to_ship},
     }
 
 
@@ -593,7 +808,7 @@ def _product_dict(book: BookProduct) -> dict:
         .limit(1)
     )
     return {
-        **serialize_book(book),
+        **serialize_book(book, include_favorite_count=True),
         "isPublished": book.is_active,
         "coverAssetKey": book.cover_asset_key,
         "adminMetadata": book.admin_metadata or {},
@@ -627,6 +842,10 @@ def _validate_product_metadata(value: dict, previous: dict | None = None) -> dic
         if not isinstance(page_counts, list) or len(page_counts) > 100:
             raise ValidationError("pageCountOptions must be a list.", {"pageCountOptions": "invalid"})
         metadata["pageCountOptions"] = [_positive_int(item, "pageCountOptions") for item in page_counts]
+    if "basePageCount" in metadata:
+        metadata["basePageCount"] = _positive_int(metadata["basePageCount"], "basePageCount")
+    if "evenPageCountRequired" in metadata and not isinstance(metadata["evenPageCountRequired"], bool):
+        raise ValidationError("evenPageCountRequired must be a boolean.", {"evenPageCountRequired": "invalid"})
     if "printingTiers" in metadata:
         tiers = metadata["printingTiers"]
         if not isinstance(tiers, list) or len(tiers) > 20 or any(not isinstance(item, str) or not item.strip() for item in tiers):
@@ -655,9 +874,12 @@ def _validate_product_metadata(value: dict, previous: dict | None = None) -> dic
         if width == 0 or height == 0:
             raise ValidationError("Book dimensions must be greater than zero.", {"dimensions": "invalid"})
         metadata["dimensions"] = {"widthMm": str(width), "heightMm": str(height)}
-    for field in ("pdfPrice", "printingPrice"):
+    for field in ("pdfPrice", "printingPrice", "extraPagePrice"):
         if field in metadata:
-            metadata[field] = str(_money(metadata[field], field))
+            if field == "extraPagePrice" and metadata[field] in (None, ""):
+                metadata.pop(field)
+            else:
+                metadata[field] = str(_money(metadata[field], field))
     if "productionDays" in metadata:
         metadata["productionDays"] = _positive_int(metadata["productionDays"], "productionDays")
     return metadata
@@ -713,6 +935,8 @@ def save_product(data: dict, product_id: str | None = None) -> dict:
         raise ValidationError("slug is required.", {"slug": "required"})
     item.category_id = category.id
     item.collection_id = collection.id if collection else None
+    if not product_id and "currency" not in data:
+        item.currency = default_currency()
     for source, target, maximum in (
         ("description", "description", 10000), ("style", "style", 60), ("occasion", "occasion", 60),
         ("bookType", "book_type", 40), ("currency", "currency", 3), ("coverAssetKey", "cover_asset_key", 1024),
@@ -755,6 +979,7 @@ def save_product(data: dict, product_id: str | None = None) -> dict:
             metadata,
             previous_metadata,
         )
+    validate_product_pricing(item, admin=True)
     if not product_id:
         item.is_active = False
     db.session.add(item)
@@ -768,6 +993,7 @@ def set_product_published(product_id: str, published: bool) -> dict:
     if item is None or item.deleted_at is not None:
         raise NotFound("Book product was not found.")
     if published:
+        validate_product_pricing(item, admin=True)
         master_design = db.session.scalar(
             select(BookTemplate).where(
                 BookTemplate.product_id == item.id,
@@ -1174,34 +1400,53 @@ def delete_template(template_id: str) -> None:
     _commit("template.deleted", "book_template", template.id)
 
 
-def _order_dict(order, kind: str) -> dict:
-    user = db.session.get(User, order.user_id)
-    project = db.session.get(UserProject, order.project_id)
+def _order_dict(
+    order,
+    kind: str,
+    *,
+    user: User | None = None,
+    project: UserProject | None = None,
+    book: BookProduct | None = None,
+    payment_status: str | None = None,
+) -> dict:
+    user = user or db.session.get(User, order.user_id)
+    project = project or db.session.get(UserProject, order.project_id)
+    book = book or (db.session.get(BookProduct, project.product_id) if project and project.product_id else None)
+    private_project = bool(project and is_project_private(project))
     payload = {
         "id": order.id,
         "orderNumber": order.order_number,
         "type": kind,
         "userId": order.user_id,
+        "userName": (user.full_name if user else None) or "Name not provided",
         "userEmail": user.email if user else None,
         "projectId": order.project_id,
         "projectTitle": project.title if project else None,
+        "bookTitle": book.title if book else None,
+        "pageCount": project.page_count if project else None,
+        "privateProject": private_project,
         "revisionId": order.project_revision_id,
         "status": order.status,
+        "paymentStatus": payment_status or ("successful" if order.paid_at else "pending"),
         "currency": order.currency,
         "amount": str(order.total_amount),
         "paidAt": order.paid_at.isoformat() if order.paid_at else None,
         "createdAt": order.created_at.isoformat(),
     }
-    revision = db.session.get(ProjectRevision, order.project_revision_id)
-    if revision is not None:
-        payload["projectRevision"] = {
-            "id": revision.id,
-            "revisionNumber": revision.revision_number,
-            "documentVersion": revision.document_version,
-            "document": revision.document,
-            "createdAt": revision.immutable_at.isoformat(),
-        }
+    if not private_project:
+        revision = db.session.get(ProjectRevision, order.project_revision_id)
+        if revision is not None:
+            payload["projectRevision"] = {
+                "id": revision.id,
+                "revisionNumber": revision.revision_number,
+                "documentVersion": revision.document_version,
+                "document": revision.document,
+                "createdAt": revision.immutable_at.isoformat(),
+            }
     if kind == "print":
+        payload["photosAvailable"] = bool(
+            private_project and order.paid_at is not None and order.status == "in_production"
+        )
         items = db.session.scalars(select(PrintOrderItem).where(PrintOrderItem.print_order_id == order.id)).all()
         payload["items"] = [{
             "quantity": item.quantity, "pageCount": item.page_count, "specification": item.specification_snapshot,
@@ -1216,6 +1461,170 @@ def _order_dict(order, kind: str) -> dict:
     return payload
 
 
+def get_private_print_order_assets(order_id: str) -> tuple[PrintOrder, list[ProjectAsset]]:
+    order = db.session.get(PrintOrder, order_id)
+    if order is None:
+        raise NotFound("Print order was not found.")
+    if order.paid_at is None or order.status != "in_production":
+        raise NotFound("Photos are available only for paid orders in production.")
+    project = db.session.get(UserProject, order.project_id)
+    revision = db.session.get(ProjectRevision, order.project_revision_id)
+    if (
+        project is None
+        or project.user_id != order.user_id
+        or revision is None
+        or revision.project_id != project.id
+        or not is_project_private(project)
+    ):
+        raise NotFound("Photos are not available for this order.")
+    document = revision.document if isinstance(revision.document, dict) else {}
+    asset_ids = {
+        asset.get("id")
+        for asset in document.get("assets", [])
+        if isinstance(asset, dict) and isinstance(asset.get("id"), str)
+    }
+    assets = db.session.scalars(
+        select(ProjectAsset)
+        .where(
+            ProjectAsset.project_id == project.id,
+            ProjectAsset.id.in_(asset_ids),
+            ProjectAsset.original_deleted_at.is_(None),
+        )
+        .order_by(ProjectAsset.created_at)
+    ).all() if asset_ids else []
+    return order, assets
+
+
+def log_private_print_photo_access(order: PrintOrder, actor_id: str, asset_id: str | None = None) -> None:
+    db.session.add(AdminActivityLog(
+        actor_user_id=actor_id,
+        action="private_print_order.photos_accessed",
+        target_type="print_order",
+        target_id=order.id,
+        details={"projectId": order.project_id, "assetId": asset_id},
+        ip_address=request.remote_addr,
+    ))
+    db.session.commit()
+
+
+def cleanup_delivered_project_uploads(retention_days: int) -> int:
+    if retention_days < 0:
+        raise ValidationError("Upload retention days must be zero or greater.", {"days": "out_of_range"})
+    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+    delivered_orders = db.session.scalars(
+        select(PrintOrder)
+        .join(Shipment, Shipment.print_order_id == PrintOrder.id)
+        .where(
+            PrintOrder.paid_at.is_not(None),
+            PrintOrder.status == "delivered",
+            Shipment.status == "delivered",
+            Shipment.delivered_at.is_not(None),
+            Shipment.delivered_at <= cutoff,
+        )
+    ).all()
+    storage = get_asset_storage()
+    deleted_count = 0
+    eligible_assets: dict[str, set[str]] = {}
+    for order in delivered_orders:
+        revision = db.session.get(ProjectRevision, order.project_revision_id)
+        if revision is None or not isinstance(revision.document, dict):
+            continue
+        asset_ids = {
+            item.get("id")
+            for item in revision.document.get("assets", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        if asset_ids:
+            eligible_assets.setdefault(order.project_id, set()).update(asset_ids)
+    for project_id, asset_ids in eligible_assets.items():
+        active_order = db.session.scalar(
+            select(PrintOrder.id).where(
+                PrintOrder.project_id == project_id,
+                PrintOrder.status.not_in({"delivered", "cancelled"}),
+            ).limit(1)
+        )
+        ungenerated_pdf = db.session.scalar(
+            select(PdfOrder.id)
+            .where(
+                PdfOrder.project_id == project_id,
+                PdfOrder.paid_at.is_not(None),
+                ~select(GeneratedFile.id)
+                .where(GeneratedFile.pdf_order_id == PdfOrder.id)
+                .exists(),
+            )
+            .limit(1)
+        )
+        if active_order is not None or ungenerated_pdf is not None:
+            continue
+        assets = db.session.scalars(
+            select(ProjectAsset).where(
+                ProjectAsset.project_id == project_id,
+                ProjectAsset.id.in_(asset_ids),
+                ProjectAsset.original_deleted_at.is_(None),
+            )
+        ).all()
+        for asset in assets:
+            storage.delete(asset.storage_key)
+            asset.original_deleted_at = datetime.now(UTC)
+            db.session.commit()
+            deleted_count += 1
+    return deleted_count
+
+
+def _date_filter(args, key: str, *, end_of_day: bool = False) -> datetime | None:
+    value = args.get(key, "").strip()
+    if not value:
+        return None
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise ValidationError(f"{key} must be a date in YYYY-MM-DD format.", {key: "invalid"})
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as failure:
+        raise ValidationError(f"{key} must be a date in YYYY-MM-DD format.", {key: "invalid"}) from failure
+    if end_of_day:
+        parsed += timedelta(days=1)
+    return parsed.replace(tzinfo=UTC)
+
+
+def _apply_order_filters(query, model, payment_model, args, *, search: str):
+    start = _date_filter(args, "dateFrom")
+    end = _date_filter(args, "dateTo", end_of_day=True)
+    if args.get("status"):
+        query = query.where(model.status == args["status"][:30])
+    if args.get("paymentStatus"):
+        query = query.where(payment_model.status == args["paymentStatus"][:30])
+    if start:
+        query = query.where(model.created_at >= start)
+    if end:
+        query = query.where(model.created_at < end)
+    user_filter = args.get("user", "").strip()[:120]
+    book_filter = args.get("book", "").strip()[:120]
+    if user_filter:
+        term = f"%{user_filter}%"
+        query = query.where(or_(
+            User.id == user_filter,
+            User.full_name.ilike(term),
+            User.email.ilike(term),
+        ))
+    if book_filter:
+        term = f"%{book_filter}%"
+        query = query.where(or_(
+            BookProduct.id == book_filter,
+            BookProduct.title.ilike(term),
+            UserProject.title.ilike(term),
+        ))
+    if search:
+        term = f"%{search}%"
+        query = query.where(or_(
+            model.order_number.ilike(term),
+            User.full_name.ilike(term),
+            User.email.ilike(term),
+            UserProject.title.ilike(term),
+            BookProduct.title.ilike(term),
+        ))
+    return query
+
+
 def list_orders(args) -> dict:
     page, per_page = _page_params(args)
     kind = args.get("type", "all")
@@ -1225,40 +1634,168 @@ def list_orders(args) -> dict:
     limit = page * per_page
     total = 0
     search = args.get("search", "").strip()[:120]
-    if kind in {"all", "pdf"}:
-        query = select(PdfOrder).order_by(PdfOrder.created_at.desc())
-        count_query = select(func.count()).select_from(PdfOrder)
-        if args.get("status"):
-            query = query.where(PdfOrder.status == args["status"][:30])
-            count_query = count_query.where(PdfOrder.status == args["status"][:30])
-        if search:
-            query = query.join(User, User.id == PdfOrder.user_id).where(
-                or_(PdfOrder.order_number.ilike(f"%{search}%"), User.email.ilike(f"%{search}%"))
-            )
-            count_query = count_query.join(User, User.id == PdfOrder.user_id).where(
-                or_(PdfOrder.order_number.ilike(f"%{search}%"), User.email.ilike(f"%{search}%"))
-            )
+    for model, order_kind in ((PdfOrder, "pdf"), (PrintOrder, "print")):
+        if kind not in {"all", order_kind}:
+            continue
+        payment_join = Payment.pdf_order_id == model.id if order_kind == "pdf" else Payment.print_order_id == model.id
+        query = (
+            select(model, User, UserProject, BookProduct, Payment.status)
+            .join(User, User.id == model.user_id)
+            .outerjoin(UserProject, UserProject.id == model.project_id)
+            .outerjoin(BookProduct, BookProduct.id == UserProject.product_id)
+            .outerjoin(Payment, payment_join)
+        )
+        query = _apply_order_filters(query, model, Payment, args, search=search)
+        count_query = (
+            select(func.count(model.id))
+            .join(User, User.id == model.user_id)
+            .outerjoin(UserProject, UserProject.id == model.project_id)
+            .outerjoin(BookProduct, BookProduct.id == UserProject.product_id)
+            .outerjoin(Payment, payment_join)
+        )
+        count_query = _apply_order_filters(count_query, model, Payment, args, search=search)
         total += db.session.scalar(count_query) or 0
-        result.extend(_order_dict(item, "pdf") for item in db.session.scalars(query.limit(limit)).all())
-    if kind in {"all", "print"}:
-        query = select(PrintOrder).order_by(PrintOrder.created_at.desc())
-        count_query = select(func.count()).select_from(PrintOrder)
-        if args.get("status"):
-            query = query.where(PrintOrder.status == args["status"][:30])
-            count_query = count_query.where(PrintOrder.status == args["status"][:30])
-        if search:
-            query = query.join(User, User.id == PrintOrder.user_id).where(
-                or_(PrintOrder.order_number.ilike(f"%{search}%"), User.email.ilike(f"%{search}%"))
-            )
-            count_query = count_query.join(User, User.id == PrintOrder.user_id).where(
-                or_(PrintOrder.order_number.ilike(f"%{search}%"), User.email.ilike(f"%{search}%"))
-            )
-        total += db.session.scalar(count_query) or 0
-        result.extend(_order_dict(item, "print") for item in db.session.scalars(query.limit(limit)).all())
+        rows = db.session.execute(query.order_by(model.created_at.desc()).limit(limit)).all()
+        result.extend(_order_dict(
+            order,
+            order_kind,
+            user=user,
+            project=project,
+            book=book,
+            payment_status=payment_status,
+        ) for order, user, project, book, payment_status in rows)
     result.sort(key=lambda item: item["createdAt"], reverse=True)
     return {"items": result[(page - 1) * per_page:page * per_page], "pagination": {
         "page": page, "perPage": per_page, "totalItems": total, "totalPages": (total + per_page - 1) // per_page,
     }}
+
+
+def list_downloads(args) -> dict:
+    page, per_page = _page_params(args)
+    download_type = args.get("type", "pdf").strip().lower()
+    if download_type not in {"all", "pdf"}:
+        raise ValidationError("Download type must be pdf or all.", {"type": "invalid"})
+    query = (
+        select(DownloadHistory, DownloadEntitlement, PdfOrder, User, UserProject, BookProduct, Payment.status)
+        .join(DownloadEntitlement, DownloadEntitlement.id == DownloadHistory.entitlement_id)
+        .join(PdfOrder, PdfOrder.id == DownloadEntitlement.pdf_order_id)
+        .join(User, User.id == DownloadEntitlement.user_id)
+        .join(UserProject, UserProject.id == PdfOrder.project_id)
+        .outerjoin(BookProduct, BookProduct.id == UserProject.product_id)
+        .outerjoin(Payment, Payment.pdf_order_id == PdfOrder.id)
+    )
+    count_query = (
+        select(func.count(DownloadHistory.id))
+        .join(DownloadEntitlement, DownloadEntitlement.id == DownloadHistory.entitlement_id)
+        .join(PdfOrder, PdfOrder.id == DownloadEntitlement.pdf_order_id)
+        .join(User, User.id == DownloadEntitlement.user_id)
+        .join(UserProject, UserProject.id == PdfOrder.project_id)
+        .outerjoin(BookProduct, BookProduct.id == UserProject.product_id)
+        .outerjoin(Payment, Payment.pdf_order_id == PdfOrder.id)
+    )
+    search = args.get("search", "").strip()[:120]
+    user_filter = args.get("user", "").strip()[:120]
+    book_filter = args.get("book", "").strip()[:120]
+    if search:
+        term = f"%{search}%"
+        conditions = or_(
+            User.full_name.ilike(term),
+            User.email.ilike(term),
+            UserProject.title.ilike(term),
+            BookProduct.title.ilike(term),
+            PdfOrder.order_number.ilike(term),
+        )
+        query = query.where(conditions)
+        count_query = count_query.where(conditions)
+    if user_filter:
+        term = f"%{user_filter}%"
+        condition = or_(User.id == user_filter, User.full_name.ilike(term), User.email.ilike(term))
+        query = query.where(condition)
+        count_query = count_query.where(condition)
+    if book_filter:
+        term = f"%{book_filter}%"
+        condition = or_(BookProduct.id == book_filter, BookProduct.title.ilike(term), UserProject.title.ilike(term))
+        query = query.where(condition)
+        count_query = count_query.where(condition)
+    start = _date_filter(args, "dateFrom")
+    end = _date_filter(args, "dateTo", end_of_day=True)
+    if start:
+        query = query.where(DownloadHistory.downloaded_at >= start)
+        count_query = count_query.where(DownloadHistory.downloaded_at >= start)
+    if end:
+        query = query.where(DownloadHistory.downloaded_at < end)
+        count_query = count_query.where(DownloadHistory.downloaded_at < end)
+    payment_status = args.get("paymentStatus") or args.get("status")
+    if payment_status:
+        query = query.where(Payment.status == payment_status[:30])
+        count_query = count_query.where(Payment.status == payment_status[:30])
+    total = db.session.scalar(count_query) or 0
+    rows = db.session.execute(
+        query.order_by(DownloadHistory.downloaded_at.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    ).all()
+    items = [{
+        "id": history.id,
+        "userId": entitlement.user_id,
+        "userName": user.full_name or "Name not provided",
+        "userEmail": user.email,
+        "bookTitle": book.title if book else project.title,
+        "orderNumber": order.order_number,
+        "type": "pdf",
+        "pageCount": order.page_count,
+        "currency": order.currency,
+        "amount": str(order.total_amount),
+        "paymentStatus": payment_status or ("successful" if order.paid_at else "pending"),
+        "downloadedAt": history.downloaded_at.isoformat(),
+    } for history, entitlement, order, user, project, book, payment_status in rows]
+    return {"items": items, "pagination": {
+        "page": page, "perPage": per_page, "totalItems": total,
+        "totalPages": (total + per_page - 1) // per_page,
+    }}
+
+
+def get_order_history(order_id: str, kind: str) -> list[dict]:
+    if kind == "pdf":
+        order = db.session.get(PdfOrder, order_id)
+        filter_column = OrderStatusHistory.pdf_order_id
+    elif kind == "print":
+        order = db.session.get(PrintOrder, order_id)
+        filter_column = OrderStatusHistory.print_order_id
+    else:
+        raise ValidationError("Order type must be pdf or print.", {"type": "invalid"})
+    if order is None:
+        raise NotFound("Order was not found.")
+    rows = db.session.scalars(
+        select(OrderStatusHistory)
+        .where(filter_column == order_id)
+        .order_by(OrderStatusHistory.created_at.asc(), OrderStatusHistory.id.asc())
+    ).all()
+    return [{
+        "id": row.id,
+        "status": row.status,
+        "note": row.note,
+        "changedByUserId": row.changed_by_user_id,
+        "createdAt": row.created_at.isoformat(),
+    } for row in rows]
+
+
+def list_user_orders(user_id: str, args) -> dict:
+    user = db.session.get(User, user_id)
+    if user is None or user.deleted_at is not None:
+        raise NotFound("User was not found.")
+    filters = args.copy()
+    filters["user"] = user_id
+    return list_orders(filters)
+
+
+def list_book_orders(book_id: str, args) -> dict:
+    book = db.session.get(BookProduct, book_id)
+    if book is None or book.deleted_at is not None:
+        raise NotFound("Book product was not found.")
+    filters = args.copy()
+    filters["book"] = book_id
+    return list_orders(filters)
 
 
 def update_order(order_id: str, kind: str, data: dict, actor_id: str) -> dict:
@@ -1275,8 +1812,27 @@ def update_order(order_id: str, kind: str, data: dict, actor_id: str) -> dict:
         if state not in allowed:
             raise ValidationError("The requested order status is not allowed.", {"status": "invalid"})
         if state != order.status:
+            if kind == "print" and state == "refunded":
+                raise ConflictError("Refunded status is set only after a refund is confirmed.")
+            if kind == "print" and state not in PRINT_STATUS_TRANSITIONS.get(order.status, set()):
+                raise ConflictError(f"Print orders cannot move from {order.status} to {state}.")
+            if kind == "print" and state in {
+                "payment_confirmed", "processing", "printed", "design_verified",
+                "in_production", "quality_check", "packed", "shipped",
+                "out_for_delivery", "delivered",
+            } and (order.paid_at is None or not _order_has_successful_payment(order.id)):
+                raise ConflictError("Production can begin only after payment is confirmed.")
             if state == "cancelled" and order.paid_at is not None:
                 raise ConflictError("Paid orders must be refunded through the payment provider before cancellation.")
+            if kind == "print" and state == "shipped":
+                existing_shipment = db.session.scalar(
+                    select(Shipment).where(Shipment.print_order_id == order.id).order_by(Shipment.created_at.desc())
+                )
+                tracking_number = data.get("trackingNumber") or (
+                    existing_shipment.tracking_number if existing_shipment else None
+                )
+                if not isinstance(tracking_number, str) or not tracking_number.strip():
+                    raise ValidationError("A tracking number is required before shipping.", {"trackingNumber": "required"})
             old_status = order.status
             order.status = state
             db.session.add(OrderStatusHistory(
@@ -1329,6 +1885,15 @@ def update_order(order_id: str, kind: str, data: dict, actor_id: str) -> dict:
     return _order_dict(order, kind)
 
 
+def _order_has_successful_payment(order_id: str) -> bool:
+    return db.session.scalar(
+        select(Payment.id).where(
+            Payment.print_order_id == order_id,
+            Payment.status == "successful",
+        ).limit(1)
+    ) is not None
+
+
 def list_payments(args, *, refunds: bool = False) -> dict:
     page, per_page = _page_params(args)
     model = Refund if refunds else Payment
@@ -1365,16 +1930,29 @@ def list_payments(args, *, refunds: bool = False) -> dict:
             "createdAt": item.created_at.isoformat(),
         } for item in result["items"]]
     else:
-        result["items"] = [{
-            "id": item.id, "userId": item.user_id, "provider": item.provider,
-            "purpose": item.purpose, "paymentMethod": item.payment_method,
-            "providerPaymentId": item.provider_payment_id, "status": item.status,
-            "amount": str(item.amount), "currency": item.currency,
-            "orderId": item.pdf_order_id or item.print_order_id, "createdAt": item.created_at.isoformat(),
-        } for item in result["items"]]
+        result["items"] = [_admin_payment_dict(item) for item in result["items"]]
     return result
 
 
+def _admin_payment_dict(payment: Payment) -> dict:
+    attempt = db.session.scalar(
+        select(PaymentAttempt)
+        .where(PaymentAttempt.payment_id == payment.id)
+        .order_by(PaymentAttempt.attempt_number.desc())
+    )
+    return {
+        "id": payment.id, "userId": payment.user_id, "provider": payment.provider,
+        "purpose": payment.purpose, "paymentMethod": payment.payment_method,
+        "providerPaymentId": payment.provider_payment_id,
+        "submittedReference": attempt.provider_reference if attempt and attempt.status == "submitted" else None,
+        "attemptStatus": attempt.status if attempt else None,
+        "status": payment.status, "amount": str(payment.amount), "currency": payment.currency,
+        "orderId": payment.pdf_order_id or payment.print_order_id, "createdAt": payment.created_at.isoformat(),
+    }
+
+
+def record_manual_payment_action(payment_id: str, details: dict) -> None:
+    _commit("payment.manual_reviewed", "payment", payment_id, details)
 def record_manual_refund_action(refund_id: str, details: dict) -> None:
     _commit("refund.manual_processed", "refund", refund_id, details)
 
@@ -1397,6 +1975,7 @@ def list_pricing() -> dict:
         .order_by(BookProduct.title, BookSize.name, CoverType.name, PaperType.name)
     ).all()
     return {
+        "currency": default_currency(),
         "tiers": [{"id": x.id, "code": x.code, "name": x.name, "description": x.description, "basePrice": str(x.base_price), "currency": x.currency, "active": x.is_active} for x in tiers],
         "pagePricing": [{
             "id": x.id,
@@ -1446,6 +2025,11 @@ def _pricing_currency(value, field: str = "currency") -> str:
     currency = _text({"value": value}, "value", required=True, maximum=3).upper()
     if not re.fullmatch(r"[A-Z]{3}", currency):
         raise ValidationError(f"{field} must be a three-letter currency code.", {field: "invalid"})
+    if currency != default_currency():
+        raise ValidationError(
+            f"{field} must use the configured {default_currency()} currency.",
+            {field: "mismatch"},
+        )
     return currency
 
 
@@ -1481,7 +2065,7 @@ def create_pricing(kind: str, data: dict) -> dict:
             name=_text(data, "name", required=True, maximum=100),
             description=_text(data, "description", maximum=5000),
             base_price=_money(data.get("basePrice"), "basePrice"),
-            currency=_pricing_currency(data.get("currency", "USD")),
+            currency=_pricing_currency(data.get("currency", default_currency())),
             is_active=active,
         )
     elif kind == "pagePricing":
@@ -1522,7 +2106,7 @@ def create_pricing(kind: str, data: dict) -> dict:
             service_code=service_code,
             service_name=_text(data, "serviceName", required=True, maximum=100),
             price=_money(data.get("price"), "price"),
-            currency=_pricing_currency(data.get("currency", "USD")),
+            currency=_pricing_currency(data.get("currency", default_currency())),
             estimated_days_min=minimum_days,
             estimated_days_max=maximum_days,
             is_active=active,
@@ -1699,6 +2283,8 @@ def update_pricing(kind: str, item_id: str, data: dict) -> dict:
             item.discount_type = discount_type
         if "maximumUses" in data:
             item.maximum_uses = _positive_int(data["maximumUses"], "maximumUses", optional=True)
+        if "currency" in data:
+            item.currency = _pricing_currency(data["currency"])
     elif kind == "variant":
         if "basePrice" in data:
             item.base_price = _money(data["basePrice"], "basePrice")
@@ -1977,7 +2563,12 @@ def create_discount_code(data: dict) -> dict:
     value = _money(data.get("value"), "value")
     if value == 0 or (discount_type == "percent" and value > 100):
         raise ValidationError("Discount value is outside its allowed range.", {"value": "invalid"})
-    item = DiscountCode(code=code, discount_type=discount_type, value=value, currency=data.get("currency"))
+    item = DiscountCode(
+        code=code,
+        discount_type=discount_type,
+        value=value,
+        currency=_pricing_currency(data.get("currency", default_currency())),
+    )
     db.session.add(item)
     db.session.flush()
     _commit("discount.created", "discount_code", item.id)

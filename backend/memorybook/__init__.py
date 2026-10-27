@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import hashlib
@@ -16,8 +17,7 @@ from memorybook.errors import register_error_handlers
 from memorybook.extensions import cors, db, jwt, limiter, migrate
 from memorybook.logging_config import configure_logging
 from memorybook.middleware import register_middleware
-from memorybook.integrations.redis_client import create_redis_client
-from memorybook.tasks.celery_app import create_celery
+from memorybook.tasks.background_jobs import BackgroundJobRunner
 
 
 def create_app(
@@ -67,16 +67,26 @@ def create_app(
     app.register_blueprint(create_v1_blueprint())
     register_error_handlers(app)
     register_middleware(app)
-    celery = create_celery(app)
-    from memorybook.tasks.admin_email import register_admin_email_task
-    from memorybook.tasks.notifications import register_notification_task
-    from memorybook.tasks.pdf_generation import register_pdf_generation_task
+    runner = BackgroundJobRunner(app)
+    app.extensions["background_jobs"] = runner
+    if app.config["BACKGROUND_JOB_BACKEND"] == "celery":
+        from memorybook.tasks.celery_app import create_celery
 
-    register_admin_email_task(celery)
-    register_notification_task(celery)
-    register_pdf_generation_task(celery)
-    app.extensions["celery"] = celery
-    app.extensions["redis"] = create_redis_client(app)
+        celery = create_celery(app)
+        from memorybook.tasks.admin_email import register_admin_email_task
+        from memorybook.tasks.notifications import register_notification_task
+        from memorybook.tasks.pdf_generation import register_pdf_generation_task
+
+        register_admin_email_task(celery)
+        register_notification_task(celery)
+        register_pdf_generation_task(celery)
+        app.extensions["celery"] = celery
+
+    if not app.testing:
+        @app.before_request
+        def start_background_jobs() -> None:
+            runner.start()
+
     _register_cli_commands(app)
     return app
 
@@ -131,14 +141,32 @@ def _validate_configuration(app: Flask) -> None:
     email_mode = app.config.get("AUTH_EMAIL_MODE", "smtp")
     if email_mode not in {"smtp", "file"}:
         raise RuntimeError("AUTH_EMAIL_MODE must be either smtp or file.")
+    if app.config.get("SMTP_USE_TLS") and app.config.get("SMTP_USE_SSL"):
+        raise RuntimeError("Configure either SMTP_USE_TLS or SMTP_USE_SSL, not both.")
     if email_mode == "file" and app.config.get("ENVIRONMENT") != "development":
         raise RuntimeError("AUTH_EMAIL_MODE=file is available only in development.")
+    if app.config.get("BACKGROUND_JOB_BACKEND", "inprocess") not in {"inprocess", "celery"}:
+        raise RuntimeError("BACKGROUND_JOB_BACKEND must be either inprocess or celery.")
+    if int(app.config.get("BACKGROUND_JOB_WORKERS", 2)) < 1:
+        raise RuntimeError("BACKGROUND_JOB_WORKERS must be at least 1.")
     if not app.testing and app.config.get("ENVIRONMENT") == "production":
-        if app.config.get("ASSET_STORAGE_BACKEND") != "s3":
-            raise RuntimeError("Production asset storage must use the configured S3-compatible backend.")
-        if not app.config.get("REDIS_URL", "").startswith(("redis://", "rediss://")):
-            raise RuntimeError("REDIS_URL must point to Redis in production.")
-        if app.config.get("RATE_LIMIT_STORAGE_URI", "").startswith("memory://"):
+        asset_backend = app.config.get("ASSET_STORAGE_BACKEND")
+        if asset_backend == "filesystem":
+            asset_directory = Path(app.config.get("ASSET_LOCAL_DIRECTORY", "")).expanduser()
+            application_directory = Path(__file__).resolve().parents[2]
+            if not asset_directory.is_absolute():
+                raise RuntimeError("Production filesystem asset storage requires an absolute directory.")
+            if asset_directory.resolve().is_relative_to(application_directory):
+                raise RuntimeError("Production filesystem assets must be stored outside the application directory.")
+        elif asset_backend != "s3":
+            raise RuntimeError("Production asset storage must use filesystem or the configured S3-compatible backend.")
+        if app.config.get("BACKGROUND_JOB_BACKEND") == "celery" and not (
+            app.config.get("CELERY", {}).get("broker_url", "").startswith(("redis://", "rediss://"))
+        ):
+            raise RuntimeError("Celery requires a Redis CELERY_BROKER_URL in production.")
+        if app.config.get("RATE_LIMIT_STORAGE_URI", "").startswith("memory://") and app.config.get(
+            "REQUIRE_SHARED_RATE_LIMIT_STORAGE", True
+        ):
             raise RuntimeError("Production rate limiting requires shared Redis storage.")
         if not app.config.get("JWT_COOKIE_SECURE"):
             raise RuntimeError("Production authentication cookies must be secure.")
@@ -199,13 +227,41 @@ def _register_cli_commands(app: Flask) -> None:
             with app.app_context():
                 db.session.execute(text("SELECT 1"))
         except Exception as failure:
-            raise click.ClickException(f"Database connectivity failed: {failure}") from failure
+            raise click.ClickException(
+                "Database connectivity failed. Check DATABASE_URL and PostgreSQL status."
+            ) from failure
         click.echo("Database connection successful.")
 
     @app.cli.command("config-check")
     def config_check() -> None:
         """Validate backend configuration without printing secret values."""
         click.echo("Backend configuration is valid.")
+
+    @app.cli.command("retry-failed-jobs")
+    @click.option("--limit", type=click.IntRange(min=1, max=500), default=100, show_default=True)
+    def retry_failed_jobs(limit: int) -> None:
+        """Requeue failed in-process jobs for another attempt."""
+        if app.config["BACKGROUND_JOB_BACKEND"] != "inprocess":
+            raise click.ClickException("This command is only available with BACKGROUND_JOB_BACKEND=inprocess.")
+        job_runner = app.extensions["background_jobs"]
+        count = job_runner.retry_failed(limit=limit)
+        click.echo(f"Requeued {count} failed background job(s).")
+
+    @app.cli.command("cleanup-delivered-uploads")
+    @click.option(
+        "--days",
+        type=click.IntRange(min=0),
+        default=None,
+        help="Retention period after delivery; defaults to PROJECT_UPLOAD_RETENTION_DAYS (30).",
+    )
+    def cleanup_delivered_uploads(days: int | None) -> None:
+        """Delete original project photos after delivered print orders age past retention."""
+        from memorybook.services.admin import cleanup_delivered_project_uploads
+
+        retention_days = app.config["PROJECT_UPLOAD_RETENTION_DAYS"] if days is None else days
+        with app.app_context():
+            count = cleanup_delivered_project_uploads(retention_days)
+        click.echo(f"Deleted {count} original project upload(s) with retention of {retention_days} day(s).")
 
     @app.cli.command("grant-admin")
     @click.argument("email")
@@ -232,9 +288,10 @@ def _register_cli_commands(app: Flask) -> None:
         click.echo(f"Admin role ensured for {normalized_email}.")
 
     @app.cli.command("dev-provision-admin")
-    def dev_provision_admin() -> None:
+    @click.option("--email", help="Administrator account email address.")
+    def dev_provision_admin(email: str | None) -> None:
         """Create or promote the local MemoryBook administrator account."""
-        from memorybook.errors import ServiceUnavailableError
+        from memorybook.errors import ServiceUnavailableError, ValidationError
         from memorybook.models import Role, User, UserRole
         from memorybook.schemas import EmailSchema
         from memorybook.services import AuthService
@@ -242,7 +299,11 @@ def _register_cli_commands(app: Flask) -> None:
         if app.config.get("ENVIRONMENT") != "development":
             raise click.ClickException("Local administrator provisioning is available only in development.")
 
-        email = EmailSchema.load({"email": "ra7514770@gmail.com"})["email"]
+        email = email or click.prompt("Administrator email")
+        try:
+            email = EmailSchema.load({"email": email})["email"]
+        except ValidationError as failure:
+            raise click.ClickException("Enter a valid administrator email address.") from failure
         with app.app_context():
             user = db.session.scalar(
                 select(User).where(User.email == email, User.deleted_at.is_(None)).with_for_update()

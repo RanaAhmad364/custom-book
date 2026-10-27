@@ -9,13 +9,17 @@ export default function Login() {
   const { user, login } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
+  const queryReturnTo = new URLSearchParams(location.search).get("returnTo");
   const [form, setForm] = useState({ email: "", password: "" });
   const [status, setStatus] = useState("idle");
   const [error, setError] = useState("");
   const from = location.state?.from;
+  const isSafeReturnPath = queryReturnTo?.startsWith("/") && !queryReturnTo.startsWith("//");
   const returnTo = from
     ? `${from.pathname ?? "/dashboard"}${from.search ?? ""}${from.hash ?? ""}`
-    : "/dashboard";
+    : isSafeReturnPath
+      ? queryReturnTo
+      : "/dashboard";
 
   if (user) return <Navigate to={returnTo} replace />;
 

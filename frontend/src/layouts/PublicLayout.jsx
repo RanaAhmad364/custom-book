@@ -7,10 +7,10 @@ export default function PublicLayout({ children }) {
   const fullScreenEditor = pathname.startsWith("/create/design/");
   const adminWorkspace = pathname.startsWith("/admin");
   return (
-    <>
+    <div className={`site-shell${fullScreenEditor || adminWorkspace ? " site-shell-full" : ""}`}>
       {!fullScreenEditor && !adminWorkspace ? <Header /> : null}
-      {children}
+      <div className="site-content">{children}</div>
       {!fullScreenEditor && !adminWorkspace ? <Footer /> : null}
-    </>
+    </div>
   );
 }

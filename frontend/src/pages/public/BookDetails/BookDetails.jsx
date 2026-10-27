@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowRight } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { catalogService } from "../../../services/catalog.js";
 import { DemoNotice } from "../../../components/common/DemoNotice.jsx";
+import { FavoriteButton } from "../../../components/book/FavoriteButton.jsx";
 import { ErrorState } from "../../../components/common/ErrorState.jsx";
 import { LoadingState } from "../../../components/common/LoadingState.jsx";
 import BookCustomization from "./components/BookCustomization.jsx";
@@ -59,6 +60,7 @@ export default function BookDetails() {
             <p className="book-details-description">{book.description}</p>
             <BookPricing book={book} />
             <div className="book-details-actions">
+              <FavoriteButton book={book} />
               <Link className="button button-dark" to={`/create/${book.id}`} state={{ book }}>
                 Start Designing <ArrowRight size={16} />
               </Link>

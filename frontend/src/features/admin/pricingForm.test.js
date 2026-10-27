@@ -54,7 +54,7 @@ test("shipping validation accepts country-level rates and rejects invalid delive
     serviceCode: "standard",
     serviceName: "Standard delivery",
     price: "5.00",
-    currency: "USD",
+    currency: "PKR",
     estimatedDaysMin: 8,
     estimatedDaysMax: 3,
   };
@@ -71,7 +71,7 @@ test("variant validation requires a complete, non-negative priced configuration"
     sizeId: "size-id",
     coverTypeId: "cover-id",
     paperTypeId: "paper-id",
-    currency: "USD",
+    currency: "PKR",
   };
   assert.deepEqual(validatePricingRecord("variant", variant), {});
   assert.equal(validatePricingRecord("variant", { ...variant, basePrice: "-0.01" }).basePrice,

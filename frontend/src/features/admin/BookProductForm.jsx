@@ -76,10 +76,10 @@ export default function BookProductForm({
 }) {
   const initialValues = useMemo(() => bookFormValues(record), [record]);
   const [values, setValues] = useState(initialValues);
-  const [initialPayload] = useState(() => JSON.stringify(buildBookPayload(initialValues)));
+  const [initialPayload, setInitialPayload] = useState(() => JSON.stringify(buildBookPayload(initialValues)));
   const [categories, setCategories] = useState([]);
   const [collections, setCollections] = useState([]);
-  const [pricing, setPricing] = useState({ sizes: [], covers: [], papers: [], tiers: [], variants: [] });
+  const [pricing, setPricing] = useState({ sizes: [], covers: [], papers: [], tiers: [], variants: [], currency: "PKR" });
   const [variantDraft, setVariantDraft] = useState({ sizeId: "", coverTypeId: "", paperTypeId: "", sku: "", basePrice: "" });
   const [variantSaving, setVariantSaving] = useState(false);
   const [variantError, setVariantError] = useState("");
@@ -115,7 +115,7 @@ export default function BookProductForm({
       if (!active) return;
       if (!Array.isArray(nextPricing.sizes) || !Array.isArray(nextPricing.covers) ||
           !Array.isArray(nextPricing.papers) || !Array.isArray(nextPricing.tiers) ||
-          !Array.isArray(nextPricing.variants)) {
+          !Array.isArray(nextPricing.variants) || !/^[A-Z]{3}$/.test(nextPricing.currency ?? "")) {
         throw new Error("The pricing service returned invalid book configuration options.");
       }
       setCategories(nextCategories);
@@ -126,7 +126,12 @@ export default function BookProductForm({
         papers: nextPricing.papers,
         tiers: nextPricing.tiers,
         variants: nextPricing.variants.filter((variant) => variant.productId === record.id),
+        currency: nextPricing.currency,
       });
+      if (!record.id && typeof nextPricing.currency === "string") {
+        setValues((current) => ({ ...current, currency: nextPricing.currency }));
+        setInitialPayload(JSON.stringify(buildBookPayload({ ...initialValues, currency: nextPricing.currency })));
+      }
     }).catch((failure) => {
       if (active) setOptionsError(errorMessage(failure));
     }).finally(() => {
@@ -405,9 +410,8 @@ export default function BookProductForm({
       <section className="book-form-section">
         <div className="book-form-section-heading"><span>05</span><div><h3>Pricing</h3><p>Prices use the currency code saved with the product.</p></div></div>
         <div className="book-form-grid">
-          <Field label="Currency code" name="currency" value={values.currency}
-            onChange={(event) => updateField("currency", event.target.value.toUpperCase())}
-            error={fieldErrors.currency} maxLength={3} required />
+          <Field label="Currency code" name="currency" value={values.currency} disabled
+            onChange={() => {}} error={fieldErrors.currency} maxLength={3} required />
           <Field label="Starting price" name="startingPrice" type="number" min="0" step="0.01" value={values.startingPrice}
             onChange={(event) => updateField("startingPrice", event.target.value)} error={fieldErrors.startingPrice} required />
           <Field label="PDF price" name="pdfPrice" type="number" min="0" step="0.01"
@@ -416,10 +420,22 @@ export default function BookProductForm({
           <Field label="Printing price" name="printingPrice" type="number" min="0" step="0.01"
             value={values.adminMetadata.printingPrice} onChange={(event) => updateMetadata("printingPrice", event.target.value)}
             error={fieldErrors.printingPrice} />
+          <Field label="Base page count" name="basePageCount" type="number" min={values.pageCountMin} max={values.pageCountMax} step="1"
+            value={values.adminMetadata.basePageCount} onChange={(event) => updateMetadata("basePageCount", event.target.value)}
+            error={fieldErrors.basePageCount} />
+          <Field label="Price per extra page" name="extraPagePrice" type="number" min="0" step="0.01"
+            value={values.adminMetadata.extraPagePrice} onChange={(event) => updateMetadata("extraPagePrice", event.target.value)}
+            error={fieldErrors.extraPagePrice} />
           <Field label="Production estimate (days)" name="productionDays" type="number" min="1" step="1"
             value={values.adminMetadata.productionDays} onChange={(event) => updateMetadata("productionDays", event.target.value)}
             error={fieldErrors.productionDays} />
         </div>
+        <label className="book-form-checkbox">
+          <input type="checkbox" checked={values.adminMetadata.evenPageCountRequired}
+            onChange={(event) => updateMetadata("evenPageCountRequired", event.target.checked)} />
+          Require even page counts for print orders
+        </label>
+        {fieldErrors.evenPageCountRequired ? <small className="book-form-field-error">{fieldErrors.evenPageCountRequired}</small> : null}
       </section>
 
       <section className="book-form-section">

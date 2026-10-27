@@ -1,7 +1,10 @@
-import { apiRequest } from "../../services/apiClient.js";
+import { apiRequest, apiUrl } from "../../services/apiClient.js";
+import { buildAdminHistoryQuery } from "./adminHistory.js";
 
 const paths = {
   dashboard: "/dashboard",
+  purchases: "/purchases?type=all",
+  downloads: "/downloads",
   books: "/books",
   categories: "/categories",
   collections: "/collections",
@@ -20,6 +23,12 @@ const paths = {
   activity: "/activity",
 };
 
+export function adminExportUrl(section, filters = {}) {
+  const path = section === "downloads" ? "/admin/downloads/export.csv" : "/admin/orders/export.csv";
+  const query = buildAdminHistoryQuery(filters);
+  return apiUrl(`${path}${query ? `?${query}` : ""}`);
+}
+
 const bookDesignVersions = new Map();
 
 export async function loadAdminSection(section, search = "", filters = {}) {
@@ -30,9 +39,11 @@ export async function loadAdminSection(section, search = "", filters = {}) {
   Object.entries(filters).forEach(([key, value]) => {
     if (value) params.set(key, value);
   });
-  const queryString = params.toString();
-  const query = queryString ? `${path.includes("?") ? "&" : "?"}${queryString}` : "";
-  const { data } = await apiRequest(`/admin${path}${query}`);
+  const [pathname, existingQuery = ""] = path.split("?", 2);
+  const mergedParams = new URLSearchParams(existingQuery);
+  for (const [key, value] of params) mergedParams.set(key, value);
+  const queryString = mergedParams.toString();
+  const { data } = await apiRequest(`/admin${pathname}${queryString ? `?${queryString}` : ""}`);
   return data;
 }
 
@@ -79,6 +90,25 @@ export async function updateAdminOrder(order) {
   })).data;
 }
 
+export async function loadAdminOrderHistory(order) {
+  const { data } = await apiRequest(`/admin/orders/${encodeURIComponent(order.type)}/${encodeURIComponent(order.id)}/history`);
+  if (!Array.isArray(data?.items)) throw new Error("The order history service returned an invalid list.");
+  return data.items;
+}
+
+export async function loadAdminRelatedOrders(kind, id) {
+  if (!["users", "books"].includes(kind) || !id) throw new Error("Order history requires a user or book id.");
+  const { data } = await apiRequest(`/admin/${kind}/${encodeURIComponent(id)}/orders?perPage=20&page=1`);
+  if (!Array.isArray(data?.items)) throw new Error("The related order service returned an invalid list.");
+  return data.items;
+}
+
+export async function loadPrivatePrintOrderPhotos(orderId) {
+  const { data } = await apiRequest(`/admin/orders/print/${encodeURIComponent(orderId)}/photos`);
+  if (!Array.isArray(data?.items)) throw new Error("The private photo service returned an invalid response.");
+  return data.items;
+}
+
 export async function updateAdminUser(user) {
   return (await apiRequest(`/admin/users/${encodeURIComponent(user.id)}`, {
     method: "PATCH",
@@ -122,6 +152,14 @@ export async function updateAdminRefund(refundId, changes) {
   return (await apiRequest(`/admin/refunds/${encodeURIComponent(refundId)}`, {
     method: "PATCH",
     body: changes,
+  })).data;
+}
+
+export async function reviewAdminPayment(paymentId, status) {
+  if (!["approved", "rejected"].includes(status)) throw new Error("Choose approve or reject for the manual payment.");
+  return (await apiRequest(`/admin/payments/${encodeURIComponent(paymentId)}`, {
+    method: "PATCH",
+    body: { status },
   })).data;
 }
 

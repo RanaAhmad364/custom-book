@@ -1,26 +1,8 @@
-import { csrfHeaders, hasCsrfToken } from "../../services/csrf.js";
-import { API_PATH } from "../../services/apiClient.js";
+import { apiRequest } from "../../services/apiClient.js";
 
-const AUTH_PATH = `${API_PATH}/auth`;
-
-async function request(path, { method = "GET", body, retry = true } = {}) {
-  const response = await fetch(`${AUTH_PATH}${path}`, {
-    method,
-    credentials: "include",
-    headers: csrfHeaders(path === "/refresh" ? "refresh" : "access", body === undefined ? {} : { "Content-Type": "application/json" }),
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-
-  if (response.status === 401 && retry && path !== "/refresh" && path !== "/login" && hasCsrfToken("refresh")) {
-    const refreshed = await request("/refresh", { method: "POST", retry: false });
-    if (refreshed) return request(path, { method, body, retry: false });
-  }
-
-  const payload = response.status === 204 ? null : await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(payload?.error?.message || "The authentication request could not be completed.");
-  }
-  return payload;
+async function request(path, options = {}) {
+  const result = await apiRequest(`/auth${path}`, options);
+  return result.data;
 }
 
 export const authApi = {

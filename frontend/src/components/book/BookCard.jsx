@@ -1,6 +1,7 @@
 import { ArrowRight, Eye } from "lucide-react";
 import { Link } from "react-router-dom";
 import { SafeImage } from "../common/SafeImage.jsx";
+import { FavoriteButton } from "./FavoriteButton.jsx";
 import { formatCurrency } from "../../services/money.js";
 
 export function BookCard({ book, index = 0, onPreview, onCreate }) {
@@ -11,6 +12,7 @@ export function BookCard({ book, index = 0, onPreview, onCreate }) {
     >
       <div className="book-card-image">
         <SafeImage src={book.image} alt={book.imageAlt || book.title} />
+        <FavoriteButton book={book} />
         <button
           className="book-card-preview"
           type="button"
