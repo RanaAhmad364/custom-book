@@ -7,6 +7,7 @@ import { ManualPaymentPanel } from "../../../components/commerce/ManualPaymentPa
 import { canDownloadPdf, pdfOrderService } from "../../../services/pdfOrderService.js";
 import { projectService } from "../../../services/projectService.js";
 import { SafeImage } from "../../../components/common/SafeImage.jsx";
+import { ProjectPdfAccessAction } from "../../../features/pdfPurchase/ProjectPdfAccessAction.jsx";
 import "./PdfPurchase.css";
 
 function formatPrice(value, currency) {
@@ -130,7 +131,7 @@ export function PdfCheckout() {
   }
   return <PdfPage eyebrow="Secure checkout" title="Your PDF, ordered with care." description="The server determines the final charge and payment status. This browser cannot mark an order paid or unlock a file.">
     <LoadState loading={loading} error={error} onRetry={reload} />
-    {project && !loading && !error ? <><PdfProjectCard project={project} price={price} /><section className="pdf-checkout-card"><LockKeyhole size={20} /><div><h2>Payment verification</h2><p>Continue to create a payment order. Payment remains pending until verified by the backend; PDF generation starts only after that confirmation.</p><strong>{formatPrice(price.amount, price.currency)} due</strong><PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading} />{methodsError ? <p className="pdf-inline-error" role="alert">{methodsError}</p> : null}</div></section>{submitError ? <p className="pdf-inline-error" role="alert"><CircleAlert size={16} />{submitError}</p> : null}<div className="pdf-actions"><Link className="button button-outline" to={`/create/design/${projectId}/pdf/summary`}><ArrowLeft size={15} /> Back to summary</Link><button className="button button-dark" type="button" onClick={submitOrder} disabled={submitting || !price || methodsLoading || !selectedMethod}>{submitting ? <><LoaderCircle className="pdf-spin" size={16} /> Starting checkout…</> : <>Continue to payment <ArrowRight size={15} /></>}</button></div></> : null}
+    {project && !loading && !error ? <><PdfProjectCard project={project} price={price} />    <section className="pdf-checkout-card"><LockKeyhole size={20} /><div><h2>Payment verification</h2><p>Continue to create a payment order. Payment remains pending until verified by the backend; PDF generation starts only after that confirmation.</p><strong>{formatPrice(price.amount, price.currency)} due</strong><PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading} usdAmount={price.usdAmount} exchangeRate={price.exchangeRate} />{methodsError ? <p className="pdf-inline-error" role="alert">{methodsError}</p> : null}</div></section>{submitError ? <p className="pdf-inline-error" role="alert"><CircleAlert size={16} />{submitError}</p> : null}<div className="pdf-actions"><Link className="button button-outline" to={`/create/design/${projectId}/pdf/summary`}><ArrowLeft size={15} /> Back to summary</Link><button className="button button-dark" type="button" onClick={submitOrder} disabled={submitting || !price || methodsLoading || !selectedMethod}>{submitting ? <><LoaderCircle className="pdf-spin" size={16} /> Starting checkout…</> : <>Continue to payment <ArrowRight size={15} /></>}</button></div></> : null}
   </PdfPage>;
 }
 
@@ -143,6 +144,8 @@ export function PdfOrderProcessing() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState("");
   useEffect(() => {
     let active = true;
     let timer;
@@ -166,14 +169,30 @@ export function PdfOrderProcessing() {
   }, [orderId, refreshKey]);
 
   const downloadable = canDownloadPdf(order);
+  async function retryCheckout() {
+    setRetrying(true);
+    setRetryError("");
+    try {
+      const retried = await pdfOrderService.retryPayment(order.paymentId, order.paymentProvider);
+      if (retried.checkoutUrl) {
+        window.location.assign(retried.checkoutUrl);
+        return;
+      }
+      setOrder(retried);
+    } catch (failure) {
+      setRetryError(failure instanceof Error ? failure.message : "Checkout could not be retried.");
+    } finally {
+      setRetrying(false);
+    }
+  }
   return <PdfPage eyebrow="Order status" title={downloadable ? "Your PDF is ready." : "We’re checking on your book."} description="Payment and generation states below are read from the backend order record.">
     {loading && !order ? <div className="pdf-state"><LoaderCircle className="pdf-spin" size={20} /> Checking payment and generation status…</div> : null}
     {error ? <div className="pdf-state pdf-error" role="alert"><CircleAlert size={20} /><span>{error}</span><button className="button button-outline" type="button" onClick={() => { setLoading(true); setRefreshKey((value) => value + 1); }}><RefreshCw size={15} /> Check again</button></div> : null}
     {order ? <><div className="pdf-status-card"><div className="pdf-state-row"><span><span className="eyebrow">Payment</span><strong>{paymentLabels[order.paymentStatus]}</strong></span>{order.paymentStatus === "successful" ? <BadgeCheck /> : order.paymentStatus === "failed" ? <CircleAlert /> : <Clock3 />}</div><div className="pdf-state-row"><span><span className="eyebrow">PDF generation</span><strong>{generationLabels[order.generationStatus]}</strong></span>{order.generationStatus === "ready" ? <Check /> : order.generationStatus === "failed" ? <CircleAlert /> : <LoaderCircle className={order.generationStatus === "generating" || order.generationStatus === "queued" ? "pdf-spin" : ""} />}</div><div className="pdf-status-meta"><span>Order {order.id}</span>{order.amount !== null ? <strong>{formatPrice(order.amount, order.currency)}</strong> : null}</div></div>
       <ManualPaymentPanel order={order} onSubmitted={() => { setLoading(true); setRefreshKey((value) => value + 1); }} />
-      {order.paymentStatus === "failed" ? <p className="pdf-inline-error" role="alert">Payment was not confirmed. No PDF is available. <Link to={`/create/design/${encodeURIComponent(order.projectId)}/pdf/checkout`}>Try checkout again</Link>.</p> : null}
-      {order.generationStatus === "failed" && order.paymentStatus === "successful" ? <p className="pdf-inline-error" role="alert">Payment was confirmed, but PDF generation failed. Please contact support with this order number.</p> : null}
-      {downloadable ? <div className="pdf-actions"><Link className="button button-outline" to={`/pdf/downloads/${encodeURIComponent(order.id)}`}>View download details <ArrowRight size={15} /></Link><a className="button button-dark" href={order.downloadUrl} download><Download size={16} /> Download PDF</a></div> : <div className="pdf-actions"><button className="button button-outline" type="button" onClick={() => { setLoading(true); setRefreshKey((value) => value + 1); }}><RefreshCw size={15} /> Refresh status</button><Link className="pdf-text-link" to="/dashboard/downloads">PDF download history</Link></div>}
+      {order.paymentStatus === "failed" ? <div className="pdf-inline-error" role="alert"><span>Payment was not confirmed. No PDF is available.</span><button className="button button-outline" type="button" onClick={retryCheckout} disabled={retrying}>{retrying ? "Starting retry…" : "Retry payment"}</button>{retryError ? <span>{retryError}</span> : null}</div> : null}
+      {order.generationStatus === "failed" && order.paymentStatus === "successful" ? <p className="pdf-inline-error" role="alert">Payment is valid, but PDF generation failed. Use the retry option to generate it again without paying again.</p> : null}
+      {downloadable ? <div className="pdf-actions"><Link className="button button-outline" to={`/pdf/downloads/${encodeURIComponent(order.id)}`}>View download details <ArrowRight size={15} /></Link><ProjectPdfAccessAction projectId={order.projectId} className="button button-dark" /></div> : <div className="pdf-actions"><ProjectPdfAccessAction projectId={order.projectId} className="button button-outline" /><button className="button button-outline" type="button" onClick={() => { setLoading(true); setRefreshKey((value) => value + 1); }}><RefreshCw size={15} /> Refresh status</button><Link className="pdf-text-link" to="/dashboard/downloads">PDF download history</Link></div>}
     </> : null}
   </PdfPage>;
 }
@@ -200,28 +219,15 @@ export function PdfDownloadDetails() {
   const { downloadId } = useParams();
   const [order, setOrder] = useState(null);
   const [error, setError] = useState("");
-  const [downloading, setDownloading] = useState(false);
   useEffect(() => {
     let active = true;
     pdfOrderService.getOrder(downloadId).then((item) => { if (active) setOrder(item); }).catch((failure) => { if (active) setError(failure instanceof Error ? failure.message : "Download details could not be loaded."); });
     return () => { active = false; };
   }, [downloadId]);
   const downloadable = canDownloadPdf(order);
-  async function downloadPdf() {
-    if (!order?.downloadId) return;
-    setDownloading(true);
-    setError("");
-    try {
-      const download = await pdfOrderService.getDownload(order.downloadId);
-      window.location.assign(download.url);
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "The secure download could not be prepared.");
-      setDownloading(false);
-    }
-  }
   return <PdfPage eyebrow="Download details" title={order?.bookTitle || (order ? "Your MemoryBook PDF" : "Your PDF order")} description="File access is available only when the backend confirms both payment and generation.">
     {!order && !error ? <div className="pdf-state"><LoaderCircle className="pdf-spin" size={20} /> Loading secure download details…</div> : null}
     {error ? <div className="pdf-state pdf-error" role="alert"><CircleAlert size={20} />{error}</div> : null}
-    {order ? <><div className="pdf-project-card pdf-detail-card"><span className="pdf-project-symbol"><FileDown size={25} /></span><div className="pdf-project-info"><span className="eyebrow">Order {order.id}</span><h2>{order.bookTitle || "MemoryBook PDF"}</h2><p><BookOpen size={15} /> {order.pageCount ?? "—"} pages</p></div><strong className="pdf-price">{formatPrice(order.amount, order.currency)}</strong></div><div className="pdf-status-card"><div className="pdf-state-row"><span><span className="eyebrow">Payment</span><strong>{paymentLabels[order.paymentStatus]}</strong></span></div><div className="pdf-state-row"><span><span className="eyebrow">PDF</span><strong>{generationLabels[order.generationStatus]}</strong></span></div></div><div className="pdf-actions"><Link className="button button-outline" to="/dashboard/downloads"><ArrowLeft size={15} /> Download history</Link>{downloadable ? <button className="button button-dark" type="button" onClick={downloadPdf} disabled={downloading}>{downloading ? "Preparing secure download…" : <><Download size={16} /> Download PDF</>}</button> : null}</div></> : null}
+    {order ? <><div className="pdf-project-card pdf-detail-card"><span className="pdf-project-symbol"><FileDown size={25} /></span><div className="pdf-project-info"><span className="eyebrow">Order {order.id}</span><h2>{order.bookTitle || "MemoryBook PDF"}</h2><p><BookOpen size={15} /> {order.pageCount ?? "—"} pages</p></div><strong className="pdf-price">{formatPrice(order.amount, order.currency)}</strong></div><div className="pdf-status-card"><div className="pdf-state-row"><span><span className="eyebrow">Payment</span><strong>{paymentLabels[order.paymentStatus]}</strong></span></div><div className="pdf-state-row"><span><span className="eyebrow">PDF</span><strong>{generationLabels[order.generationStatus]}</strong></span></div></div><div className="pdf-actions"><Link className="button button-outline" to="/dashboard/downloads"><ArrowLeft size={15} /> Download history</Link><ProjectPdfAccessAction projectId={order.projectId} className={downloadable ? "button button-dark" : "button button-outline"} /></div></> : null}
   </PdfPage>;
 }

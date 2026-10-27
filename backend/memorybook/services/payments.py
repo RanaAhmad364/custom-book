@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -14,8 +14,11 @@ from memorybook.extensions import db
 from memorybook.integrations.payment_gateways import (
     JazzCashGateway,
     ManualPaymentGateway,
+    PayPalGateway,
     StripeGateway,
     available_payment_methods,
+    pkr_amount_to_usd,
+    pkr_to_usd_rate,
     provider_for,
 )
 from memorybook.models import (
@@ -24,6 +27,7 @@ from memorybook.models import (
     Payment,
     PaymentAttempt,
     PaymentWebhookEvent,
+    PdfJob,
     PdfOrder,
     PrintOrder,
     Refund,
@@ -38,19 +42,32 @@ def create_payment(
     idempotency_key: str,
     payment_method: str | None = None,
 ) -> dict:
-    provider = provider_for(order.currency, provider_name, payment_method)
     payment = db.session.scalar(
         select(Payment).where(
             (Payment.pdf_order_id == order.id) if kind == "pdf" else (Payment.print_order_id == order.id)
         )
     )
+    if payment is not None and payment.status == "successful":
+        return serialize_order(order, kind)
+    if isinstance(order, PrintOrder):
+        if order.status not in {"pending_payment", "order_placed"}:
+            raise ConflictError("This print order is no longer awaiting payment.")
+        if _print_order_payment_expired(order):
+            raise ConflictError("This print order has expired and can no longer be paid.")
+    provider = provider_for(order.currency, provider_name, payment_method)
     if payment is not None:
-        if payment.status == "successful":
-            return serialize_order(order, kind)
         if payment.status not in {"failed", "pending"}:
             raise ConflictError("This order already has a completed payment.")
         return serialize_order(order, kind)
 
+    pkr_amount = order.total_amount if order.currency.upper() == "PKR" else None
+    rate = pkr_to_usd_rate() if provider.name == "paypal" and order.currency.upper() == "PKR" else None
+    usd_amount = (
+        pkr_amount_to_usd(order.total_amount, rate)
+        if rate is not None
+        else order.total_amount if provider.name == "paypal" and order.currency.upper() == "USD"
+        else None
+    )
     payment = Payment(
         user_id=order.user_id,
         pdf_order_id=order.id if kind == "pdf" else None,
@@ -65,6 +82,9 @@ def create_payment(
         status="pending",
         amount=order.total_amount,
         currency=order.currency,
+        pkr_amount=pkr_amount,
+        usd_amount=usd_amount,
+        exchange_rate=rate,
         idempotency_key=idempotency_key,
     )
     db.session.add(payment)
@@ -84,6 +104,12 @@ def create_payment(
 def retry_payment(payment: Payment, idempotency_key: str, provider_name: str | None = None) -> dict:
     if provider_name is not None and not isinstance(provider_name, str):
         raise ValidationError("Payment provider must be a string.", {"provider": "invalid"})
+    if payment.print_order_id:
+        order = db.session.get(PrintOrder, payment.print_order_id)
+        if order is None or order.status not in {"pending_payment", "order_placed"}:
+            raise ConflictError("This print order is no longer awaiting payment.")
+        if _print_order_payment_expired(order):
+            raise ConflictError("This print order has expired and can no longer be paid.")
     previous = db.session.scalar(
         select(PaymentAttempt).where(
             PaymentAttempt.payment_id == payment.id,
@@ -152,10 +178,18 @@ def _start_provider_checkout(payment, attempt, order, kind, provider) -> dict:
 
 
 def submit_manual_payment_reference(payment: Payment, user_id: str, reference: str) -> dict:
+    if not _app().config.get("MANUAL_PAYMENTS_ENABLED", False):
+        raise ServiceUnavailableError("Manual payments are disabled for this deployment.")
     if payment.user_id != user_id:
         raise NotFound("Payment was not found.")
     if payment.provider != "manual" or payment.status != "pending":
         raise ConflictError("This payment is not awaiting manual confirmation.")
+    if payment.print_order_id:
+        order = db.session.get(PrintOrder, payment.print_order_id)
+        if order is None or order.status not in {"pending_payment", "order_placed"}:
+            raise ConflictError("This print order is no longer awaiting payment.")
+        if _print_order_payment_expired(order):
+            raise ConflictError("This print order has expired and can no longer be paid.")
     normalized = reference.strip()
     if not normalized or len(normalized) > 160:
         raise ValidationError("Enter a valid transfer reference.", {"reference": "invalid"})
@@ -174,6 +208,8 @@ def submit_manual_payment_reference(payment: Payment, user_id: str, reference: s
 
 
 def review_manual_payment(payment_id: str, *, approved: bool, actor_id: str) -> dict:
+    if not _app().config.get("MANUAL_PAYMENTS_ENABLED", False):
+        raise ServiceUnavailableError("Manual payments are disabled for this deployment.")
     payment = db.session.scalar(
         select(Payment).where(Payment.id == payment_id).with_for_update()
     )
@@ -208,13 +244,16 @@ def review_manual_payment(payment_id: str, *, approved: bool, actor_id: str) -> 
         attempt.failure_code = "manual_payment_rejected"
         attempt.failure_message = "The administrator could not verify the submitted transfer."
     db.session.commit()
-    if approved and payment.pdf_order_id:
-        _queue_pdf_generation(payment)
+    if approved:
+        if payment.pdf_order_id:
+            _queue_pdf_generation(payment)
+        elif payment.print_order_id:
+            _handle_confirmed_print_payment(payment)
     return serialize_transaction(payment)
 
 
 def process_stripe_event(raw_body: bytes, signature: str | None) -> dict:
-    event = StripeGateway().verify_event(raw_body, signature)
+    event = StripeGateway().handle_webhook(raw_body, {"Stripe-Signature": signature or ""})
     event_data = event.get("data")
     obj = event_data.get("object") if isinstance(event_data, dict) else None
     if not isinstance(obj, dict):
@@ -246,6 +285,138 @@ def process_stripe_event(raw_body: bytes, signature: str | None) -> dict:
         currency=currency,
         provider_payload=obj,
     )
+
+
+def process_paypal_event(raw_body: bytes, headers: dict[str, str]) -> dict:
+    gateway = PayPalGateway()
+    event = gateway.handle_webhook(raw_body, headers)
+    event_type = event["event_type"]
+    if _webhook_event_processed("paypal", event["id"]):
+        return {"received": True, "duplicate": True}
+    resource = event.get("resource")
+    if not isinstance(resource, dict):
+        raise ValidationError("PayPal webhook event does not contain a payment resource.")
+
+    order_id = resource.get("id")
+    if event_type.startswith("PAYMENT.CAPTURE."):
+        related = (resource.get("supplementary_data") or {}).get("related_ids", {})
+        order_id = related.get("order_id") if isinstance(related, dict) else None
+    if not isinstance(order_id, str):
+        raise ValidationError("PayPal webhook event does not identify a checkout order.")
+
+    payment = _find_payment("paypal", None, order_id)
+    if payment is None:
+        raise ValidationError("PayPal webhook event does not match a pending payment.")
+    if event_type == "CHECKOUT.ORDER.APPROVED":
+        attempt = db.session.scalar(
+            select(PaymentAttempt)
+            .where(PaymentAttempt.payment_id == payment.id, PaymentAttempt.provider_reference == order_id)
+            .order_by(PaymentAttempt.attempt_number.desc())
+            .with_for_update()
+        )
+        if payment.status == "successful" or attempt is None or attempt.status != "pending":
+            return {"received": True, "ignored": True}
+        custom_id = _paypal_payment_id(resource)
+        if custom_id and custom_id != payment.id:
+            raise ValidationError("PayPal checkout order reference does not match the payment.")
+        captured = gateway.capture_order(order_id, order_id)
+        purchase_units = captured.get("purchase_units")
+        capture = (
+            purchase_units[0].get("payments", {}).get("captures", [None])[0]
+            if isinstance(purchase_units, list) and purchase_units and isinstance(purchase_units[0], dict)
+            else None
+        )
+        if not isinstance(capture, dict):
+            raise ValidationError("PayPal capture response is missing capture details.")
+        capture_amount, capture_currency = _paypal_capture_amount(capture)
+        if captured.get("status") != "COMPLETED" or not capture_amount or not capture_currency:
+            raise ValidationError("PayPal did not complete the payment capture.")
+        capture_id = capture.get("id")
+        if not isinstance(capture_id, str):
+            raise ValidationError("PayPal capture response is missing its reference.")
+        return _process_verified_event(
+            provider="paypal",
+            event_id=event["id"],
+            event_type=event_type,
+            safe_payload={"id": event["id"], "type": event_type, "orderId": order_id},
+            payment_id=payment.id,
+            provider_reference=order_id,
+            success=True,
+            failure=False,
+            refund_event=False,
+            amount=capture_amount,
+            currency=capture_currency,
+            provider_payload={},
+            capture_reference=capture_id,
+        )
+
+    if event_type == "PAYMENT.CAPTURE.COMPLETED":
+        amount, currency = _paypal_capture_amount(resource)
+        capture_id = resource.get("id")
+        if not isinstance(capture_id, str):
+            raise ValidationError("PayPal capture webhook is missing its reference.")
+        return _process_verified_event(
+            provider="paypal",
+            event_id=event["id"],
+            event_type=event_type,
+            safe_payload={"id": event["id"], "type": event_type, "orderId": order_id},
+            payment_id=payment.id,
+            provider_reference=order_id,
+            success=True,
+            failure=False,
+            refund_event=False,
+            amount=amount,
+            currency=currency,
+            provider_payload={},
+            capture_reference=capture_id,
+        )
+
+    failed_events = {
+        "CHECKOUT.ORDER.VOIDED",
+        "CHECKOUT.ORDER.EXPIRED",
+        "PAYMENT.CAPTURE.DENIED",
+    }
+    if event_type in failed_events:
+        return _process_verified_event(
+            provider="paypal",
+            event_id=event["id"],
+            event_type=event_type,
+            safe_payload={"id": event["id"], "type": event_type, "orderId": order_id},
+            payment_id=payment.id,
+            provider_reference=order_id,
+            success=False,
+            failure=True,
+            refund_event=False,
+            amount=None,
+            currency="USD",
+            provider_payload={},
+        )
+    if event_type in {"PAYMENT.CAPTURE.REFUNDED", "PAYMENT.CAPTURE.REVERSED"}:
+        return _process_verified_event(
+            provider="paypal",
+            event_id=event["id"],
+            event_type=event_type,
+            safe_payload={"id": event["id"], "type": event_type, "orderId": order_id},
+            payment_id=payment.id,
+            provider_reference=order_id,
+            success=False,
+            failure=False,
+            refund_event=True,
+            amount=None,
+            currency="USD",
+            provider_payload=resource,
+        )
+    return {"received": True, "ignored": True}
+
+
+def _webhook_event_processed(provider: str, event_id: str) -> bool:
+    return db.session.scalar(
+        select(PaymentWebhookEvent.id).where(
+            PaymentWebhookEvent.provider == provider,
+            PaymentWebhookEvent.provider_event_id == event_id,
+            PaymentWebhookEvent.processed_at.is_not(None),
+        )
+    ) is not None
 
 
 def process_jazzcash_callback(payload: dict[str, str]) -> dict:
@@ -287,6 +458,7 @@ def _process_verified_event(
     amount: Decimal | None,
     currency: str,
     provider_payload: dict,
+    capture_reference: str | None = None,
 ) -> dict:
     if len(event_id) > 200:
         raise ValidationError("Payment event identifier is invalid.")
@@ -312,18 +484,29 @@ def _process_verified_event(
             db.session.rollback()
             return {"received": True, "duplicate": True}
     payment = _find_payment(provider, payment_id, provider_reference)
+    was_successful = payment.status == "successful" if payment is not None else False
     if refund_event:
         _apply_refund_event(payment, provider_payload)
     elif payment is None:
         raise ValidationError("Payment provider event does not match a pending payment.")
     elif success or failure:
-        if amount is None or amount != payment.amount or currency != payment.currency.upper():
+        expected_amount = payment.usd_amount if provider == "paypal" else payment.amount
+        expected_currency = "USD" if provider == "paypal" else payment.currency.upper()
+        if success and (amount is None or amount != expected_amount or currency != expected_currency):
             raise ValidationError("Payment provider amount or currency does not match the order.")
-        _apply_payment_result(payment, success=success, provider_reference=provider_reference)
+        _apply_payment_result(
+            payment,
+            success=success,
+            provider_reference=provider_reference,
+            capture_reference=capture_reference,
+        )
     event.processed_at = datetime.now(UTC)
     db.session.commit()
-    if success and payment is not None and payment.pdf_order_id:
-        _queue_pdf_generation(payment)
+    if success and payment is not None and not was_successful:
+        if payment.pdf_order_id:
+            _queue_pdf_generation(payment)
+        elif payment.print_order_id:
+            _handle_confirmed_print_payment(payment)
     return {"received": True, "processed": True}
 
 
@@ -333,6 +516,7 @@ def _apply_payment_result(
     success: bool,
     provider_reference: str | None,
     changed_by_user_id: str | None = None,
+    capture_reference: str | None = None,
 ) -> None:
     if payment.status in {"refunded", "partially_refunded"}:
         return
@@ -341,6 +525,14 @@ def _apply_payment_result(
     if payment.status == "failed" and not success:
         return
     order = _payment_order(payment)
+    late_print_payment = bool(
+        success
+        and payment.print_order_id
+        and (
+            order.status not in {"pending_payment", "order_placed"}
+            or _print_order_payment_expired(order)
+        )
+    )
     attempt_query = select(PaymentAttempt).where(PaymentAttempt.payment_id == payment.id)
     if provider_reference:
         attempt_query = attempt_query.where(PaymentAttempt.provider_reference == provider_reference)
@@ -356,6 +548,8 @@ def _apply_payment_result(
         payment.status = "successful"
         if provider_reference:
             payment.provider_payment_id = provider_reference
+        if capture_reference:
+            payment.provider_capture_id = capture_reference
         if attempt:
             attempt.status = "successful"
             attempt.provider_reference = provider_reference or attempt.provider_reference
@@ -364,6 +558,30 @@ def _apply_payment_result(
             .where(PaymentAttempt.payment_id == payment.id, PaymentAttempt.status == "pending")
             .values(status="cancelled")
         )
+        if late_print_payment:
+            if order.status not in {"cancelled", "refunded"}:
+                order.status = "cancelled"
+                db.session.add(OrderStatusHistory(
+                    print_order_id=order.id,
+                    status="cancelled",
+                    note="A verified payment arrived after this print order had expired.",
+                    changed_by_user_id=changed_by_user_id,
+                ))
+            db.session.add(OrderStatusHistory(
+                print_order_id=order.id,
+                status="payment_after_cancellation",
+                note="A verified payment was captured after the order could no longer be fulfilled; a refund was requested.",
+                changed_by_user_id=changed_by_user_id,
+            ))
+            queue_order_event(
+                order.user_id,
+                f"late_print_payment:{payment.id}",
+                "payment",
+                "Refund requested for late payment",
+                f"Payment for cancelled print order {order.order_number} arrived after its payment window. A refund is being processed.",
+                "/dashboard/orders",
+            )
+            return
         order.paid_at = datetime.now(UTC)
         old_status = order.status
         order.status = "paid" if payment.pdf_order_id else "payment_confirmed"
@@ -372,13 +590,15 @@ def _apply_payment_result(
             if payment.provider == "manual"
             else "Payment verified by payment provider."
         )
-        if payment.print_order_id and old_status != order.status:
-            db.session.add(OrderStatusHistory(
-                print_order_id=order.id,
-                status="payment_confirmed",
-                note=verification_note,
-                changed_by_user_id=changed_by_user_id,
-            ))
+        if payment.print_order_id:
+            if old_status != order.status:
+                db.session.add(OrderStatusHistory(
+                    print_order_id=order.id,
+                    status="payment_confirmed",
+                    note=verification_note,
+                    changed_by_user_id=changed_by_user_id,
+                ))
+            _create_print_pdf_entitlement(order)
         elif payment.pdf_order_id and old_status != order.status:
             db.session.add(OrderStatusHistory(
                 pdf_order_id=order.id,
@@ -390,9 +610,9 @@ def _apply_payment_result(
             order.user_id,
             f"payment_confirmed:{payment.id}",
             "payment",
-            "Payment confirmed",
-            f"Payment for order {order.order_number} has been confirmed.",
-            f"/dashboard/orders",
+            "Payment received",
+            f"We received your payment for order {order.order_number}.",
+            "/dashboard/orders",
         )
         if payment.pdf_order_id:
             queue_order_event(
@@ -446,7 +666,7 @@ def _queue_pdf_generation(payment: Payment) -> None:
     order = db.session.get(PdfOrder, payment.pdf_order_id)
     if order is None or order.paid_at is None:
         return
-    job, dispatch = queue_pdf_generation(order, "digital")
+    job, dispatch = queue_pdf_generation(order, "digital", refresh_current_document=True)
     if dispatch:
         current_app = _app()
         try:
@@ -462,6 +682,123 @@ def _queue_pdf_generation(payment: Payment) -> None:
                 job.error_code = "queue_unavailable"
                 job.error_message = "The PDF worker could not be reached. Please retry."
                 db.session.commit()
+
+
+def _create_print_pdf_entitlement(print_order: PrintOrder) -> PdfOrder:
+    order = db.session.scalar(
+        select(PdfOrder).where(
+            PdfOrder.user_id == print_order.user_id,
+            PdfOrder.project_id == print_order.project_id,
+            PdfOrder.idempotency_key == f"print-free:{print_order.id}",
+        )
+    )
+    if order is not None:
+        return order
+    snapshot = print_order.price_snapshot or {}
+    paid_at = print_order.paid_at or datetime.now(UTC)
+    order = PdfOrder(
+        order_number=f"FREE-{print_order.order_number}",
+        user_id=print_order.user_id,
+        project_id=print_order.project_id,
+        project_revision_id=print_order.project_revision_id,
+        status="paid",
+        currency=print_order.currency,
+        service_price=Decimal("0.00"),
+        discount_amount=Decimal("0.00"),
+        tax_amount=Decimal("0.00"),
+        total_amount=Decimal("0.00"),
+        price_snapshot={
+            "description": "Included with print order",
+            "pdfProfiles": ["digital", "print"],
+            "printPdfIncluded": True,
+            "printSpecification": {
+                "bleedInches": _app().config.get("PDF_PRINT_BLEED_INCHES", 0.125),
+                "safeMarginInches": _app().config.get("PDF_PRINT_SAFE_MARGIN_INCHES", 0.25),
+                "tier": snapshot.get("tierId"),
+                "size": snapshot.get("sizeName"),
+                "cover": snapshot.get("coverName"),
+                "paper": snapshot.get("paperName"),
+            },
+            "printOrderId": print_order.id,
+            "projectRevisionId": print_order.project_revision_id,
+            "taxApplicable": False,
+        },
+        page_count=int(snapshot.get("pageCount", 0)),
+        paid_at=paid_at,
+        idempotency_key=f"print-free:{print_order.id}",
+    )
+    db.session.add(order)
+    db.session.flush()
+    db.session.add(Payment(
+        user_id=print_order.user_id,
+        pdf_order_id=order.id,
+        purpose="print_order_pdf",
+        provider="complimentary",
+        status="successful",
+        amount=Decimal("0.00"),
+        currency=print_order.currency,
+        idempotency_key=f"print-free:{print_order.id}",
+    ))
+    db.session.add(OrderStatusHistory(
+        pdf_order_id=order.id,
+        status="paid",
+        note=f"Complimentary PDF included with print order {print_order.order_number}.",
+    ))
+    return order
+
+
+def _queue_print_order_pdfs(payment: Payment) -> None:
+    from memorybook.services.pdf_generation import queue_pdf_generation
+    from memorybook.tasks.dispatch import dispatch_pdf_generation
+
+    print_order = db.session.get(PrintOrder, payment.print_order_id)
+    if print_order is None or print_order.paid_at is None:
+        return
+    pdf_order = db.session.scalar(
+        select(PdfOrder).where(PdfOrder.idempotency_key == f"print-free:{print_order.id}")
+    )
+    if pdf_order is None:
+        raise RuntimeError("The complimentary PDF entitlement was not created for the paid print order.")
+    for profile in ("digital", "print"):
+        job, dispatch = queue_pdf_generation(pdf_order, profile)
+        if dispatch:
+            try:
+                dispatch_pdf_generation(job.id)
+            except Exception:
+                _app().logger.exception(
+                    "Paid print order PDF generation could not be dispatched for %s profile.",
+                    profile,
+                )
+
+
+def _handle_confirmed_print_payment(payment: Payment) -> None:
+    order = db.session.get(PrintOrder, payment.print_order_id)
+    if order is None:
+        return
+    if order.status in {"cancelled", "refunded"}:
+        try:
+            request_refund(
+                payment.id,
+                payment.amount,
+                "Verified payment arrived after the print order expired or was cancelled.",
+                f"late-print-order:{payment.id}",
+            )
+        except Exception:
+            _app().logger.exception(
+                "Automatic refund could not be completed for late print payment %s.",
+                payment.id,
+            )
+        return
+    if order.status == "payment_confirmed":
+        _queue_print_order_pdfs(payment)
+
+
+def _print_order_payment_expired(order: PrintOrder) -> bool:
+    expiry_hours = int(_app().config.get("PRINT_ORDER_PAYMENT_EXPIRY_HOURS", 24))
+    created_at = order.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+    return datetime.now(UTC) >= created_at + timedelta(hours=expiry_hours)
 
 
 def request_refund(payment_id: str, amount: Decimal, reason: str | None, key: str) -> dict:
@@ -501,11 +838,11 @@ def request_refund(payment_id: str, amount: Decimal, reason: str | None, key: st
         )
         db.session.add(refund)
         db.session.commit()
-    if payment.provider != "stripe":
+    if payment.provider not in {"stripe", "paypal"}:
         refund.status = "manual_required"
         db.session.commit()
         return serialize_refund(refund)
-    gateway = StripeGateway()
+    gateway = StripeGateway() if payment.provider == "stripe" else PayPalGateway()
     refund_id, status = gateway.refund(payment, amount, f"{payment.id}:{key}")
     refund.provider_refund_id = refund_id or None
     refund.status = status
@@ -566,13 +903,14 @@ def approve_refund_request(refund_id: str) -> dict:
     payment = db.session.get(Payment, refund.payment_id)
     if payment is None:
         raise NotFound("Payment was not found.")
-    if payment.provider != "stripe":
+    if payment.provider not in {"stripe", "paypal"}:
         refund.status = "manual_required"
         db.session.commit()
         return serialize_refund(refund)
     refund.status = "pending"
     db.session.commit()
-    provider_reference, status = StripeGateway().refund(payment, refund.amount, f"refund-request-{refund.id}")
+    gateway = StripeGateway() if payment.provider == "stripe" else PayPalGateway()
+    provider_reference, status = gateway.refund(payment, refund.amount, f"refund-request-{refund.id}")
     refund.provider_refund_id = provider_reference
     refund.status = status
     if status == "succeeded":
@@ -645,7 +983,13 @@ def _apply_refund_event(payment: Payment | None, payload: dict) -> None:
     if refund is None:
         return
     currency = str(payload.get("currency") or "").upper()
-    amount = _stripe_amount(payload.get("amount"), currency)
+    if payment and payment.provider == "paypal":
+        amount = _paypal_capture_amount(payload)[0]
+        if amount is not None and payment.exchange_rate:
+            amount = (amount / Decimal(payment.exchange_rate)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        currency = "PKR"
+    else:
+        amount = _stripe_amount(payload.get("amount"), currency)
     if amount != refund.amount or currency != refund.currency.upper():
         raise ValidationError("Payment provider refund amount or currency does not match the refund.")
     status = payload.get("status")
@@ -761,6 +1105,9 @@ def serialize_order(
         "checkoutUrl": checkout_url,
         "amount": str(order.total_amount),
         "currency": order.currency,
+        "pkrAmount": str(payment.pkr_amount) if payment and payment.pkr_amount is not None else None,
+        "usdAmount": str(payment.usd_amount) if payment and payment.usd_amount is not None else None,
+        "exchangeRate": str(payment.exchange_rate) if payment and payment.exchange_rate is not None else None,
         "status": order.status,
         "paidAt": order.paid_at.isoformat() if order.paid_at else None,
         "createdAt": order.created_at.isoformat(),
@@ -780,8 +1127,6 @@ def serialize_order(
             else None
         )
     if kind == "pdf":
-        from memorybook.models import PdfJob
-
         job = db.session.scalar(
             select(PdfJob).where(PdfJob.order_id == order.id, PdfJob.generation_profile == "digital")
         )
@@ -789,6 +1134,10 @@ def serialize_order(
             "pageCount": order.page_count,
             "generationStatus": job.status if job else "not_started",
             "title": _document_title(order.project_revision_id),
+            "generationError": {
+                "code": job.error_code,
+                "message": job.error_message,
+            } if job and job.status == "failed" else None,
         })
         if job and job.status == "ready" and payment and payment.status == "successful":
             entitlement_id = db.session.scalar(
@@ -804,8 +1153,41 @@ def serialize_order(
                 payload["downloadId"] = entitlement_id
     else:
         snapshot = order.price_snapshot or {}
+        expires_at = order.created_at + timedelta(
+            hours=int(_app().config.get("PRINT_ORDER_PAYMENT_EXPIRY_HOURS", 24))
+        )
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        print_pdf_order = db.session.scalar(
+            select(PdfOrder).where(PdfOrder.idempotency_key == f"print-free:{order.id}")
+        )
+        print_pdf_jobs = {}
+        if print_pdf_order:
+            payload["printPdfOrderId"] = print_pdf_order.id
+            for profile in ("digital", "print"):
+                job = db.session.scalar(
+                    select(PdfJob).where(
+                        PdfJob.order_id == print_pdf_order.id,
+                        PdfJob.generation_profile == profile,
+                    )
+                )
+                print_pdf_jobs[profile] = {
+                    "status": job.status if job else "not_started",
+                    "error": {
+                        "code": job.error_code,
+                        "message": job.error_message,
+                    } if job and job.status == "failed" else None,
+                }
         payload.update({
             "productionStatus": order.status,
+            "pageCount": snapshot.get("pageCount"),
+            "paymentExpiresAt": expires_at.isoformat(),
+            "paymentExpired": (
+                payment is not None
+                and payment.status == "pending"
+                and datetime.now(UTC) >= expires_at
+            ),
+            "printPdf": print_pdf_jobs,
             "quote": {
                 "id": snapshot.get("quoteId", ""),
                 "bookPrice": str(order.book_amount),
@@ -857,6 +1239,10 @@ def serialize_transaction(payment: Payment) -> dict:
         "status": payment.status,
         "amount": str(payment.amount),
         "currency": payment.currency,
+        "pkrAmount": str(payment.pkr_amount) if payment.pkr_amount is not None else None,
+        "usdAmount": str(payment.usd_amount) if payment.usd_amount is not None else None,
+        "exchangeRate": str(payment.exchange_rate) if payment.exchange_rate is not None else None,
+        "providerCaptureId": payment.provider_capture_id,
         "orderId": payment.pdf_order_id or payment.print_order_id,
         "attempts": [{
             "number": item.attempt_number,
@@ -895,6 +1281,27 @@ def _minor_to_decimal(value) -> Decimal | None:
         return (Decimal(str(value)) / Decimal(100)).quantize(Decimal("0.01"))
     except (InvalidOperation, ValueError, TypeError):
         return None
+
+
+def _paypal_payment_id(resource: dict) -> str | None:
+    purchase_units = resource.get("purchase_units")
+    if not isinstance(purchase_units, list) or not purchase_units or not isinstance(purchase_units[0], dict):
+        return None
+    custom_id = purchase_units[0].get("custom_id")
+    return custom_id if isinstance(custom_id, str) else None
+
+
+def _paypal_capture_amount(resource: dict) -> tuple[Decimal | None, str]:
+    amount = resource.get("amount")
+    if not isinstance(amount, dict):
+        return None, ""
+    try:
+        parsed = Decimal(str(amount.get("value")))
+    except (InvalidOperation, ValueError, TypeError):
+        return None, ""
+    if not parsed.is_finite() or parsed < 0:
+        return None, ""
+    return parsed.quantize(Decimal("0.01")), str(amount.get("currency_code") or "").upper()
 
 
 def _app():

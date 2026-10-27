@@ -9,11 +9,13 @@ from memorybook.permissions import active_user_required, get_authenticated_user
 from memorybook.services.orders import (
     create_print_order,
     create_print_quote,
+    cancel_unpaid_print_order,
     get_user_order,
     list_user_orders,
     request_order_cancellation,
 )
 from memorybook.services.payments import serialize_transaction
+from memorybook.services.pdf_generation import retry_print_order_pdf
 
 print_blueprint = Blueprint("printing_contract", __name__)
 
@@ -70,6 +72,20 @@ def get_order(order_id: str):
     if payment:
         result["payment"] = serialize_transaction(payment)
     return jsonify(result)
+
+
+@print_blueprint.post("/orders/<order_id>/cancel")
+@active_user_required
+@limiter.limit("5 per minute")
+def cancel_order(order_id: str):
+    return jsonify(cancel_unpaid_print_order(order_id, get_authenticated_user().id))
+
+
+@print_blueprint.post("/orders/<order_id>/retry-pdf")
+@active_user_required
+@limiter.limit("5 per minute")
+def retry_pdf(order_id: str):
+    return jsonify({"job": retry_print_order_pdf(order_id, get_authenticated_user().id)}), 202
 
 
 @print_blueprint.post("/orders/<order_id>/cancellation-requests")

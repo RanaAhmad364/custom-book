@@ -1,6 +1,6 @@
 import "./PaymentMethodSelect.css";
 
-export function PaymentMethodSelect({ methods, value, onChange, loading = false }) {
+export function PaymentMethodSelect({ methods, value, onChange, loading = false, usdAmount, exchangeRate }) {
   const selected = methods.find((method) => method.id === value);
   return <div className="payment-method-select">
     <label htmlFor="payment-method">Payment method</label>
@@ -17,5 +17,11 @@ export function PaymentMethodSelect({ methods, value, onChange, loading = false 
         <p key={key}><strong>{key.replaceAll(/([A-Z])/g, " $1").replace(/^./, (letter) => letter.toUpperCase())}:</strong> {detail}</p>
       ))}
     </div> : null}
+    {selected?.provider === "paypal" && Number.isFinite(Number(usdAmount)) && exchangeRate
+      ? <p className="payment-method-instructions" role="note">
+        PayPal will charge {new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(Number(usdAmount))}
+        {" "}at {new Intl.NumberFormat(undefined, { maximumSignificantDigits: 8 }).format(Number(exchangeRate))} USD per PKR.
+      </p>
+      : null}
   </div>;
 }

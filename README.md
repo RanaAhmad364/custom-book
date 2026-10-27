@@ -229,8 +229,10 @@ intentionally identical for existing and unknown email addresses.
 | `PUBLIC_APP_URL` | Frontend origin used to compose password-reset links. |
 | `PUBLIC_API_URL` | API origin used to create absolute service links. |
 | `PAYMENT_DEFAULT_CURRENCY` | Currency policy for payment checkout (default `PKR`). |
-| `PAYMENT_PRIMARY_GATEWAY` | Preferred gateway (`manual` by default); manual transfer is always available for PKR. |
-| `MANUAL_BANK_NAME`, `MANUAL_BANK_ACCOUNT_TITLE`, `MANUAL_BANK_ACCOUNT_NUMBER`, `MANUAL_JAZZCASH_NUMBER`, `MANUAL_EASYPAISA_NUMBER` | Shop-owned transfer destinations shown during manual checkout. Configure before accepting customer payments. |
+| `PAYMENT_PRIMARY_GATEWAY` | Preferred gateway (`paypal` by default). |
+| `PAYPAL_MODE`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID` | PayPal Orders API v2 settings. Credentials and webhook ID are server-only. Configure sandbox first, then live. |
+| `PAYPAL_PKR_TO_USD_RATE` | Initial USD-per-PKR rate. Admins can update the live value in Settings using key `paypal_pkr_to_usd_rate` and value `{"rate":"0.0036"}`. Each payment snapshots its rate and both currency amounts. |
+| `MANUAL_PAYMENTS_ENABLED`, `MANUAL_BANK_NAME`, `MANUAL_BANK_ACCOUNT_TITLE`, `MANUAL_BANK_ACCOUNT_NUMBER`, `MANUAL_JAZZCASH_NUMBER`, `MANUAL_EASYPAISA_NUMBER` | Manual transfer is disabled unless `MANUAL_PAYMENTS_ENABLED=true`; configured transfer destinations are only shown when enabled. |
 | `STRIPE_ENABLED`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Explicit Stripe enablement and server-only API/webhook secrets. Do not expose either secret to Vite. |
 | `PAYFAST_ENABLED`, `PAYFAST_MODE`, `PAYFAST_MERCHANT_ID`, `PAYFAST_MERCHANT_SECRET`, `PAYFAST_API_BASE_URL`, `PAYFAST_CONTRACT_VERIFIED`, `PAYFAST_PAYMENT_METHODS` | Illustrative disabled-by-default PayFast settings; no adapter is active until merchant-specific checkout/callback details are verified and implemented. |
 | `JAZZCASH_ENABLED`, `JAZZCASH_MODE`, `JAZZCASH_CHECKOUT_CONTRACT_VERIFIED`, `JAZZCASH_CALLBACK_CONTRACT_VERIFIED`, `JAZZCASH_API_URL`, `JAZZCASH_MERCHANT_ID`, `JAZZCASH_PASSWORD`, `JAZZCASH_INTEGRITY_SALT`, `JAZZCASH_PAYMENT_METHODS` | Merchant-specific configuration only; JazzCash is not advertised because server-side status inquiry is not implemented. |
@@ -257,15 +259,23 @@ Catalog and project services now consume the versioned APIs; browser local
 storage is retained only for editor recovery copies. The existing frontend
 `/api/print/*` and `/api/pdf/*` paths remain mounted as compatibility routes.
 PDF and print checkout uses server-calculated prices and selected methods from
-`GET /api/v1/payments/methods?currency=PKR`. Manual bank transfer, JazzCash, and
-Easypaisa instructions are the default; customers submit the transaction
-reference at `/api/v1/payments/{paymentId}/manual-confirmation`, and an admin
-must approve it in Admin → Payments before the order becomes paid. Configure
-the `MANUAL_*` destinations above; blank destinations instruct customers to
-contact support. Stripe remains optional (`STRIPE_ENABLED=true`) and requires
+`GET /api/v1/payments/methods?currency=PKR`. PayPal checkout is the default
+automatic provider when its server credentials and webhook ID are configured.
+The backend converts the authoritative PKR order total to USD using the current
+admin-managed rate; the customer sees both amounts before redirecting to
+PayPal. A signed PayPal webhook is verified through the PayPal API, and the
+backend captures approved orders and checks the capture amount, currency, and
+order reference before marking an order paid. Configure the webhook URL as
+`https://<api-host>/api/v1/payments/webhooks/paypal` and subscribe to
+`CHECKOUT.ORDER.APPROVED`, `CHECKOUT.ORDER.VOIDED`, `CHECKOUT.ORDER.EXPIRED`,
+`PAYMENT.CAPTURE.COMPLETED`, and `PAYMENT.CAPTURE.DENIED`. Browser return URLs
+only show the order status page, which polls the API. Manual transfer is an
+opt-in fallback (`MANUAL_PAYMENTS_ENABLED=true`) and still requires admin
+approval. Stripe remains optional (`STRIPE_ENABLED=true`) and requires
 server-side secret and webhook credentials. PayFast, JazzCash API checkout,
 and Easypaisa API checkout remain unavailable until their merchant contracts
-are implemented and verified. Print production advances through
+are implemented and verified. Failed PayPal payments can be retried against
+the same order and payment record. Print production advances through
 payment-confirmed → processing → printed → shipped (tracking required) →
 delivered; every transition is recorded and notifies the customer.
 

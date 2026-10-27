@@ -1,7 +1,11 @@
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { normalizePrintOrder, normalizePrintQuote } from "../../services/printOrderService.js";
+import { normalizePrintOrder, normalizePrintQuote, printOrderService } from "../../services/printOrderService.js";
 
+const originalFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
 const validQuote = {
   id: "quote-1",
   currency: "USD",
@@ -18,11 +22,17 @@ const validQuote = {
 };
 
 test("print quote uses validated server-calculated line items and dates", () => {
-  const quote = normalizePrintQuote(validQuote);
+  const quote = normalizePrintQuote({
+    ...validQuote,
+    usdAmount: "10.36",
+    exchangeRate: "0.0037",
+  });
   assert.equal(quote.total, 47.52);
   assert.equal(quote.currency, "USD");
   assert.equal(quote.productionEstimate, "2026-11-02");
   assert.equal(quote.taxApplicable, true);
+  assert.equal(quote.usdAmount, 10.36);
+  assert.equal(quote.exchangeRate, "0.0037");
 });
 
 test("print quote rejects missing amounts, invalid tax flags, and missing estimates", () => {
@@ -49,8 +59,59 @@ test("print order accepts only backend payment and production states", () => {
   assert.equal(order.checkoutUrl, null);
   assert.throws(() => normalizePrintOrder({ ...order, paymentStatus: "paid" }), /unsupported payment status/);
   assert.equal(normalizePrintOrder({ ...order, productionStatus: "printed" }).productionStatus, "printed");
+  assert.equal(normalizePrintOrder({ ...order, productionStatus: "pending_payment" }).productionStatus, "pending_payment");
   assert.throws(() => normalizePrintOrder({ ...order, productionStatus: "forged" }), /unsupported production status/);
   assert.equal(normalizePrintOrder({ ...order, paymentStatus: "refunded" }).paymentStatus, "refunded");
+});
+
+test("print order detail preserves customer timeline and shipment data", async () => {
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    json: async () => ({
+      id: "order-tracking",
+      paymentStatus: "successful",
+      productionStatus: "shipped",
+      quote: validQuote,
+      statusHistory: [{ id: "history-1", status: "shipped", createdAt: "2026-03-01T10:00:00Z" }],
+      shipment: { trackingNumber: "TRACK-123", shippedAt: "2026-03-01T10:00:00Z" },
+      shippingAddress: { fullName: "Book Buyer", city: "Lahore", country: "PK" },
+    }),
+  });
+  const order = await printOrderService.getOrder("order-tracking");
+  assert.equal(order.statusHistory[0].status, "shipped");
+  assert.equal(order.shipment.trackingNumber, "TRACK-123");
+  assert.equal(order.shippingAddress.city, "Lahore");
+});
+
+test("unpaid print orders can be cancelled and failed print PDFs can be retried", async () => {
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, options });
+    const payload = url.endsWith("/cancel")
+      ? {
+        id: "order-pending",
+        paymentStatus: "failed",
+        productionStatus: "cancelled",
+        quote: validQuote,
+      }
+      : { job: { id: "print-job", status: "queued" } };
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => payload,
+    };
+  };
+  const cancelled = await printOrderService.cancelUnpaidOrder("order-pending");
+  const retried = await printOrderService.retryPrintPdf("order-paid");
+  assert.equal(cancelled.productionStatus, "cancelled");
+  assert.equal(retried.job.status, "queued");
+  assert.match(requests[0].url, /\/print\/orders\/order-pending\/cancel$/);
+  assert.match(requests[1].url, /\/print\/orders\/order-paid\/retry-pdf$/);
+  assert.equal(requests[0].options.method, "POST");
+  assert.equal(requests[1].options.method, "POST");
 });
 
 test("checkout links must use HTTPS or the current origin and are only exposed while pending", () => {
@@ -70,4 +131,31 @@ test("checkout links must use HTTPS or the current origin and are only exposed w
   });
   assert.equal(pending.checkoutUrl, null);
   assert.equal(successful.checkoutUrl, null);
+});
+
+test("print payment retry targets the existing payment and order", async () => {
+  let requestUrl = "";
+  let requestBody;
+  globalThis.fetch = async (url, options) => {
+    requestUrl = url;
+    requestBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({
+        id: "print-order-existing",
+        paymentId: "payment-existing",
+        paymentStatus: "pending",
+        productionStatus: "order_placed",
+        checkoutUrl: "https://www.sandbox.paypal.com/checkoutnow?token=retry",
+        quote: validQuote,
+      }),
+    };
+  };
+  const retried = await printOrderService.retryPayment("payment-existing", "paypal");
+  assert.match(requestUrl, /\/payments\/payment-existing\/retry$/);
+  assert.equal(requestBody.provider, "paypal");
+  assert.equal(retried.id, "print-order-existing");
+  assert.equal(retried.checkoutUrl, "https://www.sandbox.paypal.com/checkoutnow?token=retry");
 });

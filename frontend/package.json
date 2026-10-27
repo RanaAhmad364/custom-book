@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test src/features/admin/*.test.js src/features/bookEditor/*.test.js src/features/pdfPurchase/*.test.js src/features/printPurchase/*.test.js src/services/*.test.js"
+    "test": "node --test src/features/admin/*.test.js src/features/bookEditor/*.test.js src/features/orders/*.test.js src/features/pdfPurchase/*.test.js src/features/printPurchase/*.test.js src/services/*.test.js"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.62.7",

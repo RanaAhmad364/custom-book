@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 
 from memorybook.extensions import db
-from memorybook.integrations.email import send_email
+from memorybook.integrations.email import email_delivery_is_configured, send_email
 from memorybook.models import EmailLog, Notification
 
 
@@ -18,6 +18,11 @@ def deliver_email_log(email_log_id: str) -> None:
     )
     if notification is None:
         raise LookupError("The notification for this queued email was not found.")
+    if not email_delivery_is_configured():
+        email_log.status = "failed"
+        email_log.error_message = "Email delivery is not configured."
+        db.session.commit()
+        return
     email_log.status = "sending"
     db.session.commit()
     try:

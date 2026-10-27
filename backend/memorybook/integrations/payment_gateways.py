@@ -1,19 +1,23 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
 import time
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from flask import current_app
+from sqlalchemy import select
 
 from memorybook.errors import ServiceUnavailableError, ValidationError
-from memorybook.models import Payment
+from memorybook.extensions import db
+from memorybook.models import Payment, PlatformSetting
 
 
 class GatewayError(Exception):
@@ -27,28 +31,48 @@ class CheckoutSession:
     instructions: dict[str, str] | None = None
 
 
+class PaymentGateway(Protocol):
+    name: str
+
+    def create_checkout(self, payment: Payment, title: str, idempotency_key: str) -> CheckoutSession: ...
+
+    def verify_event(self, *args, **kwargs) -> dict: ...
+
+    def handle_webhook(self, raw_body: bytes, headers: dict[str, str]) -> dict: ...
+
+    def refund(self, payment: Payment, amount: Decimal, key: str) -> tuple[str, str]: ...
+
+
 def available_payment_methods(currency: str) -> list[dict]:
     if currency.strip().upper() == "PKR":
-        methods = [
-            {
-                "provider": "manual",
-                "method": "bank_transfer",
-                "label": "Bank transfer",
-                "instructions": _manual_instructions("bank_transfer"),
-            },
-            {
-                "provider": "manual",
-                "method": "jazzcash",
-                "label": "JazzCash",
-                "instructions": _manual_instructions("jazzcash"),
-            },
-            {
-                "provider": "manual",
-                "method": "easypaisa",
-                "label": "Easypaisa",
-                "instructions": _manual_instructions("easypaisa"),
-            },
-        ]
+        methods = []
+        if current_app.config.get("MANUAL_PAYMENTS_ENABLED", False):
+            methods.extend([
+                {
+                    "provider": "manual",
+                    "method": "bank_transfer",
+                    "label": "Bank transfer",
+                    "instructions": _manual_instructions("bank_transfer"),
+                },
+                {
+                    "provider": "manual",
+                    "method": "jazzcash",
+                    "label": "JazzCash",
+                    "instructions": _manual_instructions("jazzcash"),
+                },
+                {
+                    "provider": "manual",
+                    "method": "easypaisa",
+                    "label": "Easypaisa",
+                    "instructions": _manual_instructions("easypaisa"),
+                },
+            ])
+        if _paypal_is_configured():
+            methods.append({
+                "provider": "paypal",
+                "method": "paypal_checkout",
+                "label": "PayPal",
+            })
         api_url = current_app.config.get("JAZZCASH_API_URL")
         return_url = current_app.config.get("PAYMENT_RETURN_URL")
         api_url_is_secure = isinstance(api_url, str) and urlparse(api_url).scheme == "https"
@@ -99,7 +123,7 @@ def provider_for(currency: str, preferred: str | None = None, method: str | None
     options = available_payment_methods(currency)
     if preferred is None:
         preferred = (
-            current_app.config.get("PAYMENT_PRIMARY_GATEWAY", "").strip().lower()
+            current_app.config.get("PAYMENT_PRIMARY_GATEWAY", "paypal").strip().lower()
             if currency.upper() == "PKR"
             else "stripe"
         )
@@ -115,11 +139,199 @@ def provider_for(currency: str, preferred: str | None = None, method: str | None
         raise ServiceUnavailableError("No enabled, verified payment method is available for this currency.")
     if name == "manual":
         return ManualPaymentGateway()
+    if name == "paypal":
+        return PayPalGateway()
     if name == "jazzcash":
         return JazzCashGateway()
     if name == "stripe":
         return StripeGateway()
     raise ValidationError("Choose an enabled payment method for this currency.", {"provider": "unsupported"})
+
+
+def _paypal_is_configured() -> bool:
+    return bool(
+        current_app.config.get("PAYPAL_MODE") in {"sandbox", "live"}
+        and current_app.config.get("PAYPAL_CLIENT_ID")
+        and current_app.config.get("PAYPAL_CLIENT_SECRET")
+        and current_app.config.get("PAYPAL_WEBHOOK_ID")
+    )
+
+
+def pkr_to_usd_rate() -> Decimal:
+    setting = db.session.scalar(
+        select(PlatformSetting).where(PlatformSetting.setting_key == "paypal_pkr_to_usd_rate")
+    )
+    raw_rate = (setting.setting_value or {}).get("rate") if setting else current_app.config.get(
+        "PAYPAL_PKR_TO_USD_RATE",
+        "0.0036",
+    )
+    try:
+        rate = Decimal(str(raw_rate))
+    except (InvalidOperation, ValueError, TypeError) as failure:
+        raise ServiceUnavailableError("The PayPal currency conversion rate is not configured correctly.") from failure
+    if not rate.is_finite() or rate <= 0 or rate > 1 or rate.as_tuple().exponent < -8:
+        raise ServiceUnavailableError("The PayPal currency conversion rate is not configured correctly.")
+    return rate
+
+
+def pkr_amount_to_usd(amount: Decimal, rate: Decimal) -> Decimal:
+    converted = (amount * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if amount > 0 and converted == 0:
+        raise ValidationError("The order is too small to charge in USD.")
+    return converted
+
+
+class PayPalGateway:
+    name = "paypal"
+
+    def _api_base(self) -> str:
+        mode = current_app.config.get("PAYPAL_MODE")
+        if mode not in {"sandbox", "live"}:
+            raise ServiceUnavailableError("PayPal mode must be sandbox or live.")
+        return "https://api-m.sandbox.paypal.com" if mode == "sandbox" else "https://api-m.paypal.com"
+
+    def _access_token(self) -> str:
+        client_id = current_app.config.get("PAYPAL_CLIENT_ID")
+        client_secret = current_app.config.get("PAYPAL_CLIENT_SECRET")
+        if not client_id or not client_secret:
+            raise ServiceUnavailableError("PayPal is not configured for this deployment.")
+        request = Request(
+            f"{self._api_base()}/v1/oauth2/token",
+            data=b"grant_type=client_credentials",
+            method="POST",
+            headers={
+                "Authorization": "Basic "
+                + base64.b64encode(f"{client_id}:{client_secret}".encode()).decode(),
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+        )
+        token = _read_json_response(request, "PayPal").get("access_token")
+        if not isinstance(token, str) or not token:
+            raise ServiceUnavailableError("PayPal did not provide an API access token.")
+        return token
+
+    def _request(self, method: str, path: str, payload: dict | None = None, *, request_id: str | None = None) -> dict:
+        data = json.dumps(payload).encode() if payload is not None else (b"{}" if method == "POST" else None)
+        request = Request(
+            f"{self._api_base()}{path}",
+            data=data,
+            method=method,
+            headers={
+                "Authorization": "Bearer " + self._access_token(),
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                **({"PayPal-Request-Id": request_id} if request_id else {}),
+            },
+        )
+        return _read_json_response(request, "PayPal")
+
+    def create_checkout(self, payment: Payment, title: str, idempotency_key: str) -> CheckoutSession:
+        if payment.usd_amount is None:
+            raise ValidationError("A USD payment snapshot is required for PayPal.")
+        origin = current_app.config["PUBLIC_APP_URL"].rstrip("/")
+        route = "pdf" if payment.pdf_order_id else "print"
+        order_id = payment.pdf_order_id or payment.print_order_id
+        result_url = f"{origin}/{route}/orders/{order_id}/processing"
+        payload = self._request(
+            "POST",
+            "/v2/checkout/orders",
+            {
+                "intent": "CAPTURE",
+                "purchase_units": [{
+                    "reference_id": payment.id,
+                    "custom_id": payment.id,
+                    "invoice_id": "MB-" + hashlib.sha256(idempotency_key.encode()).hexdigest()[:24],
+                    "description": title[:127],
+                    "amount": {"currency_code": "USD", "value": format(payment.usd_amount, ".2f")},
+                }],
+                "application_context": {
+                    "return_url": result_url,
+                    "cancel_url": f"{result_url}?payment=cancelled",
+                    "user_action": "PAY_NOW",
+                },
+            },
+            request_id=f"memorybook-{idempotency_key}"[:108],
+        )
+        paypal_order_id = payload.get("id")
+        approval_url = next(
+            (
+                link.get("href") for link in payload.get("links", [])
+                if isinstance(link, dict) and link.get("rel") == "approve"
+            ),
+            None,
+        )
+        if (
+            payload.get("status") != "CREATED"
+            or not isinstance(paypal_order_id, str)
+            or not isinstance(approval_url, str)
+            or not _is_paypal_approval_url(approval_url, current_app.config.get("PAYPAL_MODE"))
+        ):
+            raise ServiceUnavailableError("PayPal returned an invalid checkout order.")
+        return CheckoutSession(url=approval_url, reference=paypal_order_id)
+
+    def capture_order(self, paypal_order_id: str, idempotency_key: str) -> dict:
+        return self._request(
+            "POST",
+            f"/v2/checkout/orders/{paypal_order_id}/capture",
+            {},
+            request_id=f"memorybook-capture-{idempotency_key}"[:108],
+        )
+
+    def handle_webhook(self, raw_body: bytes, headers: dict[str, str]) -> dict:
+        event = self.verify_event(raw_body, headers)
+        return event
+
+    def verify_event(self, raw_body: bytes, headers: dict[str, str]) -> dict:
+        try:
+            event = json.loads(raw_body)
+        except (json.JSONDecodeError, UnicodeDecodeError) as failure:
+            raise ValidationError("PayPal webhook body is invalid.") from failure
+        if not isinstance(event, dict) or not isinstance(event.get("id"), str) or not isinstance(event.get("event_type"), str):
+            raise ValidationError("PayPal webhook event is incomplete.")
+        required_headers = {
+            "transmission_id": headers.get("PayPal-Transmission-Id"),
+            "transmission_time": headers.get("PayPal-Transmission-Time"),
+            "transmission_sig": headers.get("PayPal-Transmission-Sig"),
+            "cert_url": headers.get("PayPal-Cert-Url"),
+            "auth_algo": headers.get("PayPal-Auth-Algo"),
+        }
+        if not all(required_headers.values()):
+            raise ValidationError("PayPal webhook signature headers are incomplete.")
+        result = self._request(
+            "POST",
+            "/v1/notifications/verify-webhook-signature",
+            {
+                **required_headers,
+                "webhook_id": current_app.config.get("PAYPAL_WEBHOOK_ID"),
+                "webhook_event": event,
+            },
+        )
+        if result.get("verification_status") != "SUCCESS":
+            raise ValidationError("PayPal webhook signature is invalid.")
+        return event
+
+    def refund(self, payment: Payment, amount: Decimal, key: str) -> tuple[str, str]:
+        if not payment.provider_capture_id or not payment.exchange_rate:
+            raise ValidationError("The confirmed PayPal capture reference is unavailable.")
+        usd_amount = pkr_amount_to_usd(amount, Decimal(payment.exchange_rate))
+        result = self._request(
+            "POST",
+            f"/v2/payments/captures/{payment.provider_capture_id}/refund",
+            {"amount": {"value": format(usd_amount, ".2f"), "currency_code": "USD"}},
+            request_id=f"memorybook-refund-{key}"[:108],
+        )
+        refund_id = result.get("id")
+        status = {"COMPLETED": "succeeded", "PENDING": "pending", "FAILED": "failed"}.get(result.get("status"))
+        if not isinstance(refund_id, str) or status is None:
+            raise ServiceUnavailableError("PayPal returned an invalid refund response.")
+        return refund_id, status
+
+
+def _is_paypal_approval_url(value: str, mode: str | None) -> bool:
+    parsed = urlparse(value)
+    expected_host = "www.sandbox.paypal.com" if mode == "sandbox" else "www.paypal.com"
+    return parsed.scheme == "https" and parsed.hostname == expected_host
 
 
 def _manual_instructions(method: str) -> dict[str, str]:
@@ -242,6 +454,9 @@ class StripeGateway:
             raise ValidationError("Payment webhook event is incomplete.")
         return event
 
+    def handle_webhook(self, raw_body: bytes, headers: dict[str, str]) -> dict:
+        return self.verify_event(raw_body, headers.get("Stripe-Signature"))
+
     def _request(self, method: str, path: str, fields: dict, *, idempotency_key: str) -> dict:
         request = Request(
             f"https://api.stripe.com{path}",
@@ -325,6 +540,15 @@ class JazzCashGateway:
         if not isinstance(payload.get("pp_TxnRefNo"), str) or not isinstance(payload.get("pp_ResponseCode"), str):
             raise ValidationError("JazzCash callback is incomplete.")
         return payload
+
+    def handle_webhook(self, raw_body: bytes, headers: dict[str, str]) -> dict:
+        try:
+            payload = json.loads(raw_body)
+        except (json.JSONDecodeError, UnicodeDecodeError) as failure:
+            raise ValidationError("JazzCash callback body is invalid.") from failure
+        if not isinstance(payload, dict):
+            raise ValidationError("JazzCash callback payload is invalid.")
+        return self.verify_event(payload)
 
     def refund(self, payment: Payment, amount: Decimal, key: str) -> tuple[str, str]:
         raise ServiceUnavailableError(

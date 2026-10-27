@@ -34,6 +34,7 @@ from memorybook.models import (
     ProjectAsset,
     PricingTier,
     PrintOrder,
+    PrintOrderItem,
     ProjectRevision,
     Role,
     ShippingAddress,
@@ -1719,9 +1720,20 @@ def test_admin_manages_print_orders_support_settings_pricing_and_notifications(a
     assert shipment_update.json["order"]["shipment"]["trackingNumber"] == "TRACK-101"
     assert client.patch(
         f"/api/v1/admin/orders/print/{order_id}",
+        json={"status": "out_for_delivery"},
+        headers=csrf,
+    ).status_code == 200
+    assert client.patch(
+        f"/api/v1/admin/orders/print/{order_id}",
         json={"status": "delivered"},
         headers=csrf,
     ).status_code == 200
+    duplicate_delivery = client.patch(
+        f"/api/v1/admin/orders/print/{order_id}",
+        json={"status": "delivered"},
+        headers=csrf,
+    )
+    assert duplicate_delivery.status_code == 200
     assert client.get("/api/v1/admin/orders?type=pdf").json["items"][0]["orderNumber"] == "PDF-101"
     assert client.patch(
         f"/api/v1/admin/orders/pdf/{pdf_order_id}",
@@ -1735,7 +1747,13 @@ def test_admin_manages_print_orders_support_settings_pricing_and_notifications(a
     ).status_code == 200
     user_notices = client.get("/api/v1/payments/notifications")
     assert user_notices.status_code == 200
-    assert any(item["title"] == "Order status updated" for item in user_notices.json["items"])
+    notice_messages = {item["title"]: item["message"] for item in user_notices.json["items"]}
+    assert notice_messages["Your book is being prepared"] == "Your book is being prepared."
+    assert notice_messages["Your book has been printed"] == "Your book has been printed."
+    assert notice_messages["Your book has been shipped"] == "Your book has been shipped (tracking: TRACK-101)."
+    assert notice_messages["Your book is out for delivery"] == "Your book is out for delivery."
+    assert notice_messages["Your book has been delivered"] == "Your book has been delivered."
+    assert sum(item["title"] == "Your book has been delivered" for item in user_notices.json["items"]) == 1
     with app.app_context():
         payment = db.session.scalar(db.select(Payment).where(Payment.print_order_id == order_id))
         payment.status = "succeeded"
@@ -1746,6 +1764,7 @@ def test_admin_manages_print_orders_support_settings_pricing_and_notifications(a
     notices = client.get("/api/v1/admin/notifications")
     assert any(item["title"] == "New support ticket" for item in notices.json["items"])
     assert any(item["title"] == "Print order placed" for item in notices.json["items"])
+    assert any(item["title"] == "New paid print order" for item in notices.json["items"])
     assert any(item["title"] == "Payment failed" for item in notices.json["items"])
     assert any(item["title"] == "Payment confirmed" for item in notices.json["items"])
     assert any(item["title"] == "PDF purchased" for item in notices.json["items"])
@@ -1851,6 +1870,15 @@ def test_private_print_photos_are_gated_and_every_access_is_logged(app):
             paid_at=datetime.now(UTC),
         )
         db.session.add(order)
+        db.session.flush()
+        db.session.add(Payment(
+            user_id=owner.id,
+            print_order_id=order.id,
+            provider="test-provider",
+            status="successful",
+            amount=order.total_amount,
+            currency=order.currency,
+        ))
         db.session.commit()
         order_id, asset_id = order.id, asset.id
         storage.objects[asset.storage_key] = (photo_bytes, "image/png")
@@ -1898,3 +1926,166 @@ def test_private_print_photos_are_gated_and_every_access_is_logged(app):
         persisted_asset = db.session.get(ProjectAsset, asset_id)
         assert persisted_asset.original_deleted_at is not None
     assert storage.objects == {}
+
+
+def test_admin_print_pdf_download_requires_paid_order_and_logs_access(app):
+    admin, _ = admin_client(app, "print-pdf-admin@example.test")
+    customer, _ = admin_client(app, "print-pdf-customer@example.test", assign_admin=False)
+    storage = FakeStorage()
+    app.extensions["asset_storage"] = storage
+
+    with app.app_context():
+        user = db.session.scalar(db.select(User).where(User.email == "print-pdf-customer@example.test"))
+        project = UserProject(
+            user_id=user.id,
+            title="Print PDF project",
+            page_count=24,
+            privacy_override=True,
+            document={"schemaVersion": 1, "pages": [{"id": "page-pdf", "elements": []}]},
+        )
+        db.session.add(project)
+        db.session.flush()
+        revision = ProjectRevision(
+            project_id=project.id,
+            revision_number=1,
+            document_version=1,
+            document=project.document,
+            checksum_sha256="c" * 64,
+        )
+        address = ShippingAddress(
+            user_id=user.id,
+            recipient_name="Print PDF Customer",
+            address_line_1="2 Book Street",
+            city="Lahore",
+            postal_code="54000",
+            country_code="PK",
+        )
+        db.session.add_all([revision, address])
+        db.session.flush()
+        paid_order = PrintOrder(
+            order_number="PRINT-PDF-PAID",
+            user_id=user.id,
+            project_id=project.id,
+            project_revision_id=revision.id,
+            shipping_address_id=address.id,
+            shipping_address_snapshot={"fullName": "Print PDF Customer", "city": "Lahore"},
+            status="payment_confirmed",
+            currency="PKR",
+            book_amount=Decimal("1000.00"),
+            printing_amount=Decimal("500.00"),
+            shipping_amount=Decimal("100.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("1600.00"),
+            price_snapshot={"pageCount": 24, "quantity": 1, "total": "1600.00"},
+            paid_at=datetime.now(UTC),
+        )
+        unpaid_order = PrintOrder(
+            order_number="PRINT-PDF-UNPAID",
+            user_id=user.id,
+            project_id=project.id,
+            project_revision_id=revision.id,
+            shipping_address_id=address.id,
+            shipping_address_snapshot={"fullName": "Print PDF Customer", "city": "Lahore"},
+            status="pending_payment",
+            currency="PKR",
+            book_amount=Decimal("1000.00"),
+            printing_amount=Decimal("500.00"),
+            shipping_amount=Decimal("100.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("1600.00"),
+            price_snapshot={"pageCount": 24, "quantity": 1, "total": "1600.00"},
+        )
+        db.session.add_all([paid_order, unpaid_order])
+        db.session.flush()
+        paid_payment = Payment(
+            user_id=user.id,
+            print_order_id=paid_order.id,
+            provider="paypal",
+            status="successful",
+            amount=paid_order.total_amount,
+            currency=paid_order.currency,
+        )
+        pdf_order = PdfOrder(
+            order_number="PDF-PRINT-PDF-PAID",
+            user_id=user.id,
+            project_id=project.id,
+            project_revision_id=revision.id,
+            status="paid",
+            currency="PKR",
+            service_price=Decimal("0.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("0.00"),
+            price_snapshot={"total": "0.00"},
+            page_count=24,
+            paid_at=datetime.now(UTC),
+            idempotency_key=f"print-free:{paid_order.id}",
+        )
+        storage_key = f"generated/pdf/{pdf_order.id}/print/test.pdf"
+        db.session.add_all([paid_payment, pdf_order])
+        db.session.flush()
+        db.session.add_all([
+            PrintOrderItem(
+                print_order_id=paid_order.id,
+                quantity=1,
+                page_count=24,
+                unit_price=Decimal("1600.00"),
+                line_total=Decimal("1600.00"),
+                specification_snapshot={
+                    "tier": "premium",
+                    "size": "Square",
+                    "cover": "Hardcover",
+                    "paper": "Premium",
+                },
+            ),
+            GeneratedFile(
+                pdf_order_id=pdf_order.id,
+                generation_profile="print",
+                storage_key=storage_key,
+                file_type="application/pdf",
+                byte_size=100,
+                checksum_sha256="d" * 64,
+            ),
+        ])
+        db.session.commit()
+        storage.objects[storage_key] = (b"%PDF-1.4 test", "application/pdf")
+        paid_order_id = paid_order.id
+        unpaid_order_id = unpaid_order.id
+
+    paid_path = f"/api/v1/admin/orders/print/{paid_order_id}/pdf"
+    unpaid_path = f"/api/v1/admin/orders/print/{unpaid_order_id}/pdf"
+    assert customer.get(paid_path).status_code == 403
+
+    production_queue = admin.get("/api/v1/admin/orders?type=print")
+    assert production_queue.status_code == 200
+    assert [item["id"] for item in production_queue.json["items"]] == [paid_order_id]
+    production_order = production_queue.json["items"][0]
+    assert production_order["customer"]["email"] == "print-pdf-customer@example.test"
+    assert production_order["deliveryAddress"]["city"] == "Lahore"
+    assert production_order["configuration"]["cover"] == "Hardcover"
+    assert production_order["pageCount"] == 24
+    assert "projectRevision" not in production_order
+
+    assert admin.get(unpaid_path).status_code == 404
+    response = admin.get(paid_path)
+    assert response.status_code == 200, response.get_json()
+    assert response.json["url"].startswith(f"/admin/orders/print/{paid_order_id}/pdf/")
+    assert response.json["expiresInSeconds"] == app.config["ASSET_S3_PRESIGNED_URL_TTL"]
+    download_path = f"/api/v1{response.json['url']}"
+    assert customer.get(download_path).status_code == 403
+    downloaded = admin.get(download_path)
+    assert downloaded.status_code == 200
+    assert downloaded.data == b"%PDF-1.4 test"
+    assert downloaded.headers["Content-Disposition"].endswith("PRINT-PDF-PAID-print.pdf")
+    assert admin.get(download_path).status_code == 200
+    with app.app_context():
+        audits = db.session.scalars(
+            db.select(AdminActivityLog).where(
+                AdminActivityLog.target_id == paid_order_id,
+                AdminActivityLog.action == "private_print_order.pdf_accessed",
+            )
+        ).all()
+        assert len(audits) == 2
+        assert all(audit.details["generationProfile"] == "print" for audit in audits)

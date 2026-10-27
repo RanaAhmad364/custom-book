@@ -1,0 +1,88 @@
+.pdf-access-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgb(25 34 29 / 54%);
+}
+
+.pdf-access-dialog {
+  position: relative;
+  width: min(100%, 30rem);
+  padding: 2rem;
+  border: 1px solid #e8e2d7;
+  border-radius: 1.25rem;
+  background: #fffdf9;
+  color: #23332b;
+  box-shadow: 0 1.5rem 5rem rgb(0 0 0 / 22%);
+}
+
+.pdf-access-dialog h2 {
+  margin: 1rem 2rem 0.5rem 0;
+  font-family: Georgia, serif;
+  font-size: 1.65rem;
+  font-weight: 500;
+}
+
+.pdf-access-dialog p {
+  margin: 0;
+  color: #56625b;
+  line-height: 1.6;
+}
+
+.pdf-access-icon {
+  display: grid;
+  width: 2.75rem;
+  height: 2.75rem;
+  place-items: center;
+  border-radius: 50%;
+  background: #edf1eb;
+  color: #355849;
+}
+
+.pdf-access-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  display: grid;
+  width: 2.25rem;
+  height: 2.25rem;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.pdf-access-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+.pdf-access-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: #56625b;
+  font-size: 0.875rem;
+}
+
+.pdf-access-spin {
+  animation: pdf-access-rotate 1s linear infinite;
+}
+
+@keyframes pdf-access-rotate {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 480px) {
+  .pdf-access-dialog { padding: 1.5rem; }
+  .pdf-access-actions { align-items: stretch; flex-direction: column; }
+  .pdf-access-actions > * { justify-content: center; }
+}

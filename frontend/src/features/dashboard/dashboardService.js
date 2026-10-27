@@ -16,6 +16,7 @@ function label(value) {
 
 function mapPrintOrder(order) {
   const statuses = {
+    pending_payment: "Pending payment",
     order_placed: "Order placed",
     production_started: "In production",
     quality_check: "Quality check completed",
@@ -33,6 +34,13 @@ function mapPrintOrder(order) {
     date: formatDate(order.createdAt),
     payment: order.paymentStatus === "successful" ? "Paid" : label(order.paymentStatus),
     status,
+    paymentStatus: order.paymentStatus,
+    paymentId: order.paymentId,
+    paymentProvider: order.paymentProvider,
+    checkoutUrl: order.checkoutUrl,
+    paymentExpired: Boolean(order.paymentExpired),
+    productionStatus: order.productionStatus,
+    printPdf: order.printPdf || {},
     tracking: order.trackingNumber || null,
     total: formatMoney(order.quote?.total ?? order.amount, order.currency),
     deliveryEstimate: order.deliveryEstimate,
@@ -50,10 +58,16 @@ function mapPdfOrder(order) {
       : label(order.generationStatus);
   return {
     id: order.id,
+    projectId: order.projectId,
+    paymentId: order.paymentId,
+    paymentStatus: order.paymentStatus,
     title: order.title || "MemoryBook PDF",
     date: formatDate(order.createdAt),
     status,
     size: order.pageCount ? `${order.pageCount} pages` : "PDF file",
+    generationStatus: order.generationStatus,
+    generationError: order.generationError,
+    downloadId: order.downloadId,
     image: "",
   };
 }
@@ -128,8 +142,29 @@ export async function loadDashboardData(user) {
       privacyMode: Boolean(user.privacyMode),
       photo: "",
     },
-    projects,
-    orders: printOrders.map(mapPrintOrder),
+    projects: projects.map((project) => {
+      const order = pdfOrders.map(mapPdfOrder).find((item) => item.projectId === project.id);
+      return {
+        ...project,
+        pdfAccess: order
+          ? {
+            state: order.paymentStatus === "successful"
+              ? order.generationStatus === "ready" ? "ready" : "generating"
+              : "payment_pending",
+            orderId: order.id,
+            paymentId: order.paymentId,
+            paymentStatus: order.paymentStatus,
+            generationStatus: order.generationStatus,
+            generationError: order.generationError,
+            downloadId: order.downloadId,
+          }
+          : { state: "not_purchased" },
+      };
+    }),
+    orders: printOrders.map(mapPrintOrder).filter((order) => order.paymentStatus === "successful"),
+    pendingOrders: printOrders.map(mapPrintOrder).filter((order) =>
+      ["pending", "failed"].includes(order.paymentStatus)
+      && ["pending_payment", "order_placed"].includes(order.productionStatus)),
     downloads: pdfOrders.map(mapPdfOrder),
     notifications: notifications.map(mapNotification),
     billing: [],

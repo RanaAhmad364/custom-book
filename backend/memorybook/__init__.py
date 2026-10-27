@@ -124,6 +124,8 @@ def _configure_jwt_errors() -> None:
 
 
 def _validate_configuration(app: Flask) -> None:
+    if int(app.config.get("PRINT_ORDER_PAYMENT_EXPIRY_HOURS", 24)) < 1:
+        raise RuntimeError("PRINT_ORDER_PAYMENT_EXPIRY_HOURS must be at least one.")
     if int(app.config.get("TRUSTED_PROXY_HOPS", 0)) < 0:
         raise RuntimeError("TRUSTED_PROXY_HOPS must not be negative.")
     for name in ("SECRET_KEY", "JWT_SECRET_KEY"):
@@ -262,6 +264,15 @@ def _register_cli_commands(app: Flask) -> None:
         with app.app_context():
             count = cleanup_delivered_project_uploads(retention_days)
         click.echo(f"Deleted {count} original project upload(s) with retention of {retention_days} day(s).")
+
+    @app.cli.command("expire-print-orders")
+    def expire_print_orders() -> None:
+        """Cancel unpaid print orders that have passed their payment window."""
+        from memorybook.services.orders import expire_pending_print_orders
+
+        with app.app_context():
+            count = expire_pending_print_orders()
+        click.echo(f"Expired {count} unpaid print order(s).")
 
     @app.cli.command("grant-admin")
     @click.argument("email")

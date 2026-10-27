@@ -13,6 +13,7 @@ from memorybook.models import Notification, Payment, PaymentAttempt, Refund
 from memorybook.permissions import active_user_required, get_authenticated_user, roles_required
 from memorybook.services.payments import (
     process_jazzcash_callback,
+    process_paypal_event,
     process_stripe_event,
     create_refund_request,
     request_refund,
@@ -41,6 +42,19 @@ def payment_methods():
 @limiter.limit("120 per minute")
 def stripe_webhook():
     process_stripe_event(request.get_data(cache=False), request.headers.get("Stripe-Signature"))
+    return jsonify({"received": True})
+
+
+@payments_blueprint.post("/webhooks/paypal")
+@limiter.limit("120 per minute")
+def paypal_webhook():
+    process_paypal_event(request.get_data(cache=False), {
+        "PayPal-Transmission-Id": request.headers.get("PayPal-Transmission-Id", ""),
+        "PayPal-Transmission-Time": request.headers.get("PayPal-Transmission-Time", ""),
+        "PayPal-Transmission-Sig": request.headers.get("PayPal-Transmission-Sig", ""),
+        "PayPal-Cert-Url": request.headers.get("PayPal-Cert-Url", ""),
+        "PayPal-Auth-Algo": request.headers.get("PayPal-Auth-Algo", ""),
+    })
     return jsonify({"received": True})
 
 

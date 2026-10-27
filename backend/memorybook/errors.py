@@ -16,10 +16,11 @@ class ValidationError(Exception):
 
 
 class ConflictError(Exception):
-    def __init__(self, message: str, details: dict | None = None):
+    def __init__(self, message: str, details: dict | None = None, error_code: str | None = None):
         super().__init__(message)
         self.message = message
         self.details = details or {}
+        self.error_code = error_code
 
 
 class ServiceUnavailableError(Exception):
@@ -44,7 +45,7 @@ def _error_response(status: int, code: str, message: str, details: dict | None =
 def register_error_handlers(app: Flask) -> None:
     @app.errorhandler(ConflictError)
     def handle_conflict_error(error: ConflictError):
-        return _error_response(409, "CONFLICT", error.message, error.details)
+        return _error_response(409, error.error_code or "CONFLICT", error.message, error.details)
 
     @app.errorhandler(ServiceUnavailableError)
     def handle_service_unavailable(error: ServiceUnavailableError):

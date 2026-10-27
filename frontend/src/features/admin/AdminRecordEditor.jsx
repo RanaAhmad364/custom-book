@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { AlertCircle, FilePlus2, Plus, Save } from "lucide-react";
 import { SafeImage } from "../../components/common/SafeImage.jsx";
-import { loadAdminBookReferences, loadAdminSection, loadPrivatePrintOrderPhotos } from "./adminService.js";
+import { loadAdminBookReferences, loadAdminPrintOrderPdf, loadAdminSection, loadPrivatePrintOrderPhotos } from "./adminService.js";
 import { categoryFormPayload, validateCategoryRecord } from "./categoryForm.js";
 import { validatePricingRecord } from "./pricingForm.js";
 import { apiUrl } from "../../services/apiClient.js";
+import OrderTimeline from "../orders/OrderTimeline.jsx";
 
 const PRINT_ORDER_STATUSES = [
   "order_placed", "payment_confirmed", "processing", "printed", "shipped", "delivered",
@@ -58,6 +59,17 @@ function ReadOnlyValue({ label, value }) {
         : typeof value === "object" ? Object.entries(value).map(([key, item]) => `${labelFor(key)}: ${String(item)}`).join(" · ")
           : String(value);
   return <div className="admin-detail-field"><span>{label}</span><strong>{display}</strong></div>;
+}
+
+function formatDeliveryAddress(address) {
+  if (!address || typeof address !== "object") return address;
+  return [
+    address.fullName,
+    [address.line1, address.line2].filter(Boolean).join(", "),
+    [address.city, address.region, address.postalCode].filter(Boolean).join(", "),
+    address.country,
+    address.phone,
+  ].filter(Boolean).join(" · ");
 }
 
 async function loadAllAdminCategories() {
@@ -154,6 +166,9 @@ function FormFields({ section, record, update, categories = [], books = [], pric
   if (section === "settings") {
     return <>
       <Input label="Setting key" required value={record.key} onChange={(value) => update("key", value)} maxLength={120} />
+      {record.key === "paypal_pkr_to_usd_rate"
+        ? <p className="admin-form-hint">PayPal PKR to USD rate: set the USD amount for 1 PKR as JSON, for example {"{\"rate\":\"0.0036\"}"}.</p>
+        : null}
       <Textarea label="Configuration object (JSON)" rows={8} value={settingValueText} onChange={(value) => {
         setSettingValueText(value);
         try {
@@ -182,16 +197,27 @@ function FormFields({ section, record, update, categories = [], books = [], pric
     return <>
       <div className="admin-detail-grid">
         <ReadOnlyValue label="Order reference" value={record.orderNumber} />
-        <ReadOnlyValue label="Customer" value={record.userEmail} />
+        <ReadOnlyValue label="Customer" value={record.customer
+          ? `${record.customer.name || "Name not provided"} · ${record.customer.email || "No email"}`
+          : record.userEmail} />
         <ReadOnlyValue label="Payment status" value={record.paymentStatus} />
         <ReadOnlyValue label="Amount" value={record.amount ? `${record.currency || "USD"} ${record.amount}` : null} />
         <ReadOnlyValue label="Placed" value={record.createdAt ? new Date(record.createdAt).toLocaleString() : null} />
+        {section === "print-orders" ? <ReadOnlyValue label="Page count" value={record.pageCount} /> : null}
+        {section === "print-orders" ? <ReadOnlyValue label="Configuration" value={record.configuration} /> : null}
+        {section === "print-orders" ? <ReadOnlyValue label="Price snapshot" value={record.priceSnapshot} /> : null}
+        {section === "print-orders" ? <ReadOnlyValue label="Delivery address" value={formatDeliveryAddress(record.deliveryAddress)} /> : null}
       </div>
       <Select label="Order status" value={record.status} options={options.map((status) => ({ value: status, label: labelFor(status) }))} onChange={(value) => update("status", value)} />
       {section === "print-orders" ? <>
         <Input label="Carrier" value={record.carrier} onChange={(value) => update("carrier", value)} maxLength={100} />
         <Input label="Tracking number" value={record.trackingNumber} onChange={(value) => update("trackingNumber", value)} maxLength={160} />
         <Input label="Estimated delivery" type="datetime-local" value={record.estimatedDeliveryAt?.slice(0, 16)} onChange={(value) => update("estimatedDeliveryAt", value ? new Date(value).toISOString() : null)} />
+        <section className="admin-order-tracking">
+          <h3>Order timeline</h3>
+          {orderHistoryLoading ? <p role="status">Loading order timeline…</p>
+            : <OrderTimeline items={orderHistory} shipment={record.shipment} />}
+        </section>
       </> : null}
     </>;
   }
@@ -326,7 +352,7 @@ function FormFields({ section, record, update, categories = [], books = [], pric
   </div>;
 }
 
-export default function AdminRecordEditor({ section, record, setRecord, onSave, onClose, onUpload, saveError, saving }) {
+export default function AdminRecordEditor({ section, record, setRecord, onSave, onClose, onUpload, saveError, saving, orderHistory = [], orderHistoryLoading = false }) {
   const [uploading, setUploading] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
   const [categoryValidationError, setCategoryValidationError] = useState("");
@@ -340,6 +366,8 @@ export default function AdminRecordEditor({ section, record, setRecord, onSave, 
   const [privatePhotos, setPrivatePhotos] = useState([]);
   const [privatePhotosLoading, setPrivatePhotosLoading] = useState(false);
   const [privatePhotosError, setPrivatePhotosError] = useState("");
+  const [printPdfLoading, setPrintPdfLoading] = useState(false);
+  const [printPdfError, setPrintPdfError] = useState("");
   const readOnly = ["users", "payments", "refunds", "notifications"].includes(section);
   const title = record.title || record.name || record.email || record.orderNumber || record.ticketNumber || record.code || record.key || "Record details";
   const imageTarget = section === "templates" ? "previewAssetKey" : "heroAssetKey";
@@ -352,6 +380,8 @@ export default function AdminRecordEditor({ section, record, setRecord, onSave, 
     setPricingValidationError("");
     setPrivatePhotos([]);
     setPrivatePhotosError("");
+    setPrintPdfLoading(false);
+    setPrintPdfError("");
     setSettingValueText(JSON.stringify(record.value ?? {}, null, 2));
   }, [record.id, record.kind, record.__create, section]);
 
@@ -407,24 +437,37 @@ export default function AdminRecordEditor({ section, record, setRecord, onSave, 
     } finally {
       setUploading(false);
     }
+  }
 
-    async function openPrivatePhotos() {
-      setPrivatePhotosLoading(true);
-      setPrivatePhotosError("");
-      setPrivatePhotos([]);
-      try {
-        const items = await loadPrivatePrintOrderPhotos(record.id);
-        const blobs = await Promise.all(items.map(async (item) => {
-          const response = await fetch(apiUrl(item.url), { credentials: "include" });
-          if (!response.ok) throw new Error("A private customer photo could not be loaded.");
-          return { id: item.id, name: item.name, blob: await response.blob() };
-        }));
-        setPrivatePhotos(blobs.map(({ blob, ...photo }) => ({ ...photo, src: URL.createObjectURL(blob) })));
-      } catch (failure) {
-        setPrivatePhotosError(failure instanceof Error ? failure.message : "Private customer photos could not be loaded.");
-      } finally {
-        setPrivatePhotosLoading(false);
-      }
+  async function openPrivatePhotos() {
+    setPrivatePhotosLoading(true);
+    setPrivatePhotosError("");
+    setPrivatePhotos([]);
+    try {
+      const items = await loadPrivatePrintOrderPhotos(record.id);
+      const blobs = await Promise.all(items.map(async (item) => {
+        const response = await fetch(apiUrl(item.url), { credentials: "include" });
+        if (!response.ok) throw new Error("A private customer photo could not be loaded.");
+        return { id: item.id, name: item.name, blob: await response.blob() };
+      }));
+      setPrivatePhotos(blobs.map(({ blob, ...photo }) => ({ ...photo, src: URL.createObjectURL(blob) })));
+    } catch (failure) {
+      setPrivatePhotosError(failure instanceof Error ? failure.message : "Private customer photos could not be loaded.");
+    } finally {
+      setPrivatePhotosLoading(false);
+    }
+  }
+
+  async function downloadPrintPdf() {
+    setPrintPdfLoading(true);
+    setPrintPdfError("");
+    try {
+      const download = await loadAdminPrintOrderPdf(record.id);
+      window.location.assign(apiUrl(download.url));
+    } catch (failure) {
+      setPrintPdfError(failure instanceof Error ? failure.message : "The print PDF could not be downloaded.");
+    } finally {
+      setPrintPdfLoading(false);
     }
   }
 
@@ -469,6 +512,19 @@ export default function AdminRecordEditor({ section, record, setRecord, onSave, 
       <button className="admin-button admin-button-secondary" type="button" disabled={privatePhotosLoading} onClick={() => void openPrivatePhotos()}><Eye size={15} />{privatePhotosLoading ? "Loading photos…" : "Review photos"}</button>
       {privatePhotosError ? <p role="alert">{privatePhotosError}</p> : null}
       {privatePhotos.length ? <div className="admin-private-photo-grid">{privatePhotos.map((photo) => <figure key={photo.id}><img src={photo.src} alt={photo.name} /><figcaption>{photo.name}</figcaption></figure>)}</div> : null}
+    </section> : null}
+    {section === "print-orders" ? <section className="admin-private-photos">
+      <div>
+        <strong>Print PDF</strong>
+        <p>Generation status: {labelFor(record.printPdf?.print?.status || "not started")}</p>
+        {record.printPdf?.print?.error?.message ? <p role="alert">{record.printPdf.print.error.message}</p> : null}
+      </div>
+      <button className="admin-button admin-button-secondary" type="button"
+        disabled={printPdfLoading || record.printPdf?.print?.status !== "completed"}
+        onClick={() => void downloadPrintPdf()}>
+        {printPdfLoading ? "Preparing download…" : "Download print PDF"}
+      </button>
+      {printPdfError ? <p role="alert">{printPdfError}</p> : null}
     </section> : null}
     <FormFields section={section} record={record} update={update} categories={relatedCategories} books={relatedBooks} pricingOptions={pricingOptions}
       settingValueText={settingValueText} setSettingValueText={setSettingValueText} />

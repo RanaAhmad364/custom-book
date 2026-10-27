@@ -66,6 +66,27 @@ test("project creation preserves a server-copied published template design", asy
   }
 });
 
+test("project PDF access is fetched from the owner-scoped access endpoint", async () => {
+  const projectId = "60b49d00-220e-4ab3-99c8-14b81dcdd602";
+  const previousFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return new Response(JSON.stringify({ projectId, state: "payment_pending", orderId: "pdf-order-1" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  try {
+    const access = await projectService.getPdfAccess("member@example.test", projectId);
+    assert.equal(access.state, "payment_pending");
+    assert.equal(requests[0].options.method, "GET");
+    assert.match(requests[0].url, new RegExp(`/projects/${projectId}/access`));
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test("stale saves keep the local recovery copy and require a freshly loaded version", async () => {
   const projectId = "6a8a10b3-5572-4a58-a779-1d067d9a2adf";
   const owner = "save-recovery@example.test";

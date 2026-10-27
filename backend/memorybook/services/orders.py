@@ -4,12 +4,12 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from werkzeug.exceptions import NotFound
 
 from memorybook.errors import ConflictError, ValidationError
 from memorybook.extensions import db
-from memorybook.integrations.payment_gateways import provider_for
+from memorybook.integrations.payment_gateways import pkr_amount_to_usd, pkr_to_usd_rate, provider_for
 from memorybook.models import (
     BookProduct,
     BookSize,
@@ -19,6 +19,8 @@ from memorybook.models import (
     OrderStatusHistory,
     PagePricing,
     PaperType,
+    Payment,
+    PaymentAttempt,
     PdfOrder,
     PricingTier,
     PrintOrder,
@@ -27,6 +29,7 @@ from memorybook.models import (
     PrintSpecification,
     ShippingAddress,
     ShippingRate,
+    Shipment,
     UserProject,
 )
 from memorybook.services.catalog_projects import create_revision
@@ -45,11 +48,15 @@ from memorybook.services.pricing import (
 def pdf_offer(project_id: str, user_id: str) -> dict:
     project, product = _owned_project_and_product(project_id, user_id)
     amount = calculate_pdf_price(product)
-    return {
+    offer = {
         "amount": str(amount),
         "currency": default_currency(),
         "description": f"High-quality PDF download for {project.title}",
     }
+    if default_currency() == "PKR":
+        rate = pkr_to_usd_rate()
+        offer.update({"usdAmount": str(pkr_amount_to_usd(amount, rate)), "exchangeRate": str(rate)})
+    return offer
 
 
 def create_pdf_order(
@@ -65,8 +72,38 @@ def create_pdf_order(
     if existing:
         if existing.project_id != project_id:
             raise ConflictError("This idempotency key has already been used for a different order.")
+        if db.session.scalar(select(Payment.id).where(Payment.pdf_order_id == existing.id)) is None:
+            from memorybook.services.payments import create_payment
+
+            return create_payment(existing, "pdf", provider, f"{existing.id}:payment", payment_method)
         return serialize_order(existing, "pdf")
     project, product = _owned_project_and_product(project_id, user_id, lock=True)
+    previous_order = db.session.scalar(
+        select(PdfOrder)
+        .join(Payment, Payment.pdf_order_id == PdfOrder.id)
+        .where(
+            PdfOrder.user_id == user_id,
+            PdfOrder.project_id == project_id,
+            Payment.status == "successful",
+        )
+        .order_by(PdfOrder.created_at.desc())
+        .limit(1)
+        .with_for_update()
+    )
+    if previous_order:
+        return serialize_order(previous_order, "pdf")
+    previous_order = db.session.scalar(
+        select(PdfOrder)
+        .where(PdfOrder.user_id == user_id, PdfOrder.project_id == project_id)
+        .order_by(PdfOrder.created_at.desc())
+        .with_for_update()
+    )
+    if previous_order:
+        if db.session.scalar(select(Payment.id).where(Payment.pdf_order_id == previous_order.id)) is None:
+            from memorybook.services.payments import create_payment
+
+            return create_payment(previous_order, "pdf", provider, f"{previous_order.id}:payment", payment_method)
+        return serialize_order(previous_order, "pdf")
     if not project.document:
         raise ConflictError("Save your book before placing a PDF order.")
     validate_order_page_count(product, int(project.page_count), print_order=False)
@@ -283,6 +320,10 @@ def create_print_quote(
         "productionEstimate": production_estimate,
         "deliveryEstimate": delivery_estimate,
     }
+    conversion = {}
+    if default_currency() == "PKR":
+        rate = pkr_to_usd_rate()
+        conversion = {"usdAmount": str(pkr_amount_to_usd(total, rate)), "exchangeRate": str(rate)}
     quote = PrintQuote(
         user_id=user_id,
         project_id=project.id,
@@ -300,6 +341,7 @@ def create_print_quote(
         "id": quote.id,
         **price_snapshot,
         "currency": quote.currency,
+        **conversion,
         "productionEstimate": production_estimate,
         "deliveryEstimate": delivery_estimate,
         "expiresAt": quote.expires_at.isoformat(),
@@ -378,7 +420,7 @@ def create_print_order(
         project_revision_id=quote.project_revision_id,
         shipping_address_id=db_address.id,
         shipping_address_snapshot=address,
-        status="order_placed",
+        status="pending_payment",
         currency=quote.currency,
         book_amount=Decimal(price["bookPrice"]),
         printing_amount=Decimal(price["printingCharge"]),
@@ -425,7 +467,7 @@ def create_print_order(
         page_count=int(price["pageCount"]),
         specification_data={**quote.configuration, "shippingRateId": price["shippingRateId"]},
     ))
-    db.session.add(_history_row(order.id, "print", "order_placed", "Print order created; payment is pending."))
+    db.session.add(_history_row(order.id, "print", "pending_payment", "Print order created; payment is pending."))
     quote.consumed_at = now
     db.session.commit()
     from memorybook.services.payments import create_payment
@@ -440,6 +482,22 @@ def get_user_order(kind: str, order_id: str, user_id: str) -> dict:
         raise NotFound("Order was not found.")
     payload = serialize_order(order, kind)
     payload["statusHistory"] = _history(order.id, kind)
+    if kind == "print":
+        shipment = db.session.scalar(
+            select(Shipment)
+            .where(Shipment.print_order_id == order.id)
+            .order_by(Shipment.created_at.desc())
+        )
+        payload["shipment"] = {
+            "id": shipment.id,
+            "carrier": shipment.carrier,
+            "trackingNumber": shipment.tracking_number,
+            "status": shipment.status,
+            "estimatedDeliveryAt": shipment.estimated_delivery_at.isoformat()
+                if shipment.estimated_delivery_at else None,
+            "shippedAt": shipment.shipped_at.isoformat() if shipment.shipped_at else None,
+            "deliveredAt": shipment.delivered_at.isoformat() if shipment.delivered_at else None,
+        } if shipment else None
     return payload
 
 
@@ -479,6 +537,85 @@ def request_order_cancellation(order_id: str, user_id: str, reason: str) -> dict
     )
     db.session.commit()
     return {"status": "pending", "message": "Your cancellation request has been submitted."}
+
+
+def cancel_unpaid_print_order(order_id: str, user_id: str) -> dict:
+    order = db.session.scalar(
+        select(PrintOrder).where(PrintOrder.id == order_id, PrintOrder.user_id == user_id).with_for_update()
+    )
+    if order is None:
+        raise NotFound("Print order was not found.")
+    if order.status == "cancelled":
+        return serialize_order(order, "print")
+    if order.status not in {"pending_payment", "order_placed"} or order.paid_at is not None:
+        raise ConflictError("Only an unpaid print order can be cancelled.")
+    payment = db.session.scalar(
+        select(Payment).where(Payment.print_order_id == order.id).with_for_update()
+    )
+    if payment and payment.status == "successful":
+        raise ConflictError("A paid print order cannot be cancelled here.")
+    order.status = "cancelled"
+    if payment and payment.status == "pending":
+        payment.status = "failed"
+        db.session.execute(
+            update(PaymentAttempt)
+            .where(PaymentAttempt.payment_id == payment.id, PaymentAttempt.status.in_(("pending", "submitted")))
+            .values(status="cancelled", failure_code="order_cancelled")
+        )
+    db.session.add(_history_row(order.id, "print", "cancelled", "Customer cancelled before payment."))
+    from memorybook.services.notifications import queue_order_event
+
+    queue_order_event(
+        order.user_id,
+        f"print_order_cancelled:{order.id}",
+        "order",
+        "Print order cancelled",
+        f"Unpaid print order {order.order_number} was cancelled.",
+        "/dashboard/orders",
+    )
+    db.session.commit()
+    return serialize_order(order, "print")
+
+
+def expire_pending_print_orders(*, now: datetime | None = None) -> int:
+    from flask import current_app
+    from memorybook.services.notifications import queue_order_event
+
+    current_time = now or datetime.now(UTC)
+    expiry_hours = int(current_app.config.get("PRINT_ORDER_PAYMENT_EXPIRY_HOURS", 24))
+    if expiry_hours < 1:
+        raise ValueError("PRINT_ORDER_PAYMENT_EXPIRY_HOURS must be at least one.")
+    cutoff = current_time - timedelta(hours=expiry_hours)
+    orders = db.session.scalars(
+        select(PrintOrder)
+        .where(PrintOrder.status.in_(("pending_payment", "order_placed")), PrintOrder.created_at <= cutoff)
+        .with_for_update()
+    ).all()
+    expired_count = 0
+    for order in orders:
+        order.status = "cancelled"
+        payment = db.session.scalar(
+            select(Payment).where(Payment.print_order_id == order.id).with_for_update()
+        )
+        if payment and payment.status == "pending":
+            payment.status = "failed"
+            db.session.execute(
+                update(PaymentAttempt)
+                .where(PaymentAttempt.payment_id == payment.id, PaymentAttempt.status.in_(("pending", "submitted")))
+                .values(status="cancelled", failure_code="order_expired")
+            )
+        db.session.add(_history_row(order.id, "print", "cancelled", "Unpaid print order expired."))
+        queue_order_event(
+            order.user_id,
+            f"print_order_expired:{order.id}",
+            "order",
+            "Print order expired",
+            f"Unpaid print order {order.order_number} expired and can no longer be paid.",
+            "/dashboard/orders",
+        )
+        expired_count += 1
+    db.session.commit()
+    return expired_count
 
 
 def _owned_project_and_product(project_id: str, user_id: str, *, lock: bool = False):
@@ -674,4 +811,9 @@ def _history(order_id: str, kind: str) -> list[dict]:
     items = db.session.scalars(
         select(OrderStatusHistory).where(column == order_id).order_by(OrderStatusHistory.created_at)
     ).all()
-    return [{"status": item.status, "note": item.note, "createdAt": item.created_at.isoformat()} for item in items]
+    return [{
+        "id": item.id,
+        "status": item.status,
+        "note": item.note,
+        "createdAt": item.created_at.isoformat(),
+    } for item in items]

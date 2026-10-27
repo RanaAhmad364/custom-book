@@ -84,9 +84,15 @@ replace every placeholder. Protect the file (`root:memorybook`, mode `0640`).
 At minimum configure independent random `SECRET_KEY` and `JWT_SECRET_KEY`,
 PostgreSQL runtime/migration URLs, exact HTTPS `CORS_ORIGINS`, canonical app/API
 URLs, secure cookies, trusted proxy hops, shared Redis
-`RATE_LIMIT_STORAGE_URI`, SMTP, and the private asset path. Keep manual payment
-as the default until a real provider integration has passed its own verified
-sandbox gates. Never place secrets in `VITE_*` variables or the built frontend.
+`RATE_LIMIT_STORAGE_URI`, SMTP, the private asset path, and PayPal's mode,
+client ID, client secret, and webhook ID. Use sandbox credentials and the
+PayPal webhook endpoint `/api/v1/payments/webhooks/paypal` to verify the full
+checkout/capture flow before switching `PAYPAL_MODE=live`. Set
+`PAYMENT_PRIMARY_GATEWAY=paypal`; manual transfer is disabled by default and
+should only be enabled deliberately with `MANUAL_PAYMENTS_ENABLED=true`.
+Set an initial USD-per-PKR value in `PAYPAL_PKR_TO_USD_RATE` and maintain the
+admin-editable `paypal_pkr_to_usd_rate` setting under Admin → Settings.
+Never place secrets in `VITE_*` variables or the built frontend.
 
 For an external database, set the database URL's TLS and CA options according
 to the provider. For local PostgreSQL on the VPS, configure PostgreSQL SSL and
@@ -188,9 +194,12 @@ WantedBy=multi-user.target
 Keep one Gunicorn worker while using the in-process runner. Its database job
 records expose status and failure details; use
 `flask --app wsgi retry-failed-jobs` for operator-approved retries. Schedule
-delivered-upload cleanup separately with a systemd timer or cron:
+unpaid print-order expiry and delivered-upload cleanup separately with a
+systemd timer or cron. The print-payment window defaults to 24 hours and can
+be changed with `PRINT_ORDER_PAYMENT_EXPIRY_HOURS`:
 
 ```sh
+/opt/memorybook/venvs/current/bin/flask --app wsgi expire-print-orders
 /opt/memorybook/venvs/current/bin/flask --app wsgi cleanup-delivered-uploads
 ```
 
@@ -227,6 +236,41 @@ WantedBy=timers.target
 Enable the timer with `sudo systemctl daemon-reload` and
 `sudo systemctl enable --now memorybook-cleanup.timer`; inspect runs with
 `sudo journalctl -u memorybook-cleanup.service`.
+
+Use an hourly systemd unit for unpaid print-order expiration. Create
+`/etc/systemd/system/memorybook-expire-print-orders.service`:
+
+```ini
+[Unit]
+Description=Expire unpaid MemoryBook print orders
+After=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+User=memorybook
+Group=memorybook
+WorkingDirectory=/opt/memorybook/current/backend
+EnvironmentFile=/etc/memorybook/memorybook.env
+ExecStart=/opt/memorybook/venvs/current/bin/flask --app wsgi expire-print-orders
+```
+
+Create `/etc/systemd/system/memorybook-expire-print-orders.timer`:
+
+```ini
+[Unit]
+Description=Hourly unpaid print-order expiry
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable the timer with `sudo systemctl enable --now
+memorybook-expire-print-orders.timer` and inspect its run log with
+`sudo journalctl -u memorybook-expire-print-orders.service`.
 
 Then enable and inspect the service:
 

@@ -351,6 +351,10 @@ class Payment(IdMixin, TimestampMixin, db.Model):
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending", server_default="pending", index=True)
     amount: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    pkr_amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    usd_amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    exchange_rate: Mapped[Decimal | None] = mapped_column(Numeric(14, 8))
+    provider_capture_id: Mapped[str | None] = mapped_column(String(160), unique=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
 
 

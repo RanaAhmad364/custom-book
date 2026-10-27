@@ -4,6 +4,7 @@ import { paymentMethodService } from "./paymentMethodService.js";
 const API_ROOT = "/print";
 const paymentStates = new Set(["pending", "successful", "failed", "partially_refunded", "refunded"]);
 const productionStates = [
+  "pending_payment",
   "order_placed",
   "payment_confirmed",
   "design_verified",
@@ -49,6 +50,13 @@ export function normalizePrintQuote(quote) {
 
   const tax = quote.taxApplicable ? amount(quote.tax, "tax") : amount(quote.tax ?? 0, "tax");
   if (!quote.taxApplicable && tax !== 0) throw new Error("Printing quote included tax while marking it as not applicable.");
+  const usdAmount = quote.usdAmount === null || quote.usdAmount === undefined
+    ? null
+    : amount(quote.usdAmount, "USD equivalent");
+  const exchangeRate = quote.exchangeRate === null || quote.exchangeRate === undefined
+    ? null
+    : amount(quote.exchangeRate, "exchange rate");
+  if (exchangeRate === 0) throw new Error("Printing quote returned an invalid exchange rate.");
   return {
     ...quote,
     bookPrice: amount(quote.bookPrice, "book price"),
@@ -59,6 +67,8 @@ export function normalizePrintQuote(quote) {
     tax,
     total: amount(quote.total, "total"),
     currency: quote.currency.trim(),
+    usdAmount,
+    exchangeRate: exchangeRate === null ? null : String(quote.exchangeRate),
   };
 }
 
@@ -135,6 +145,16 @@ export const printOrderService = {
     return normalizePrintOrder(await request(`/orders/${encodeURIComponent(orderId)}`));
   },
 
+  async retryPayment(paymentId, provider) {
+    if (typeof paymentId !== "string" || !paymentId) throw new Error("A payment reference is required to retry checkout.");
+    const { data } = await apiRequest(`/payments/${encodeURIComponent(paymentId)}/retry`, {
+      method: "POST",
+      body: { provider },
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+    return normalizePrintOrder(data);
+  },
+
   async listOrders() {
     const result = await request("/orders");
     if (!Array.isArray(result.items)) throw new Error("Printing service returned an invalid order history.");
@@ -154,5 +174,15 @@ export const printOrderService = {
       throw new Error("Printing service returned an unsupported cancellation request status.");
     }
     return { status: result.status, message: typeof result.message === "string" ? result.message : "" };
+  },
+
+  async cancelUnpaidOrder(orderId) {
+    return normalizePrintOrder(await request(`/orders/${encodeURIComponent(orderId)}/cancel`, {
+      method: "POST",
+    }));
+  },
+
+  async retryPrintPdf(orderId) {
+    return request(`/orders/${encodeURIComponent(orderId)}/retry-pdf`, { method: "POST" });
   },
 };

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ArrowDownToLine, ArrowRight, BookOpen, Check, Copy, Eye, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { SafeImage } from "../../components/common/SafeImage.jsx";
+import { ProjectPdfAccessAction } from "../pdfPurchase/ProjectPdfAccessAction.jsx";
 
 export function DashboardPageHeading({ eyebrow, title, description, action }) {
   return (
@@ -55,6 +56,13 @@ export function ProjectCard({ project, onRename, onDuplicate, onDelete, onPrivac
         {editing ? <form className="dashboard-rename-form" onSubmit={saveTitle}><input aria-label="Project title" value={title} onChange={(event) => setTitle(event.target.value)} maxLength={80} autoFocus disabled={savingTitle} /><button className="dashboard-icon-button" type="submit" aria-label="Save project name" disabled={savingTitle}><Check size={16} /></button></form> : <h3>{project.title}</h3>}
         <p>Updated {project.updated}</p>
         {onPrivacyChange ? <label className="dashboard-project-privacy"><span>Project privacy</span><select aria-label={`Privacy for ${project.title}`} value={project.privacyOverride === null || project.privacyOverride === undefined ? "inherit" : project.privacyOverride ? "private" : "standard"} onChange={(event) => onPrivacyChange(project.id, event.target.value === "inherit" ? null : event.target.value === "private")}><option value="inherit">Use account setting</option><option value="private">Private</option><option value="standard">Standard</option></select></label> : null}
+        <div className="dashboard-project-pdf-access">
+          {project.pdfAccess?.state === "payment_pending"
+            ? <><span className="dashboard-status status-pending">Pending payment</span><Link className="dashboard-text-link" to={`/pdf/orders/${encodeURIComponent(project.pdfAccess.orderId)}/processing`}>Pay now <ArrowRight size={14} /></Link><ProjectPdfAccessAction projectId={project.id} initialAccess={project.pdfAccess} /></>
+            : project.pdfAccess?.state === "ready" || project.pdfAccess?.state === "generating"
+              ? <><span className="dashboard-status status-ready">Unlocked</span><ProjectPdfAccessAction projectId={project.id} initialAccess={project.pdfAccess} /></>
+              : <><span className="dashboard-status">PDF not purchased</span><ProjectPdfAccessAction projectId={project.id} initialAccess={project.pdfAccess} /></>}
+        </div>
         <div className="dashboard-project-actions">
           <ProjectEditAction project={project}>{project.status === "completed" ? "Open book" : "Continue editing"} <ArrowRight size={14} /></ProjectEditAction>
           <button className="dashboard-secondary-action" type="button" onClick={() => setPreviewOpen(true)}><Eye size={15} /> Preview</button>

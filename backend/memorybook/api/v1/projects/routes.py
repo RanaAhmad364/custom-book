@@ -31,6 +31,7 @@ from memorybook.services.catalog_projects import (
     upload_asset,
 )
 from memorybook.services.orders import quote_project_prices
+from memorybook.services.pdf_generation import project_pdf_access
 
 projects_blueprint = Blueprint("projects", __name__)
 
@@ -144,6 +145,12 @@ def list_projects():
 @active_user_required
 def get_project(project_id: str):
     return _project_response(_owned_project(project_id))
+
+
+@projects_blueprint.get("/<string:project_id>/access")
+@active_user_required
+def get_project_access(project_id: str):
+    return jsonify(project_pdf_access(project_id, get_authenticated_user().id))
 
 
 @projects_blueprint.get("/<string:project_id>/pricing-quote")

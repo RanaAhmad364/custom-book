@@ -7,7 +7,7 @@ from flask import Blueprint, abort, send_file
 from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
 from sqlalchemy import or_, select
 
-from memorybook.errors import ServiceUnavailableError
+from memorybook.errors import ConflictError, ServiceUnavailableError
 from memorybook.extensions import db
 from memorybook.integrations.asset_storage import get_asset_storage
 from memorybook.models import (
@@ -15,6 +15,7 @@ from memorybook.models import (
     DownloadEntitlement,
     GeneratedFile,
     Payment,
+    PdfJob,
     PdfOrder,
     ProjectAsset,
     Role,
@@ -99,6 +100,29 @@ def retrieve_private_asset(token: str):
                 for design in published_designs
             )
     elif key.startswith("generated/pdf/"):
+        file_record = db.session.execute(
+            select(GeneratedFile, PdfOrder, Payment, PdfJob)
+            .join(PdfOrder, PdfOrder.id == GeneratedFile.pdf_order_id)
+            .outerjoin(Payment, Payment.pdf_order_id == PdfOrder.id)
+            .outerjoin(
+                PdfJob,
+                (PdfJob.order_id == PdfOrder.id) & (PdfJob.generation_profile == "digital"),
+            )
+            .where(GeneratedFile.storage_key == key)
+        ).first()
+        if file_record:
+            _, order, payment, job = file_record
+            if order.user_id != user.id:
+                abort(404)
+            if payment is None or payment.status != "successful" or order.paid_at is None:
+                if payment and payment.status == "pending":
+                    raise ConflictError("PDF payment is still pending.", error_code="PDF_PAYMENT_PENDING")
+                raise ConflictError("This PDF has not been purchased.", error_code="PDF_NOT_PURCHASED")
+            if job is None or job.status != "ready":
+                raise ConflictError(
+                    "The PDF is being generated and is not ready for download.",
+                    error_code="PDF_GENERATING",
+                )
         now = datetime.now(UTC)
         authorized = db.session.scalar(
             select(DownloadEntitlement.id)

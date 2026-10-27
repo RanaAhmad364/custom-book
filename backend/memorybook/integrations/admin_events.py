@@ -9,6 +9,7 @@ from memorybook.models import (
     Notification,
     OrderStatusHistory,
     Payment,
+    PdfJob,
     PdfOrder,
     PrintOrder,
     Role,
@@ -30,6 +31,8 @@ def _queue_admin_event(session: Session, event_key: str, title: str, message: st
     email_jobs = session.info.setdefault("memorybook_admin_email_jobs", [])
     for admin_id in admin_ids:
         recipient_event_key = f"{event_key}:admin:{admin_id}"
+        if session.scalar(select(Notification.id).where(Notification.event_key == recipient_event_key)):
+            continue
         session.add(Notification(
             user_id=admin_id,
             category="admin_event",
@@ -61,6 +64,8 @@ def _before_flush(session: Session, *_args) -> None:
             _queue_admin_event(session, f"support_ticket:{row.id}", "New support ticket", f"Ticket {row.ticket_number}: {row.subject}")
         elif isinstance(row, Payment):
             _payment_event(session, row)
+        elif isinstance(row, PdfJob) and row.status == "failed" and row.generation_profile == "print":
+            _print_pdf_failed_event(session, row)
         elif isinstance(row, Refund) and row.status == "requested":
             _queue_admin_event(
                 session,
@@ -78,6 +83,13 @@ def _before_flush(session: Session, *_args) -> None:
     for row in tuple(session.dirty):
         if isinstance(row, Payment) and inspect(row).attrs.status.history.has_changes():
             _payment_event(session, row)
+        elif (
+            isinstance(row, PdfJob)
+            and inspect(row).attrs.status.history.has_changes()
+            and row.status == "failed"
+            and row.generation_profile == "print"
+        ):
+            _print_pdf_failed_event(session, row)
 
 
 def _payment_event(session: Session, payment: Payment) -> None:
@@ -87,6 +99,15 @@ def _payment_event(session: Session, payment: Payment) -> None:
         _queue_admin_event(session, f"payment_confirmed:{payment.id}", "Payment confirmed", f"Payment for order {order_id} was confirmed.")
         if payment.pdf_order_id:
             _queue_admin_event(session, f"pdf_purchased:{payment.pdf_order_id}", "PDF purchased", f"PDF order {payment.pdf_order_id} was paid.")
+        elif payment.print_order_id:
+            order = session.get(PrintOrder, payment.print_order_id)
+            order_number = order.order_number if order else payment.print_order_id
+            _queue_admin_event(
+                session,
+                f"paid_print_order:{payment.id}",
+                "New paid print order",
+                f"Print order {order_number} has been paid and is ready for production.",
+            )
 
         failed_history = session.scalar(
             select(OrderStatusHistory.id).where(
@@ -101,6 +122,25 @@ def _payment_event(session: Session, payment: Payment) -> None:
         _queue_admin_event(session, f"payment_failed:{payment.id}:legacy", "Payment failed", f"Payment for order {order_id} failed.")
     elif status in {"failed", "declined"}:
         _queue_admin_event(session, f"payment_failed:{payment.id}", "Payment failed", f"Payment for order {order_id} failed.")
+
+
+def _print_pdf_failed_event(session: Session, job: PdfJob) -> None:
+    pdf_order = session.get(PdfOrder, job.order_id)
+    if pdf_order is None or not pdf_order.idempotency_key:
+        return
+    print_order_id = pdf_order.idempotency_key.removeprefix("print-free:")
+    if print_order_id == pdf_order.idempotency_key:
+        return
+    order = session.get(PrintOrder, print_order_id)
+    if order is None:
+        return
+    detail = f" Error: {job.error_message}" if job.error_message else ""
+    _queue_admin_event(
+        session,
+        f"print_pdf_failed:{job.id}",
+        "Print PDF generation failed",
+        f"Print PDF generation failed for order {order.order_number}.{detail}",
+    )
 
 
 def _after_commit(session: Session) -> None:

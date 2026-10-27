@@ -93,7 +93,7 @@ class BackgroundJobRunner:
                         )
                         if job is None:
                             raise
-                elif job.status == "failed":
+                elif job.status == "failed" or (job_type == "generate_pdf" and job.status == "completed"):
                     job.status = "queued"
                     job.attempt_count = 0
                     job.max_attempts = max_attempts

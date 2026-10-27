@@ -20,7 +20,23 @@ function normalizeOffer(offer) {
   }
   const amount = Number(offer.amount);
   if (!Number.isFinite(amount) || amount < 0) throw new Error("PDF pricing returned an invalid amount.");
-  return { amount, currency: offer.currency, description: offer.description ?? "High-quality PDF download" };
+  const usdAmount = offer.usdAmount === null || offer.usdAmount === undefined ? null : Number(offer.usdAmount);
+  if (usdAmount !== null && (!Number.isFinite(usdAmount) || usdAmount < 0)) {
+    throw new Error("PDF pricing returned an invalid USD equivalent.");
+  }
+  const exchangeRate = offer.exchangeRate === null || offer.exchangeRate === undefined
+    ? null
+    : Number(offer.exchangeRate);
+  if (exchangeRate !== null && (!Number.isFinite(exchangeRate) || exchangeRate <= 0)) {
+    throw new Error("PDF pricing returned an invalid exchange rate.");
+  }
+  return {
+    amount,
+    currency: offer.currency,
+    description: offer.description ?? "High-quality PDF download",
+    usdAmount,
+    exchangeRate: exchangeRate === null ? null : String(offer.exchangeRate),
+  };
 }
 
 function normalizeDownloadUrl(url) {
@@ -90,6 +106,27 @@ export const pdfOrderService = {
   async getOrder(orderId) {
     const order = await request(`/orders/${encodeURIComponent(orderId)}`);
     return normalizePdfOrder(order);
+  },
+
+  async requestGeneration(orderId) {
+    const result = await request(`/orders/${encodeURIComponent(orderId)}/generate`, {
+      method: "POST",
+      body: { profile: "digital" },
+    });
+    if (!result.job || typeof result.job.id !== "string" || !generationStates.has(result.job.status)) {
+      throw new Error("PDF service returned an invalid generation job.");
+    }
+    return result.job;
+  },
+
+  async retryPayment(paymentId, provider) {
+    if (typeof paymentId !== "string" || !paymentId) throw new Error("A payment reference is required to retry checkout.");
+    const { data } = await apiRequest(`/payments/${encodeURIComponent(paymentId)}/retry`, {
+      method: "POST",
+      body: { provider },
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+    return normalizePdfOrder(data);
   },
 
   async listDownloads() {

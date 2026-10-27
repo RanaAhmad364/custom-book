@@ -109,6 +109,14 @@ export async function loadPrivatePrintOrderPhotos(orderId) {
   return data.items;
 }
 
+export async function loadAdminPrintOrderPdf(orderId) {
+  const { data } = await apiRequest(`/admin/orders/print/${encodeURIComponent(orderId)}/pdf`);
+  if (typeof data?.url !== "string" || !data.url) {
+    throw new Error("The print PDF service returned an invalid response.");
+  }
+  return data;
+}
+
 export async function updateAdminUser(user) {
   return (await apiRequest(`/admin/users/${encodeURIComponent(user.id)}`, {
     method: "PATCH",

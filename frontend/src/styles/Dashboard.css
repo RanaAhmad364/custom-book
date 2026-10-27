@@ -664,6 +664,24 @@
   margin-top: 13px;
 }
 
+.dashboard-project-pdf-access {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+  margin-top: 10px;
+}
+
+.dashboard-project-pdf-access .button {
+  min-height: 32px;
+  padding: 0 9px;
+  font-size: 9px;
+}
+
+.dashboard-project-pdf-access .dashboard-text-link {
+  min-height: 32px;
+}
+
 .dashboard-project-actions .button {
   min-height: 34px;
   gap: 7px;
@@ -1120,6 +1138,95 @@
 .dashboard-detail-grid div {
   display: grid;
   gap: 6px;
+}
+
+.dashboard-order-tracking,
+.dashboard-order-address {
+  padding: 20px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.dashboard-order-tracking h2,
+.dashboard-order-address h2,
+.admin-order-tracking h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font: 500 20px var(--serif);
+}
+
+.dashboard-order-address p {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.order-timeline {
+  display: grid;
+  gap: 0;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.order-timeline li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 10px;
+  min-height: 52px;
+}
+
+.order-timeline li:not(:last-child)::after {
+  position: absolute;
+  top: 13px;
+  bottom: -1px;
+  left: 6px;
+  width: 1px;
+  background: var(--border);
+  content: "";
+}
+
+.order-timeline-marker {
+  z-index: 1;
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--green);
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.order-timeline-content {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  padding-bottom: 16px;
+}
+
+.order-timeline-content strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.order-timeline-content time,
+.order-timeline-content p,
+.order-timeline-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.admin-order-tracking {
+  grid-column: 1 / -1;
+  padding: 14px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.admin-order-tracking .order-timeline {
+  max-height: 280px;
+  overflow: auto;
 }
 
 .dashboard-detail-grid span {
@@ -1786,6 +1893,10 @@
 
   .dashboard-project-card.is-compact .dashboard-project-actions {
     flex-wrap: wrap;
+  }
+
+  .dashboard-project-pdf-access {
+    align-items: flex-start;
   }
 
   .dashboard-project-toolbar {

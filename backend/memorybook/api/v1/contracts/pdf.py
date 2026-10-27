@@ -2,7 +2,7 @@ from flask import Blueprint, current_app, jsonify, request
 from sqlalchemy import select
 from werkzeug.exceptions import NotFound
 
-from memorybook.errors import ConflictError, ServiceUnavailableError, ValidationError
+from memorybook.errors import ServiceUnavailableError, ValidationError
 from memorybook.extensions import db, limiter
 from memorybook.models import PdfJob, PdfOrder
 from memorybook.permissions import active_user_required, get_authenticated_user
@@ -75,9 +75,7 @@ def request_generation(order_id: str):
     profile = body.get("profile", "digital")
     if not isinstance(profile, str):
         raise ValidationError("PDF profile must be digital or print.", {"profile": "invalid"})
-    if order.paid_at is None:
-        raise ConflictError("PDF generation is available after payment is confirmed.")
-    job, dispatch = queue_pdf_generation(order, profile)
+    job, dispatch = queue_pdf_generation(order, profile, refresh_current_document=True)
     if dispatch:
         try:
             from memorybook.tasks.dispatch import dispatch_pdf_generation

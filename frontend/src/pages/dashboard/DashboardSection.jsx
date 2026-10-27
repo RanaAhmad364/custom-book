@@ -7,6 +7,8 @@ import { DashboardEmptyState, DashboardPageHeading, OrderRow, ProjectCard } from
 import { SafeImage } from "../../components/common/SafeImage.jsx";
 import { PdfDownloadDetails, PdfDownloadHistory } from "../public/PdfPurchase/PdfPurchase.jsx";
 import { apiRequest } from "../../services/apiClient.js";
+import { printOrderService } from "../../services/printOrderService.js";
+import OrderTimeline from "../../features/orders/OrderTimeline.jsx";
 
 const titles = {
   projects: ["Your library", "My projects", "All your ideas, drafts, and finished books in one place."],
@@ -28,7 +30,7 @@ export default function DashboardSection({ section }) {
   const location = useLocation();
   const params = useParams();
   const { user } = useAuth();
-  const { data, updateProject, duplicateProject, deleteProject, removeFavorite, setNotifications, updateProfile, updateSettings, addAddress, deleteAddress } = useDashboard();
+  const { data, updateProject, duplicateProject, deleteProject, removeFavorite, setNotifications, updateProfile, updateSettings, addAddress, deleteAddress, reloadDashboard } = useDashboard();
   if (section === "download-detail") return <PdfDownloadDetails />;
   if (section === "order-detail") return <OrderDetails data={data} id={params.orderId} tracking={location.pathname.endsWith("/tracking")} />;
   if (section === "profile") return <Profile data={data} updateProfile={updateProfile} email={user.email} />;
@@ -38,7 +40,7 @@ export default function DashboardSection({ section }) {
   if (section === "notifications") return <Notifications notifications={data.notifications} onChange={setNotifications} />;
   if (section === "billing") return <Billing billing={data.billing} />;
   if (section === "downloads") return <PdfDownloadHistory />;
-  if (section === "orders") return <Orders orders={data.orders} />;
+  if (section === "orders") return <Orders orders={data.orders} pendingOrders={data.pendingOrders || []} reloadDashboard={reloadDashboard} />;
   if (section === "favorites") return <Favorites books={data.favorites} removeFavorite={removeFavorite} />;
   return <Projects section={section} data={data} updateProject={updateProject} duplicateProject={duplicateProject} deleteProject={deleteProject} />;
 }
@@ -82,11 +84,30 @@ function Projects({ section, data, updateProject, duplicateProject, deleteProjec
   </div>;
 }
 
-function Orders({ orders }) {
+function Orders({ orders, pendingOrders, reloadDashboard }) {
   const [filter, setFilter] = useState("All orders");
   const filters = ["All orders", ...new Set(orders.map((order) => order.status))];
   const shown = filter === "All orders" ? orders : orders.filter((order) => order.status === filter);
+  const [actionError, setActionError] = useState("");
+  const [busyOrderId, setBusyOrderId] = useState(null);
+  async function cancelOrder(orderId) {
+    if (!window.confirm("Cancel this unpaid print order? It cannot be paid after cancellation.")) return;
+    setBusyOrderId(orderId);
+    setActionError("");
+    try {
+      await printOrderService.cancelUnpaidOrder(orderId);
+      reloadDashboard();
+    } catch (failure) {
+      setActionError(failure instanceof Error ? failure.message : "The print order could not be cancelled.");
+    } finally {
+      setBusyOrderId(null);
+    }
+  }
   return <div className="dashboard-page"><DashboardPageHeading eyebrow={titles.orders[0]} title={titles.orders[1]} description={titles.orders[2]} action={<Link className="button button-outline" to="/print/orders">Print order history <ArrowRight size={14} /></Link>} />
+    {pendingOrders.length ? <section className="dashboard-section-block"><div className="dashboard-section-heading"><div><span className="eyebrow">Checkout needed</span><h2>Pending payment</h2></div></div>
+      {actionError ? <p className="dashboard-info-note" role="alert">{actionError}</p> : null}
+      <div className="dashboard-order-list">{pendingOrders.map((order) => <article className="dashboard-order-row" key={order.id}><div className="dashboard-order-main"><span className="dashboard-card-eyebrow">{order.reference}</span><h3>{order.title}</h3><p>Placed {order.date} · {order.total}</p><small>{order.paymentExpired ? "Payment window expired. This order can no longer be paid." : "Complete payment to send your book to production."}</small></div><div className="dashboard-order-links">{!order.paymentExpired ? <button className="button button-dark" type="button" disabled={busyOrderId === order.id} onClick={() => order.checkoutUrl ? window.location.assign(order.checkoutUrl) : window.location.assign(`/print/orders/${encodeURIComponent(order.id)}/confirmation`)}>Pay now</button> : null}<button className="button button-outline" type="button" disabled={busyOrderId === order.id} onClick={() => cancelOrder(order.id)}>{busyOrderId === order.id ? "Cancelling…" : "Cancel"}</button></div></article>)}</div>
+    </section> : null}
     <div className="dashboard-tab-row">{filters.map((item) => <button className={filter === item ? "active" : ""} key={item} type="button" onClick={() => setFilter(item)}>{item}</button>)}</div>
     <div className="dashboard-order-list">{shown.map((order) => <OrderRow key={order.id} order={order} />)}</div>
     {!shown.length ? <DashboardEmptyState icon={PackageCheck} title="No orders in this view." description="Your printed books and order updates will be collected here." action={<Link className="button button-outline" to="/books">Explore books</Link>} /> : null}
@@ -94,13 +115,52 @@ function Orders({ orders }) {
 }
 
 function OrderDetails({ data, id, tracking }) {
-  const order = data.orders.find((item) => item.id === id);
+  const summaryOrder = [...(data.orders || []), ...(data.pendingOrders || [])].find((item) => item.id === id);
+  const [orderDetails, setOrderDetails] = useState(null);
+  const [orderDetailsError, setOrderDetailsError] = useState("");
+  const [orderDetailsLoading, setOrderDetailsLoading] = useState(false);
+  useEffect(() => {
+    let active = true;
+    if (!id) return undefined;
+    setOrderDetails(null);
+    setOrderDetailsLoading(true);
+    setOrderDetailsError("");
+    printOrderService.getOrder(id).then((result) => {
+      if (active) setOrderDetails(result);
+    }).catch((failure) => {
+      if (active) setOrderDetailsError(failure instanceof Error ? failure.message : "Order details could not be loaded.");
+    }).finally(() => {
+      if (active) setOrderDetailsLoading(false);
+    });
+    return () => { active = false; };
+  }, [id]);
+  const order = summaryOrder ? {
+    ...summaryOrder,
+    ...orderDetails,
+    status: summaryOrder.status,
+    payment: summaryOrder.payment,
+    tracking: orderDetails?.shipment?.trackingNumber || summaryOrder.tracking,
+  } : null;
   if (!order) return <div className="dashboard-page"><DashboardEmptyState icon={PackageCheck} title="Order not found." description="This order is not available in your account." action={<Link to="/dashboard/orders">Back to orders</Link>} /></div>;
   return <div className="dashboard-page">
     <DashboardPageHeading eyebrow={tracking ? "A keepsake is on its way" : `Order ${order.id}`} title={tracking ? "Order tracking" : "Order details"} description={order.title} action={<Link className="button button-outline" to="/dashboard/orders"><ArrowLeft size={15} /> All orders</Link>} />
     <div className="dashboard-detail-card"><div className="dashboard-order-hero"><img src={order.image} alt="" /><div><span className="dashboard-card-eyebrow">{order.id}</span><h2>{order.title}</h2><p>Placed {order.date} · {order.total}</p><span className="dashboard-status status-in-production">{order.status}</span></div></div>
       <div className="dashboard-detail-grid"><div><span>Payment</span><strong>{order.payment}</strong></div><div><span>Production status</span><strong>{order.status}</strong></div>{order.deliveryEstimate ? <div><span>Estimated delivery</span><strong>{order.deliveryEstimate}</strong></div> : null}{order.tracking ? <div><span>Tracking reference</span><strong>{order.tracking}</strong></div> : null}</div>
       {!order.tracking && order.status === "Shipped" ? <p className="dashboard-info-note">A tracking reference has not been provided yet.</p> : null}
+      {orderDetailsError ? <p className="dashboard-info-note" role="alert">{orderDetailsError}</p> : null}
+      <section className="dashboard-order-tracking">
+        <div className="dashboard-section-heading"><div><span className="eyebrow">Every step, clearly</span><h2>Order timeline</h2></div></div>
+        {orderDetailsLoading ? <p className="dashboard-info-note" role="status">Loading order updates…</p> : null}
+        <OrderTimeline items={order.statusHistory} shipment={order.shipment} />
+      </section>
+      {order.shippingAddress ? <section className="dashboard-order-address">
+        <h2><MapPin size={16} /> Delivery address</h2>
+        <p>{order.shippingAddress.fullName}</p>
+        <p>{order.shippingAddress.line1}{order.shippingAddress.line2 ? `, ${order.shippingAddress.line2}` : ""}</p>
+        <p>{[order.shippingAddress.city, order.shippingAddress.region, order.shippingAddress.postalCode].filter(Boolean).join(", ")}</p>
+        <p>{order.shippingAddress.country}</p>
+      </section> : null}
+      {order.printPdf?.print?.status === "failed" ? <div className="dashboard-info-note" role="alert"><strong>Print PDF issue:</strong> {order.printPdf.print.error?.message || "The print-ready PDF could not be generated."} <Link to={`/print/orders/${encodeURIComponent(order.id)}/confirmation`}>View retry options</Link></div> : null}
     </div>
   </div>;
 }

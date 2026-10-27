@@ -41,10 +41,20 @@ FONT_FALLBACKS = {
 
 
 class PdfRenderError(Exception):
-    def __init__(self, code: str, message: str, *, retryable: bool = False):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        asset_id: str | None = None,
+        page_label: str | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.asset_id = asset_id
+        self.page_label = page_label
 
 
 def render_project_pdf(
@@ -126,6 +136,7 @@ def render_project_pdf(
     )
     if profile == "digital":
         context.start_page(page_width, page_height, 0)
+        context.current_page_label = str(cover_page.get("label") or "Cover")
         front_cover = cover_design.get("front") or {}
         cover_background = (cover_page.get("background") or {}).get("color")
         _draw_cover_face(
@@ -147,6 +158,7 @@ def render_project_pdf(
         pdf_canvas.showPage()
         for page in interior_pages:
             context.start_page(page_width, page_height, 0)
+            context.current_page_label = str(page.get("label") or "Untitled page")
             _draw_page(context, page, page_width, page_height, offset_x=0, offset_y=0)
             pdf_canvas.showPage()
         context.start_page(page_width, page_height, 0)
@@ -157,6 +169,7 @@ def render_project_pdf(
         media_width = (2 * page_width + spine_width + 2 * bleed) * 72
         media_height = (page_height + 2 * bleed) * 72
         context.start_page(2 * page_width + spine_width, page_height, bleed)
+        context.current_page_label = "Cover"
         back_x = bleed
         spine_x = bleed + page_width
         front_x = spine_x + spine_width
@@ -166,6 +179,7 @@ def render_project_pdf(
         pdf_canvas.showPage()
         for page in interior_pages:
             context.start_page(page_width, page_height, bleed)
+            context.current_page_label = str(page.get("label") or "Untitled page")
             _draw_page(context, page, page_width, page_height, offset_x=bleed, offset_y=bleed)
             pdf_canvas.showPage()
         expected_pages = len(interior_pages) + 1
@@ -213,6 +227,7 @@ class _RenderContext:
         self.minimum_print_dpi = minimum_print_dpi
         self.font_map = font_map
         self.image_cache: dict[str, Image.Image] = {}
+        self.current_page_label = "Cover"
 
     def start_page(self, width: float, height: float, bleed: float) -> None:
         self.page_width = width
@@ -246,6 +261,7 @@ def _draw_page(
     *,
     paint_background: bool = True,
 ) -> None:
+    context.current_page_label = str(page.get("label") or "Untitled page")
     if paint_background:
         page_background = page.get("background")
         background_options = page_background if isinstance(page_background, dict) else {}
@@ -331,6 +347,7 @@ def _draw_element(context: _RenderContext, element: dict[str, Any], width: float
             crop_y=element.get("cropY", 0.5),
             print_width_inches=box_width / 72,
             print_height_inches=box_height / 72,
+            asset_id=element.get("assetId") if isinstance(element.get("assetId"), str) else None,
             border_color=element.get("borderColor"),
             border_width=max(0.0, float(element.get("borderWidth", 0)) * width * 72),
             radius=max(0.0, float(element.get("borderRadius", 0)) * min(box_width, box_height)),
@@ -363,6 +380,7 @@ def _draw_image(
     border_color: object = None,
     border_width: float = 0,
     radius: float = 0,
+    asset_id: str | None = None,
 ) -> None:
     try:
         zoom_value = float(zoom)
@@ -386,6 +404,8 @@ def _draw_image(
             raise PdfRenderError(
                 "low_resolution_image",
                 f"A photo is below the required {context.minimum_print_dpi} DPI for print.",
+                asset_id=asset_id,
+                page_label=context.current_page_label,
             )
     source_left = max(0, int(math.floor(crop_left)))
     source_top = max(0, int(math.floor(crop_top)))
@@ -572,6 +592,7 @@ def _draw_cover_face(
             fit="cover",
             print_width_inches=photo_width,
             print_height_inches=photo_height,
+            asset_id=face.get("photoAssetId") if isinstance(face.get("photoAssetId"), str) else None,
         )
     title = face.get("title") or document["metadata"]["title"]
     if not isinstance(title, str):

@@ -16,9 +16,19 @@ test("dashboard data is composed from authenticated API resources", async () => 
       currency: "PKR",
       createdAt: "2026-10-01T00:00:00Z",
       trackingNumber: "TRACK-101",
+    }, {
+      id: "order-2",
+      orderNumber: "PRT-102",
+      productionStatus: "pending_payment",
+      paymentStatus: "pending",
+      amount: "1200.00",
+      currency: "PKR",
+      createdAt: "2026-10-04T00:00:00Z",
+      checkoutUrl: "https://paypal.example/checkout",
     }] },
     "/pdf/orders": { items: [{
       id: "pdf-1",
+      projectId: "project-1",
       title: "Family memories",
       paymentStatus: "successful",
       generationStatus: "ready",
@@ -65,8 +75,13 @@ test("dashboard data is composed from authenticated API resources", async () => 
     assert.equal(dashboard.profile.name, "Memory Member");
     assert.equal(dashboard.projects[0].title, "My saved book");
     assert.equal(dashboard.projects[0].pages, 24);
+    assert.equal(dashboard.projects[0].pdfAccess.state, "ready");
+    assert.equal(dashboard.projects[0].pdfAccess.orderId, "pdf-1");
     assert.equal(dashboard.orders[0].status, "Shipped");
     assert.equal(dashboard.orders[0].reference, "PRT-101");
+    assert.equal(dashboard.pendingOrders.length, 1);
+    assert.equal(dashboard.pendingOrders[0].id, "order-2");
+    assert.equal(dashboard.pendingOrders[0].checkoutUrl, "https://paypal.example/checkout");
     assert.equal(dashboard.downloads[0].status, "Ready");
     assert.equal(dashboard.notifications[0].read, false);
     assert.equal(dashboard.addresses[0].countryCode, "PK");

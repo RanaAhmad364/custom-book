@@ -38,6 +38,7 @@ from memorybook.models import (
     Payment,
     PaymentAttempt,
     PdfOrder,
+    PdfJob,
     ProjectAsset,
     PlatformSetting,
     PricingRule,
@@ -67,6 +68,7 @@ from memorybook.services.notifications import queue_order_event
 from memorybook.services.pricing import default_currency, validate_product_pricing
 
 ADMIN_PRINT_STATES = {
+    "pending_payment",
     "order_placed",
     "payment_confirmed",
     "processing",
@@ -84,6 +86,7 @@ ADMIN_PRINT_STATES = {
 }
 
 PRINT_STATUS_TRANSITIONS = {
+    "pending_payment": {"payment_confirmed", "cancelled"},
     "order_placed": {"payment_confirmed", "cancellation_requested", "cancelled"},
     "payment_confirmed": {"processing", "cancellation_requested"},
     "processing": {"printed", "cancellation_requested"},
@@ -1441,7 +1444,12 @@ def _order_dict(
         "projectId": order.project_id,
         "projectTitle": project.title if project else None,
         "bookTitle": book.title if book else None,
-        "pageCount": project.page_count if project else None,
+        "pageCount": (
+            (order.price_snapshot or {}).get("pageCount", project.page_count if project else None)
+            if kind == "print"
+            else order.page_count if kind == "pdf"
+            else project.page_count if project else None
+        ),
         "privateProject": private_project,
         "revisionId": order.project_revision_id,
         "status": order.status,
@@ -1462,10 +1470,45 @@ def _order_dict(
                 "createdAt": revision.immutable_at.isoformat(),
             }
     if kind == "print":
+        items = db.session.scalars(
+            select(PrintOrderItem).where(PrintOrderItem.print_order_id == order.id)
+        ).all()
+        specification = items[0].specification_snapshot if items else {}
+        payload["customer"] = {
+            "name": (user.full_name if user else None) or "Name not provided",
+            "email": user.email if user else None,
+            "phone": user.phone if user else None,
+        }
+        payload["deliveryAddress"] = order.shipping_address_snapshot
+        payload["priceSnapshot"] = order.price_snapshot or {}
+        payload["configuration"] = {
+            **specification,
+            "quantity": items[0].quantity if items else (order.price_snapshot or {}).get("quantity"),
+            "pageCount": items[0].page_count if items else (order.price_snapshot or {}).get("pageCount"),
+        }
+        print_pdf_order = db.session.scalar(
+            select(PdfOrder).where(PdfOrder.idempotency_key == f"print-free:{order.id}")
+        )
+        if print_pdf_order:
+            payload["printPdfOrderId"] = print_pdf_order.id
+            payload["printPdf"] = {}
+            for profile in ("digital", "print"):
+                job = db.session.scalar(
+                    select(PdfJob).where(
+                        PdfJob.order_id == print_pdf_order.id,
+                        PdfJob.generation_profile == profile,
+                    )
+                )
+                payload["printPdf"][profile] = {
+                    "status": job.status if job else "not_started",
+                    "error": {
+                        "code": job.error_code,
+                        "message": job.error_message,
+                    } if job and job.status == "failed" else None,
+                }
         payload["photosAvailable"] = bool(
             private_project and order.paid_at is not None and order.status == "in_production"
         )
-        items = db.session.scalars(select(PrintOrderItem).where(PrintOrderItem.print_order_id == order.id)).all()
         payload["items"] = [{
             "quantity": item.quantity, "pageCount": item.page_count, "specification": item.specification_snapshot,
         } for item in items]
@@ -1473,7 +1516,13 @@ def _order_dict(
         payload["shipment"] = ({
             "id": shipment.id, "carrier": shipment.carrier, "trackingNumber": shipment.tracking_number,
             "status": shipment.status, "estimatedDeliveryAt": shipment.estimated_delivery_at.isoformat() if shipment.estimated_delivery_at else None,
+            "shippedAt": shipment.shipped_at.isoformat() if shipment.shipped_at else None,
+            "deliveredAt": shipment.delivered_at.isoformat() if shipment.delivered_at else None,
         } if shipment else None)
+        if shipment:
+            payload["carrier"] = shipment.carrier
+            payload["trackingNumber"] = shipment.tracking_number
+            payload["estimatedDeliveryAt"] = shipment.estimated_delivery_at.isoformat() if shipment.estimated_delivery_at else None
     else:
         payload["pageCount"] = order.page_count
     return payload
@@ -1520,6 +1569,46 @@ def log_private_print_photo_access(order: PrintOrder, actor_id: str, asset_id: s
         target_type="print_order",
         target_id=order.id,
         details={"projectId": order.project_id, "assetId": asset_id},
+        ip_address=request.remote_addr,
+    ))
+    db.session.commit()
+
+
+def get_paid_print_order_pdf(order_id: str) -> tuple[PrintOrder, GeneratedFile]:
+    order = db.session.scalar(
+        select(PrintOrder).where(PrintOrder.id == order_id)
+    )
+    if order is None:
+        raise NotFound("Print order was not found.")
+    if order.paid_at is None or not _order_has_successful_payment(order.id):
+        raise NotFound("The print PDF is available only for paid print orders.")
+    pdf_order = db.session.scalar(
+        select(PdfOrder).where(PdfOrder.idempotency_key == f"print-free:{order.id}")
+    )
+    if pdf_order is None or pdf_order.paid_at is None:
+        raise NotFound("The print PDF is not available for this order.")
+    generated_file = db.session.scalar(
+        select(GeneratedFile).where(
+            GeneratedFile.pdf_order_id == pdf_order.id,
+            GeneratedFile.generation_profile == "print",
+        )
+    )
+    if generated_file is None:
+        raise NotFound("The print PDF has not finished generating.")
+    return order, generated_file
+
+
+def log_private_print_pdf_access(order: PrintOrder, actor_id: str, generated_file: GeneratedFile) -> None:
+    db.session.add(AdminActivityLog(
+        actor_user_id=actor_id,
+        action="private_print_order.pdf_accessed",
+        target_type="print_order",
+        target_id=order.id,
+        details={
+            "projectId": order.project_id,
+            "generatedFileId": generated_file.id,
+            "generationProfile": generated_file.generation_profile,
+        },
         ip_address=request.remote_addr,
     ))
     db.session.commit()
@@ -1663,6 +1752,11 @@ def list_orders(args) -> dict:
             .outerjoin(BookProduct, BookProduct.id == UserProject.product_id)
             .outerjoin(Payment, payment_join)
         )
+        if order_kind == "print" and kind == "print":
+            query = query.where(
+                PrintOrder.paid_at.is_not(None),
+                Payment.status == "successful",
+            )
         query = _apply_order_filters(query, model, Payment, args, search=search)
         count_query = (
             select(func.count(model.id))
@@ -1672,6 +1766,11 @@ def list_orders(args) -> dict:
             .outerjoin(Payment, payment_join)
         )
         count_query = _apply_order_filters(count_query, model, Payment, args, search=search)
+        if order_kind == "print" and kind == "print":
+            count_query = count_query.where(
+                PrintOrder.paid_at.is_not(None),
+                Payment.status == "successful",
+            )
         total += db.session.scalar(count_query) or 0
         rows = db.session.execute(query.order_by(model.created_at.desc()).limit(limit)).all()
         result.extend(_order_dict(
@@ -1824,6 +1923,7 @@ def update_order(order_id: str, kind: str, data: dict, actor_id: str) -> dict:
     if order is None:
         raise NotFound("Order was not found.")
     shipment = None
+    existing_shipment = None
     if "status" in data:
         state = _text(data, "status", required=True, maximum=40)
         allowed = {"cancellation_requested", "cancelled"} if kind == "pdf" else ADMIN_PRINT_STATES
@@ -1860,12 +1960,39 @@ def update_order(order_id: str, kind: str, data: dict, actor_id: str) -> dict:
                 note=f"Admin status update from {old_status}",
                 changed_by_user_id=actor_id,
             ))
+            status_messages = {
+                "processing": (
+                    "Your book is being prepared",
+                    "Your book is being prepared.",
+                ),
+                "printed": (
+                    "Your book has been printed",
+                    "Your book has been printed.",
+                ),
+                "shipped": (
+                    "Your book has been shipped",
+                    f"Your book has been shipped (tracking: "
+                    f"{(data.get('trackingNumber') or (existing_shipment.tracking_number if existing_shipment else 'not provided')).strip()}).",
+                ),
+                "out_for_delivery": (
+                    "Your book is out for delivery",
+                    "Your book is out for delivery.",
+                ),
+                "delivered": (
+                    "Your book has been delivered",
+                    "Your book has been delivered.",
+                ),
+            }
+            title, message = status_messages.get(
+                state,
+                ("Order status updated", f"Order {order.order_number} is now {state.replace('_', ' ')}."),
+            )
             queue_order_event(
                 order.user_id,
                 f"order_status:{kind}:{order.id}:{state}",
                 "order",
-                "Order status updated",
-                f"Order {order.order_number} is now {state.replace('_', ' ')}.",
+                title,
+                message,
                 "/dashboard/orders",
             )
         if kind == "print" and state in {"shipped", "out_for_delivery", "delivered"}:
@@ -2472,6 +2599,20 @@ def save_setting(data: dict, setting_id: str | None = None) -> dict:
         item = db.session.scalar(select(PlatformSetting).where(PlatformSetting.setting_key == key))
         item = item or PlatformSetting(setting_key=key, setting_value={})
     item.setting_value = _body_dict(data.get("value"), "value")
+    if item.setting_key == "paypal_pkr_to_usd_rate":
+        try:
+            rate = Decimal(str(item.setting_value.get("rate")))
+        except (InvalidOperation, ValueError, TypeError) as failure:
+            raise ValidationError(
+                "PayPal conversion rate must contain a positive USD-per-PKR rate.",
+                {"value.rate": "invalid"},
+            ) from failure
+        if not rate.is_finite() or rate <= 0 or rate > 1 or rate.as_tuple().exponent < -8:
+            raise ValidationError(
+                "PayPal conversion rate must be greater than zero, at most 1, and have no more than 8 decimals.",
+                {"value.rate": "invalid"},
+            )
+        item.setting_value = {"rate": format(rate, "f")}
     if "public" in data:
         if not isinstance(data["public"], bool):
             raise ValidationError("public must be a boolean.", {"public": "invalid"})

@@ -16,6 +16,7 @@ from memorybook.models import (
     BookProduct,
     DownloadEntitlement,
     DownloadHistory,
+    GeneratedFile,
     OrderStatusHistory,
     Payment,
     PdfJob,
@@ -284,6 +285,7 @@ def authenticated_client(app, email):
 
 
 def test_pdf_order_creation_persists_status_history_with_order_id(app):
+    app.config["MANUAL_PAYMENTS_ENABLED"] = True
     client, csrf = authenticated_client(app, "pdf-history@example.test")
     with app.app_context():
         user = db.session.scalar(db.select(User).where(User.email == "pdf-history@example.test"))
@@ -335,9 +337,20 @@ def test_pdf_order_creation_persists_status_history_with_order_id(app):
         assert history is not None
         assert history.pdf_order_id == response.json["id"]
         assert history.print_order_id is None
+        repeated = client.post(
+            "/api/v1/pdf/orders",
+            json={"projectId": project_id, "provider": "manual"},
+            headers={**csrf, "Idempotency-Key": "pdf-order-history-second-key"},
+        )
+        assert repeated.status_code == 201
+        assert repeated.json["id"] == response.json["id"]
+        with app.app_context():
+            assert db.session.scalar(
+                db.select(db.func.count()).select_from(PdfOrder).where(PdfOrder.project_id == project_id)
+            ) == 1
 
 
-def test_pdf_generation_requires_payment_is_idempotent_and_download_is_owner_scoped(app):
+def test_pdf_generation_requires_payment_is_idempotent_and_download_is_owner_scoped(app, monkeypatch):
     client, csrf = authenticated_client(app, "reader@example.test")
     fake_storage = MemoryStorage()
     app.extensions["asset_storage"] = fake_storage
@@ -401,10 +414,12 @@ def test_pdf_generation_requires_payment_is_idempotent_and_download_is_owner_sco
             provider_payment_id="pi_verified-test",
         ))
         db.session.commit()
+        project_id = project.id
         order_id = order.id
 
     unpaid = client.post(f"/api/v1/pdf/orders/{order_id}/generate", json={"profile": "digital"}, headers=csrf)
     assert unpaid.status_code == 409
+    assert unpaid.json["error"]["code"] == "PDF_NOT_PURCHASED"
     with app.app_context():
         order = db.session.get(PdfOrder, order_id)
         order.status = "paid"
@@ -440,7 +455,11 @@ def test_pdf_generation_requires_payment_is_idempotent_and_download_is_owner_sco
     assert fake_storage.objects[f"generated/pdf/{order_id}/digital/{job_id}.pdf"][1] == "application/pdf"
     notifications = client.get("/api/v1/payments/notifications")
     assert notifications.status_code == 200
-    assert any(item["title"] == "PDF ready" for item in notifications.json["items"])
+    assert any(
+        item["title"] == "Your PDF is ready to download"
+        and item["message"] == "Your PDF is ready to download."
+        for item in notifications.json["items"]
+    )
 
     downloads = client.get("/api/v1/pdf/downloads")
     assert downloads.status_code == 200
@@ -456,10 +475,238 @@ def test_pdf_generation_requires_payment_is_idempotent_and_download_is_owner_sco
     assert private_pdf.headers["Cache-Control"] == "private, no-store"
     with app.app_context():
         assert db.session.scalar(db.select(DownloadEntitlement).where(DownloadEntitlement.id == entitlement_id)).download_count == 1
+        entitlement = db.session.get(DownloadEntitlement, entitlement_id)
+        assert entitlement.max_downloads is None
+        assert entitlement.expires_at is None
         assert db.session.scalar(db.select(db.func.count()).select_from(DownloadHistory)) == 1
         assert db.session.scalar(db.select(PdfJob).where(PdfJob.id == job_id)).status == "ready"
 
     other_client, _ = authenticated_client(app, "other-reader@example.test")
+    assert other_client.get(f"/api/v1/projects/{project_id}/access").status_code == 404
     assert other_client.get(link.json["download"]["url"]).status_code == 404
     assert other_client.get(f"/api/v1/pdf/jobs/{job_id}").status_code == 404
     assert other_client.get(f"/api/v1/pdf/downloads/{entitlement_id}").status_code == 404
+
+    with app.app_context():
+        project = db.session.get(UserProject, project_id)
+        changed_document = document_with_photos()
+        changed_document["metadata"]["title"] = "Edited after purchase"
+        project.document = changed_document
+        project.version += 1
+        db.session.commit()
+        updated_version = project.version
+    regenerated = client.post(f"/api/v1/pdf/orders/{order_id}/generate", json={"profile": "digital"}, headers=csrf)
+    assert regenerated.status_code == 202
+    with app.app_context():
+        current_order = db.session.get(PdfOrder, order_id)
+        current_revision = db.session.get(ProjectRevision, current_order.project_revision_id)
+        assert current_revision.document_version == updated_version
+        assert current_revision.document["metadata"]["title"] == "Edited after purchase"
+        background_job = db.session.scalar(
+            db.select(BackgroundJob).where(
+                BackgroundJob.job_type == "generate_pdf",
+                BackgroundJob.reference_id == job_id,
+            )
+        )
+        assert background_job.status == "queued"
+        failed_background_job_id = background_job.id
+
+    from memorybook.services import pdf_generation as pdf_generation_service
+
+    real_renderer = pdf_generation_service.render_project_pdf
+
+    def fail_renderer(*args, **kwargs):
+        raise PdfRenderError("test_render_failed", "The test renderer failed.")
+
+    monkeypatch.setattr(pdf_generation_service, "render_project_pdf", fail_renderer)
+    app.extensions["background_jobs"]._run_job(failed_background_job_id)
+    failed_access = client.get(f"/api/v1/projects/{project_id}/access")
+    assert failed_access.status_code == 200
+    assert failed_access.json["state"] == "generating"
+    assert failed_access.json["generationStatus"] == "failed"
+    assert failed_access.json["generationError"]["code"] == "test_render_failed"
+    failed_file = client.get(link.json["download"]["url"])
+    assert failed_file.status_code == 409
+    assert failed_file.json["error"]["code"] == "PDF_GENERATING"
+
+    monkeypatch.setattr(pdf_generation_service, "render_project_pdf", real_renderer)
+    retried = client.post(f"/api/v1/pdf/orders/{order_id}/generate", json={"profile": "digital"}, headers=csrf)
+    assert retried.status_code == 202
+    assert retried.json["job"]["status"] == "queued"
+    with app.app_context():
+        background_job = db.session.scalar(
+            db.select(BackgroundJob).where(
+                BackgroundJob.job_type == "generate_pdf",
+                BackgroundJob.reference_id == job_id,
+            )
+        )
+        assert background_job.status == "queued"
+        regen_background_job_id = background_job.id
+    app.extensions["background_jobs"]._run_job(regen_background_job_id)
+    ready_access = client.get(f"/api/v1/projects/{project_id}/access")
+    assert ready_access.status_code == 200
+    assert ready_access.json["state"] == "ready"
+    assert ready_access.json["downloadId"] == entitlement_id
+    redownload = client.get(f"/api/v1/pdf/downloads/{entitlement_id}")
+    assert redownload.status_code == 200
+    with app.app_context():
+        entitlement = db.session.get(DownloadEntitlement, entitlement_id)
+        assert entitlement.download_count == 2
+        assert entitlement.max_downloads is None
+        assert entitlement.expires_at is None
+
+
+def test_project_pdf_access_reports_purchase_lifecycle_and_requires_ownership(app):
+    client, _ = authenticated_client(app, "pdf-access@example.test")
+    other_client, _ = authenticated_client(app, "pdf-access-other@example.test")
+    order_ids = {}
+    entitlement_ids = {}
+    with app.app_context():
+        user = db.session.scalar(db.select(User).where(User.email == "pdf-access@example.test"))
+        projects = {}
+        for label in ("unpaid", "failed", "pending", "generating", "ready"):
+            project = UserProject(
+                user_id=user.id,
+                title=f"Access {label}",
+                page_count=2,
+                version=1,
+                document=document_with_photos(),
+            )
+            db.session.add(project)
+            db.session.flush()
+            projects[label] = project
+            if label == "unpaid":
+                continue
+            revision = ProjectRevision(
+                project_id=project.id,
+                revision_number=1,
+                document_version=1,
+                document=document_with_photos(),
+                checksum_sha256=(label[0] * 64),
+            )
+            db.session.add(revision)
+            db.session.flush()
+            is_paid = label in {"generating", "ready"}
+            order = PdfOrder(
+                order_number=f"PDF-ACCESS-{label.upper()}",
+                user_id=user.id,
+                project_id=project.id,
+                project_revision_id=revision.id,
+                status="paid" if is_paid else "pending",
+                currency="USD",
+                service_price=Decimal("8.00"),
+                discount_amount=Decimal("0.00"),
+                tax_amount=Decimal("0.00"),
+                total_amount=Decimal("8.00"),
+                price_snapshot={"pdfProfiles": ["digital"]},
+                page_count=2,
+                paid_at=datetime.now(UTC) if is_paid else None,
+            )
+            db.session.add(order)
+            db.session.flush()
+            db.session.add(Payment(
+                user_id=user.id,
+                pdf_order_id=order.id,
+                provider="paypal",
+                status="successful" if is_paid else "failed" if label == "failed" else "pending",
+                amount=Decimal("8.00"),
+                currency="USD",
+            ))
+            if is_paid:
+                job = PdfJob(
+                    order_id=order.id,
+                    generation_profile="digital",
+                    status="queued" if label == "generating" else "ready",
+                )
+                db.session.add(job)
+                db.session.flush()
+                if label == "ready":
+                    generated_file = GeneratedFile(
+                        pdf_order_id=order.id,
+                        generation_profile="digital",
+                        storage_key=f"generated/pdf/{order.id}/digital/{job.id}.pdf",
+                        file_type="application/pdf",
+                        byte_size=100,
+                        checksum_sha256="a" * 64,
+                    )
+                    db.session.add(generated_file)
+                    db.session.flush()
+                    db.session.add(DownloadEntitlement(
+                        user_id=user.id,
+                        pdf_order_id=order.id,
+                        generated_file_id=generated_file.id,
+                    ))
+                else:
+                    entitlement = DownloadEntitlement(
+                        user_id=user.id,
+                        pdf_order_id=order.id,
+                        generated_file_id=None,
+                    )
+                    db.session.add(entitlement)
+                    db.session.flush()
+                    entitlement_ids[label] = entitlement.id
+            elif label in {"pending", "failed"}:
+                entitlement = DownloadEntitlement(
+                    user_id=user.id,
+                    pdf_order_id=order.id,
+                    generated_file_id=None,
+                )
+                db.session.add(entitlement)
+                db.session.flush()
+                entitlement_ids[label] = entitlement.id
+            if label != "unpaid":
+                order_ids[label] = order.id
+            if label == "ready":
+                later_pending_order = PdfOrder(
+                    order_number="PDF-ACCESS-READY-PENDING",
+                    user_id=user.id,
+                    project_id=project.id,
+                    project_revision_id=revision.id,
+                    status="pending",
+                    currency="USD",
+                    service_price=Decimal("8.00"),
+                    discount_amount=Decimal("0.00"),
+                    tax_amount=Decimal("0.00"),
+                    total_amount=Decimal("8.00"),
+                    price_snapshot={"pdfProfiles": ["digital"]},
+                    page_count=2,
+                )
+                db.session.add(later_pending_order)
+                db.session.flush()
+                db.session.add(Payment(
+                    user_id=user.id,
+                    pdf_order_id=later_pending_order.id,
+                    provider="paypal",
+                    status="pending",
+                    amount=Decimal("8.00"),
+                    currency="USD",
+                ))
+        project_ids = {name: project.id for name, project in projects.items()}
+        db.session.commit()
+
+    expected = {
+        "unpaid": "not_purchased",
+        "failed": "payment_pending",
+        "pending": "payment_pending",
+        "generating": "generating",
+        "ready": "ready",
+    }
+    for label, state in expected.items():
+        response = client.get(f"/api/v1/projects/{project_ids[label]}/access")
+        assert response.status_code == 200
+        assert response.json["state"] == state
+    assert client.get(f"/api/v1/projects/{project_ids['unpaid']}/access").json == {
+        "projectId": project_ids["unpaid"],
+        "state": "not_purchased",
+    }
+    assert other_client.get(f"/api/v1/projects/{project_ids['ready']}/access").status_code == 404
+    pending_download = client.get(f"/api/v1/pdf/downloads/{entitlement_ids['pending']}")
+    assert pending_download.status_code == 409
+    assert pending_download.json["error"]["code"] == "PDF_PAYMENT_PENDING"
+    failed_download = client.get(f"/api/v1/pdf/downloads/{entitlement_ids['failed']}")
+    assert failed_download.status_code == 409
+    assert failed_download.json["error"]["code"] == "PDF_NOT_PURCHASED"
+
+    generating_download = client.get(f"/api/v1/pdf/downloads/{entitlement_ids['generating']}")
+    assert generating_download.status_code == 409
+    assert generating_download.json["error"]["code"] == "PDF_GENERATING"

@@ -37,11 +37,13 @@ const coverOptions = [
 ];
 
 const productionSteps = [
+  ["pending_payment", "Pending payment"],
   ["order_placed", "Order placed"],
   ["payment_confirmed", "Payment confirmed"],
   ["processing", "Processing"],
   ["printed", "Printed"],
   ["shipped", "Shipped"],
+  ["out_for_delivery", "Out for delivery"],
   ["delivered", "Delivered"],
   ["cancelled", "Cancelled"],
   ["refunded", "Refunded"],
@@ -330,7 +332,7 @@ export function PrintOrderFlow() {
 
           {step === "checkout" ? <><h2>Print order summary</h2><div className="print-choice-summary"><div><span>Tier</span><strong>{configuration.tier.toUpperCase()}</strong></div><div><span>Paper</span><strong>{paperOptions.find((item) => item.id === configuration.paper)?.title}</strong></div><div><span>Cover</span><strong>{coverOptions.find((item) => item.id === configuration.cover)?.title}</strong></div><div><span>Quantity</span><strong>{configuration.quantity}</strong></div><div><span>Delivery to</span><strong>{configuration.address.fullName}<br />{configuration.address.line1}, {configuration.address.city} {configuration.address.postalCode}</strong></div></div><label className="print-discount-field">Discount code<input value={configuration.discountCode} maxLength={80} autoCapitalize="characters" onChange={(event) => updateConfiguration({ discountCode: event.target.value })} placeholder="Enter code (optional)" /></label><p className="print-discount-note">Your code is validated by the server and reflected in the refreshed quote.</p><button className="print-refresh-quote" type="button" onClick={() => updateConfiguration({})} disabled={quoteLoading}><RefreshCw size={14} /> Refresh server quote</button></> : null}
 
-          {step === "checkout" ? <><QuoteBreakdown quote={quote} /><PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading} />{methodsError ? <p className="print-inline-error" role="alert">{methodsError}</p> : null}</> : null}
+          {step === "checkout" ? <><QuoteBreakdown quote={quote} /><PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading} usdAmount={quote?.usdAmount} exchangeRate={quote?.exchangeRate} />{methodsError ? <p className="print-inline-error" role="alert">{methodsError}</p> : null}</> : null}
           {quoteLoading ? <div className="print-message"><LoaderCircle className="print-spin" size={18} /> Requesting a current quote from the printing service…</div> : null}
           {quoteError ? <div className="print-message print-error" role="alert"><CircleAlert size={18} /><span>{quoteError}</span><button className="button button-outline" type="button" onClick={() => updateConfiguration({})}><RefreshCw size={14} /> Try quote again</button></div> : null}
           {step !== "checkout" && step !== "shipping" ? <QuoteBreakdown quote={quote} compact /> : null}
@@ -370,7 +372,8 @@ function usePrintOrder(orderId) {
         if (!active) return;
         setOrder(item);
         setError("");
-        if (item.paymentStatus === "pending" || (item.productionStatus !== "delivered")) {
+        if ((!item.paymentExpired && item.paymentStatus === "pending")
+          || !["delivered", "cancelled", "refunded"].includes(item.productionStatus)) {
           timer = window.setTimeout(load, 15000);
         }
       } catch (failure) {
@@ -395,8 +398,15 @@ export function PrintOrderResult() {
   const [cancelStatus, setCancelStatus] = useState("");
   const [cancelError, setCancelError] = useState("");
   const [cancelling, setCancelling] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState("");
+  const [pdfRetrying, setPdfRetrying] = useState(false);
+  const [pdfRetryError, setPdfRetryError] = useState("");
   const statusIndex = order ? productionSteps.findIndex(([id]) => id === order.productionStatus) : -1;
-  const cancellationAllowed = statusIndex >= 0 && statusIndex < productionSteps.findIndex(([id]) => id === "shipped") && !order?.cancellationStatus;
+  const cancellationAllowed = order?.paymentStatus === "successful"
+    && statusIndex >= 0
+    && statusIndex < productionSteps.findIndex(([id]) => id === "shipped")
+    && !order?.cancellationStatus;
 
   async function requestCancellation(event) {
     event.preventDefault();
@@ -413,6 +423,51 @@ export function PrintOrderResult() {
     }
   }
 
+  async function retryCheckout() {
+    setRetrying(true);
+    setRetryError("");
+    try {
+      const retried = await printOrderService.retryPayment(order.paymentId, order.paymentProvider);
+      if (retried.checkoutUrl) {
+        window.location.assign(retried.checkoutUrl);
+        return;
+      }
+
+      async function cancelUnpaidOrder() {
+        if (!window.confirm("Cancel this unpaid print order? It cannot be paid after cancellation.")) return;
+        setCancelling(true);
+        setCancelError("");
+        try {
+          await printOrderService.cancelUnpaidOrder(order.id);
+          setCancelStatus("Your unpaid order has been cancelled.");
+          refresh();
+        } catch (failure) {
+          setCancelError(failure instanceof Error ? failure.message : "The unpaid order could not be cancelled.");
+        } finally {
+          setCancelling(false);
+        }
+      }
+
+      async function retryPrintPdf() {
+        setPdfRetrying(true);
+        setPdfRetryError("");
+        try {
+          await printOrderService.retryPrintPdf(order.id);
+          refresh();
+        } catch (failure) {
+          setPdfRetryError(failure instanceof Error ? failure.message : "The print PDF could not be retried.");
+        } finally {
+          setPdfRetrying(false);
+        }
+      }
+      refresh();
+    } catch (failure) {
+      setRetryError(failure instanceof Error ? failure.message : "Checkout could not be retried.");
+    } finally {
+      setRetrying(false);
+    }
+  }
+
   return <main className="print-order-page print-result-page">
     <Link to="/print/orders" className="print-back-link"><ArrowLeft size={15} /> All print orders</Link>
     <PageHeading eyebrow={isTracking ? "Delivery updates" : "Print order"} title={isTracking ? "Follow your book home." : order?.paymentStatus === "successful" ? "Your book is in good hands." : "Checking your order."} description={isTracking ? "Production and delivery updates are retrieved from your order record." : "Your order and payment are confirmed by the printing service, never by this browser."} />
@@ -420,8 +475,9 @@ export function PrintOrderResult() {
     {order ? <>
       <section className="print-order-status-card">
         <div className="print-order-status-heading"><span className={`print-order-status-icon${order.paymentStatus === "successful" ? " confirmed" : ""}`}>{order.paymentStatus === "successful" ? <BadgeCheck size={23} /> : <Clock3 size={23} />}</span><div><span className="eyebrow">Order {order.id}</span><h2>{order.paymentStatus === "successful" ? "Payment confirmed" : order.paymentStatus === "failed" ? "Payment failed" : "Payment pending"}</h2><p>{order.bookTitle || "Your MemoryBook"}{order.quantity ? ` · ${order.quantity} ${order.quantity === 1 ? "copy" : "copies"}` : ""}</p></div><strong>{order.quote ? formatPrice(order.quote.total, order.quote.currency) : ""}</strong></div>
-        {order.paymentStatus === "failed" ? <p className="print-inline-error"><CircleAlert size={15} /> Payment was not confirmed. Your book will not enter production until payment is verified. <Link to={`/create/design/${encodeURIComponent(order.projectId)}/print`}>Start checkout again</Link>.</p> : null}
-        {order.paymentStatus === "pending" ? <p className="print-order-note"><Clock3 size={15} /> We are waiting for the payment service to confirm your transaction.</p> : null}
+        {order.paymentStatus === "failed" ? <div className="print-inline-error"><CircleAlert size={15} /> Payment was not confirmed. Your book will not enter production until payment is verified. <button className="button button-outline" type="button" onClick={retryCheckout} disabled={retrying}>{retrying ? "Starting retry…" : "Retry payment"}</button>{retryError ? <span role="alert">{retryError}</span> : null}</div> : null}
+        {order.paymentStatus === "pending" ? <div className="print-order-note"><Clock3 size={15} /><span>{order.paymentExpired ? "The payment window has expired. This order can no longer be paid." : "We are waiting for the payment service to confirm your transaction."}</span>{!order.paymentExpired && order.checkoutUrl ? <button className="button button-outline" type="button" onClick={() => window.location.assign(order.checkoutUrl)}>Pay now</button> : null}{!order.paymentExpired ? <button className="button button-outline" type="button" disabled={cancelling} onClick={cancelUnpaidOrder}>{cancelling ? "Cancelling…" : "Cancel order"}</button> : null}</div> : null}
+        {order.printPdf?.print?.status === "failed" ? <div className="print-inline-error" role="alert"><CircleAlert size={15} /><span>{order.printPdf.print.error?.message || "The print-ready PDF could not be generated."}</span><button className="button button-outline" type="button" disabled={pdfRetrying} onClick={retryPrintPdf}>{pdfRetrying ? "Retrying…" : "Retry PDF generation"}</button>{pdfRetryError ? <small>{pdfRetryError}</small> : null}</div> : null}
         {!isTracking ? <div className="print-order-dates"><div><Clock3 size={16} /><span>Estimated production<strong>{formatDate(order.productionEstimate)}</strong></span></div><div><Truck size={16} /><span>Estimated delivery<strong>{formatDate(order.deliveryEstimate)}</strong></span></div></div> : null}
       </section>
       <ManualPaymentPanel order={order} onSubmitted={refresh} />

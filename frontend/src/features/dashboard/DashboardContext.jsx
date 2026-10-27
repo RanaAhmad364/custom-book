@@ -15,6 +15,7 @@ function DashboardUserScope({ user, children }) {
     profile: { name: user.name || user.email, email: user.email, phone: "", photo: "" },
     projects: [],
     orders: [],
+    pendingOrders: [],
     downloads: [],
     favorites: [],
     notifications: [],

@@ -199,6 +199,16 @@ export const projectService = {
     return responseProject({ data }, key);
   },
 
+  async getPdfAccess(owner, projectId) {
+    ownerKey(owner);
+    const { data } = await apiRequest(`${projectPath(projectId)}/access`);
+    const states = new Set(["not_purchased", "payment_pending", "generating", "ready"]);
+    if (data?.projectId !== projectId || !states.has(data?.state)) {
+      throw new Error("The project PDF access service returned an invalid response.");
+    }
+    return data;
+  },
+
   async getPricingQuote(owner, projectId, pageCount) {
     ownerKey(owner);
     if (!Number.isInteger(pageCount) || pageCount < 1) {

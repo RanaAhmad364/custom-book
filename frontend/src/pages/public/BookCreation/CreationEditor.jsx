@@ -30,6 +30,7 @@ import { formatCurrency } from "../../../services/money.js";
 import CoverDesigner from "../../../features/bookEditor/CoverDesigner.jsx";
 import BookPreview, { PageArtwork } from "../../../features/bookEditor/BookPreview.jsx";
 import BookReview from "../../../features/bookEditor/BookReview.jsx";
+import { ProjectPdfAccessAction } from "../../../features/pdfPurchase/ProjectPdfAccessAction.jsx";
 import "./BookEditor.css";
 
 const tools = [
@@ -904,6 +905,7 @@ function CreationEditorSession({ adminMode }) {
       {adminMode && !previewOnly ? <button type="button" className={`editor-top-icon${snapToGrid ? " active" : ""}`} onClick={() => setSnapToGrid((value) => !value)} aria-label="Toggle 5 percent grid snapping" aria-pressed={snapToGrid}>Grid</button> : null}
       {!previewOnly ? <button type="button" className="editor-preview-button" onClick={() => setCoverDesignerOpen(true)}><BookOpen size={15} />Cover</button> : null}
       {!previewOnly ? <button type="button" className="editor-preview-button" onClick={() => setBookReviewOpen(true)}><Check size={15} />Final review</button> : null}
+      {!adminMode && !previewOnly ? <ProjectPdfAccessAction projectId={projectId} className="editor-preview-button" disabled={dirtyRef.current || saveStatus !== "Saved"} /> : null}
       <button type="button" className={`editor-preview-button${preview ? " active" : ""}`} onClick={() => { if (!previewOnly) setPreview(false); setBookPreviewOpen(true); }}><Eye size={15} />Full preview</button>
       <button type="button" className="editor-top-icon" onClick={() => setHelpOpen(true)} aria-label="Editor help"><HelpCircle size={17} /></button>
     </header>

@@ -4,7 +4,8 @@ import csv
 from datetime import UTC, datetime, timedelta
 from io import BytesIO, StringIO
 
-from flask import Blueprint, Response, abort, jsonify, request, send_file
+from flask import Blueprint, Response, abort, current_app, jsonify, request, send_file, url_for
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from memorybook.errors import ServiceUnavailableError, ValidationError
 from memorybook.integrations.asset_storage import get_asset_storage
@@ -393,6 +394,51 @@ def private_print_order_photo(order_id: str, asset_id: str):
     except ServiceUnavailableError:
         abort(404)
     response = send_file(BytesIO(content), mimetype=content_type, max_age=0)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@admin_blueprint.get("/orders/print/<string:order_id>/pdf")
+@roles_required("admin")
+def private_print_order_pdf(order_id: str):
+    order, generated_file = admin.get_paid_print_order_pdf(order_id)
+    signer = URLSafeTimedSerializer(current_app.config["SECRET_KEY"], salt="memorybook-admin-print-pdf")
+    token = signer.dumps({"orderId": order.id, "fileId": generated_file.id})
+    download_path = url_for("api_root.api_v1.admin.private_print_order_pdf_file", order_id=order.id, token=token)
+    return jsonify({
+        "url": download_path.removeprefix("/api/v1"),
+        "fileName": f"{order.order_number}-print.pdf",
+        "expiresInSeconds": current_app.config["ASSET_S3_PRESIGNED_URL_TTL"],
+    })
+
+
+@admin_blueprint.get("/orders/print/<string:order_id>/pdf/<string:token>")
+@roles_required("admin")
+def private_print_order_pdf_file(order_id: str, token: str):
+    signer = URLSafeTimedSerializer(current_app.config["SECRET_KEY"], salt="memorybook-admin-print-pdf")
+    try:
+        payload = signer.loads(token, max_age=current_app.config["ASSET_S3_PRESIGNED_URL_TTL"])
+    except (BadSignature, SignatureExpired):
+        abort(404)
+    if not isinstance(payload, dict) or payload.get("orderId") != order_id:
+        abort(404)
+    order, generated_file = admin.get_paid_print_order_pdf(order_id)
+    if payload.get("fileId") != generated_file.id:
+        abort(404)
+    admin.log_private_print_pdf_access(order, get_authenticated_user().id, generated_file)
+    storage = get_asset_storage()
+    try:
+        content = storage.download(generated_file.storage_key)
+    except ServiceUnavailableError:
+        abort(404)
+    response = send_file(
+        BytesIO(content),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=f"{order.order_number}-print.pdf",
+        max_age=0,
+    )
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Cache-Control"] = "private, no-store"
     return response

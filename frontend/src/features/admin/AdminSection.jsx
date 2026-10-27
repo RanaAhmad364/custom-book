@@ -11,6 +11,7 @@ import BookProductForm from "./BookProductForm.jsx";
 import AdminRecordEditor from "./AdminRecordEditor.jsx";
 import { DashboardPageHeading } from "../dashboard/DashboardUI.jsx";
 import { pricingRecordDefaults } from "./pricingForm.js";
+import OrderTimeline from "../orders/OrderTimeline.jsx";
 
 const sectionTitles = {
   dashboard: ["Operations overview", "Admin dashboard", "Live platform activity and order health."],
@@ -186,11 +187,7 @@ function AdminHistoryTable({ records, mode, onSelect }) {
 function AdminOrderTimeline({ items, loading }) {
   if (loading) return <p className="admin-list-message" role="status">Loading order timeline…</p>;
   if (!items?.length) return <p className="admin-list-message">No status changes have been recorded yet.</p>;
-  return <ol className="admin-order-timeline">{items.map((item) => <li key={item.id}>
-    <span className="admin-status">{item.status.replaceAll("_", " ")}</span>
-    <time>{new Date(item.createdAt).toLocaleString()}</time>
-    {item.note ? <p>{item.note}</p> : null}
-  </li>)}</ol>;
+  return <OrderTimeline items={items} />;
 }
 
 export default function AdminSection({ sectionOverride }) {
@@ -784,9 +781,10 @@ export default function AdminSection({ sectionOverride }) {
           saveError={error} saving={saving}
           onClose={() => { setDraft(null); setSelected(null); setBookFormDirty(false); }} />
         : <AdminRecordEditor section={section === "purchases" ? (draft.type === "pdf" ? "pdf-orders" : "print-orders") : section} record={draft} setRecord={setDraft} onUpload={uploadAsset}
+          orderHistory={detailHistory?.type === "timeline" ? detailHistory.items : []} orderHistoryLoading={historyLoading}
           onClose={() => { setDraft(null); setSelected(null); }} onSave={saveRecord} saveError={error} saving={saving} /> : null}
     </div>
-    {draft && detailHistory?.type === "timeline" ? <section className="admin-panel admin-history-detail">
+    {draft && detailHistory?.type === "timeline" && draft.type !== "print" ? <section className="admin-panel admin-history-detail">
       <h2>Order timeline</h2><AdminOrderTimeline items={detailHistory.items} loading={historyLoading} />
     </section> : null}
     {draft && detailHistory?.type === "orders" ? <section className="admin-panel admin-history-detail">

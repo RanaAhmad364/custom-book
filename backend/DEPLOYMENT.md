@@ -71,7 +71,7 @@ Required for the Flask production process:
 | `ASSET_S3_PRESIGNED_URL_TTL` | Short lifetime suitable for private photo and file access. |
 | `PDF_FONT_DIR` | Optional mounted directory of operator-licensed font files. |
 | `PDF_MAX_OUTPUT_BYTES`, `PDF_MIN_PRINT_DPI`, `PDF_PRINT_BLEED_INCHES`, `PDF_PRINT_SAFE_MARGIN_INCHES` | Approved rendering thresholds; confirm with the print vendor. |
-| `PDF_DOWNLOAD_MAX_COUNT`, `PDF_DOWNLOAD_TTL_DAYS` | Approved entitlement limits and retention policy. |
+| `PRINT_ORDER_PAYMENT_EXPIRY_HOURS` | Age after which unpaid print orders are cancelled by the scheduled `flask expire-print-orders` cleanup command; defaults to 24 hours. |
 | `PAYMENT_DEFAULT_CURRENCY` | Product/business currency policy, normally `PKR` for the target market. |
 | `PAYMENT_PRIMARY_GATEWAY` | Preference only; does not enable or prove a gateway contract. |
 | `STRIPE_ENABLED`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Only enable when the account, currency, webhook endpoint, and verified real/sandbox transactions are approved. Secrets stay server-side. |

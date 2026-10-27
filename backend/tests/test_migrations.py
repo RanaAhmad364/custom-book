@@ -114,6 +114,12 @@ def test_initial_migration_upgrades_database(tmp_path):
         assert "privacy_override" in {column["name"] for column in inspector.get_columns("user_projects")}
         assert "original_deleted_at" in {column["name"] for column in inspector.get_columns("project_assets")}
         assert "idempotency_key" in {column["name"] for column in inspector.get_columns("payments")}
+        assert {
+            "pkr_amount",
+            "usd_amount",
+            "exchange_rate",
+            "provider_capture_id",
+        }.issubset({column["name"] for column in inspector.get_columns("payments")})
         assert "checkout_url" in {column["name"] for column in inspector.get_columns("payment_attempts")}
         assert "event_key" in {column["name"] for column in inspector.get_columns("notifications")}
 
