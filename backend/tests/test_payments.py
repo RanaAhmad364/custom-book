@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import re
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -22,6 +23,7 @@ from memorybook.integrations.payment_gateways import (
 from memorybook.models import (
     DownloadEntitlement,
     GeneratedFile,
+    Invoice,
     Payment,
     PaymentAttempt,
     PaymentWebhookEvent,
@@ -98,6 +100,9 @@ def test_payment_methods_fail_closed_for_unverified_pkr_gateways(app, client):
         app.config.update(
             PAYMENT_PRIMARY_GATEWAY="payfast",
             MANUAL_PAYMENTS_ENABLED=True,
+            PAYPAL_MODE="sandbox",
+            PAYPAL_CLIENT_ID=None,
+            PAYPAL_CLIENT_SECRET=None,
             PAYFAST_ENABLED=True,
             PAYFAST_CONTRACT_VERIFIED=True,
             JAZZCASH_ENABLED=True,
@@ -133,7 +138,7 @@ def test_paypal_method_and_admin_rate_setting_are_server_configured(app, monkeyp
             PAYPAL_MODE="sandbox",
             PAYPAL_CLIENT_ID="server-client",
             PAYPAL_CLIENT_SECRET="server-secret",
-            PAYPAL_WEBHOOK_ID="webhook-123",
+            PAYPAL_WEBHOOK_ID=None,
             PAYPAL_PKR_TO_USD_RATE="0.0036",
         )
         user = User(email="paypal-admin-rate@example.test", password_hash="test-hash")
@@ -204,10 +209,13 @@ def _make_pdf_payment(
     paid: bool,
     provider: str = "stripe",
     currency: str = "USD",
+    email: str = "payments@example.test",
 ) -> tuple[str, str, str | None]:
-    user = User(email="payments@example.test", password_hash="test-hash")
-    db.session.add(user)
-    db.session.flush()
+    user = db.session.scalar(db.select(User).where(User.email == email))
+    if user is None:
+        user = User(email=email, password_hash="test-hash")
+        db.session.add(user)
+        db.session.flush()
     project = UserProject(
         user_id=user.id,
         title="Payment test book",
@@ -291,8 +299,13 @@ def _make_pdf_payment(
     return payment.id, order.id, download_id
 
 
-def _make_paypal_payment() -> tuple[str, str]:
-    payment_id, order_id, _ = _make_pdf_payment(paid=False, provider="paypal", currency="PKR")
+def _make_paypal_payment(email="payments@example.test") -> tuple[str, str]:
+    payment_id, order_id, _ = _make_pdf_payment(
+        paid=False,
+        provider="paypal",
+        currency="PKR",
+        email=email,
+    )
     payment = db.session.get(Payment, payment_id)
     payment.amount = Decimal("2800.00")
     payment.pkr_amount = Decimal("2800.00")
@@ -307,6 +320,265 @@ def _make_paypal_payment() -> tuple[str, str]:
     attempt.provider_reference = "PAYPAL-ORDER-1"
     db.session.commit()
     return payment_id, order_id
+
+
+def _make_smart_paypal_payment(email="payments@example.test") -> tuple[str, str]:
+    payment_id, order_id = _make_paypal_payment(email)
+    payment = db.session.get(Payment, payment_id)
+    attempt = db.session.scalar(
+        db.select(PaymentAttempt).where(PaymentAttempt.payment_id == payment_id)
+    )
+    payment.provider_payment_id = None
+    attempt.provider_reference = None
+    db.session.commit()
+    return payment_id, order_id
+
+
+def _authenticated_payment_client(app, email):
+    client = app.test_client()
+    response = client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": "correct-horse-battery"},
+    )
+    assert response.status_code == 201
+    message = app.extensions["auth_email_outbox"][-1][2]
+    code = re.search(r"\b(\d{6})\b", message).group(1)
+    assert client.post("/api/v1/auth/verify-otp", json={"email": email, "code": code}).status_code == 200
+    response = client.post("/api/v1/auth/login", json={"email": email, "password": "correct-horse-battery"})
+    assert response.status_code == 200
+    csrf = next(
+        value.split(";", 1)[0].split("=", 1)[1]
+        for value in response.headers.getlist("Set-Cookie")
+        if value.startswith("csrf_access_token=")
+    )
+    return client, {"X-CSRF-TOKEN": csrf}
+
+
+def _paypal_completed_capture(order_id, reference_id, capture_id="PAYPAL-SMART-CAPTURE", value="10.08"):
+    return {
+        "id": order_id,
+        "status": "COMPLETED",
+        "purchase_units": [{
+            "reference_id": reference_id,
+            "payments": {"captures": [{
+                "id": capture_id,
+                "status": "COMPLETED",
+                "amount": {"currency_code": "USD", "value": value},
+            }]},
+        }],
+    }
+
+
+def test_paypal_smart_button_api_owner_create_capture_and_double_capture(app, monkeypatch):
+    app.config.update(PAYPAL_MODE="sandbox", PAYPAL_CLIENT_ID="client", PAYPAL_CLIENT_SECRET="secret")
+    email = "paypal-smart-owner@example.test"
+    client, csrf = _authenticated_payment_client(app, email)
+    with app.app_context():
+        payment_id, order_id = _make_smart_paypal_payment(email)
+        payment = db.session.get(Payment, payment_id)
+        order = db.session.get(PdfOrder, order_id)
+        calls = []
+        generation_calls = []
+        monkeypatch.setattr(
+            payments,
+            "_queue_pdf_generation",
+            lambda item: generation_calls.append(item.id),
+        )
+
+        def fake_request(_self, method, path, payload, *, request_id=None):
+            calls.append((method, path, payload))
+            if path == "/v2/checkout/orders":
+                return {"id": "PAYPAL-SMART-ORDER", "status": "CREATED"}
+            return _paypal_completed_capture(
+                "PAYPAL-SMART-ORDER",
+                order.order_number,
+            )
+
+        monkeypatch.setattr(PayPalGateway, "_request", fake_request)
+        headers = {**csrf, "Idempotency-Key": "paypal-smart-create"}
+        created = client.post(
+            f"/api/v1/payments/{payment_id}/paypal/create-order",
+            headers=headers,
+        )
+        repeated_create = client.post(
+            f"/api/v1/payments/{payment_id}/paypal/create-order",
+            headers=headers,
+        )
+        assert created.status_code == 200
+        assert repeated_create.json == created.json
+        assert created.json == {
+            "paypalOrderId": "PAYPAL-SMART-ORDER",
+            "chargedAmountUsd": "10.08",
+            "rate": "0.00360000",
+        }
+        captured = client.post(
+            f"/api/v1/payments/{payment_id}/paypal/capture-order",
+            json={"paypalOrderId": "PAYPAL-SMART-ORDER"},
+            headers=csrf,
+        )
+        repeated = client.post(
+            f"/api/v1/payments/{payment_id}/paypal/capture-order",
+            json={"paypalOrderId": "PAYPAL-SMART-ORDER"},
+            headers=csrf,
+        )
+        assert captured.status_code == 200
+        assert captured.json["status"] == "successful"
+        assert repeated.status_code == 200
+        assert repeated.json["status"] == "successful"
+        assert [path for _, path, _ in calls].count("/v2/checkout/orders/PAYPAL-SMART-ORDER/capture") == 1
+        assert payment.status == "successful"
+        assert payment.pkr_amount == Decimal("2800.00")
+        assert payment.usd_amount == Decimal("10.08")
+        assert payment.exchange_rate == Decimal("0.00360000")
+        assert payment.provider_capture_id == "PAYPAL-SMART-CAPTURE"
+        assert order.status == "paid"
+        assert order.paid_at is not None
+        assert generation_calls == [payment_id]
+        invoices = db.session.scalars(
+            db.select(Invoice).where(Invoice.payment_id == payment_id)
+        ).all()
+        assert len(invoices) == 1
+        assert invoices[0].amount == Decimal("2800.00")
+        assert invoices[0].currency == "PKR"
+
+
+def test_paypal_smart_button_endpoints_reject_wrong_owner(app):
+    app.config.update(PAYPAL_MODE="sandbox", PAYPAL_CLIENT_ID="client", PAYPAL_CLIENT_SECRET="secret")
+    client, csrf = _authenticated_payment_client(app, "paypal-smart-other@example.test")
+    with app.app_context():
+        payment_id, _ = _make_smart_paypal_payment()
+
+    response = client.post(
+        f"/api/v1/payments/{payment_id}/paypal/create-order",
+        headers=csrf,
+    )
+    assert response.status_code == 404
+    response = client.post(
+        f"/api/v1/payments/{payment_id}/paypal/capture-order",
+        json={"paypalOrderId": "NOT-OWNED"},
+        headers=csrf,
+    )
+    assert response.status_code == 404
+
+
+def test_paypal_smart_button_rejects_mismatched_capture_amount(app, monkeypatch):
+    app.config.update(PAYPAL_MODE="sandbox", PAYPAL_CLIENT_ID="client", PAYPAL_CLIENT_SECRET="secret")
+    with app.app_context():
+        payment_id, order_id = _make_smart_paypal_payment()
+        payment = db.session.get(Payment, payment_id)
+        monkeypatch.setattr(
+            PayPalGateway,
+            "create_smart_order",
+            lambda *_args: "PAYPAL-SMART-MISMATCH",
+        )
+        created = payments.create_paypal_order(payment)
+        monkeypatch.setattr(
+            PayPalGateway,
+            "capture_order",
+            lambda *_args: _paypal_completed_capture(
+                "PAYPAL-SMART-MISMATCH",
+                "PDF-PAYMENT-TEST",
+                value="9.99",
+            ),
+        )
+        with pytest.raises(ValidationError, match="amount or currency"):
+            payments.capture_paypal_order(payment, created["paypalOrderId"])
+        db.session.rollback()
+        db.session.expire_all()
+        assert db.session.get(Payment, payment_id).status == "pending"
+        assert db.session.get(PdfOrder, order_id).paid_at is None
+
+
+def test_paypal_cancelled_capture_can_retry_same_payment(app, monkeypatch):
+    app.config.update(PAYPAL_MODE="sandbox", PAYPAL_CLIENT_ID="client", PAYPAL_CLIENT_SECRET="secret")
+    with app.app_context():
+        payment_id, order_id = _make_smart_paypal_payment()
+        payment = db.session.get(Payment, payment_id)
+        order_ids = iter(["PAYPAL-SMART-CANCELLED", "PAYPAL-SMART-RETRY"])
+        monkeypatch.setattr(PayPalGateway, "create_smart_order", lambda *_args: next(order_ids))
+        first = payments.create_paypal_order(payment)
+        monkeypatch.setattr(
+            PayPalGateway,
+            "capture_order",
+            lambda *_args: {"id": first["paypalOrderId"], "status": "VOIDED"},
+        )
+        failed = payments.capture_paypal_order(payment, first["paypalOrderId"])
+        assert failed["status"] == "failed"
+        assert payment.status == "failed"
+        assert db.session.get(PdfOrder, order_id).paid_at is None
+
+        retried = payments.retry_payment(payment, "paypal-smart-retry", "paypal")
+        next_order = payments.create_paypal_order(payment)
+        monkeypatch.setattr(
+            PayPalGateway,
+            "capture_order",
+            lambda *_args: _paypal_completed_capture(
+                "PAYPAL-SMART-RETRY",
+                "PDF-PAYMENT-TEST",
+                capture_id="PAYPAL-SMART-RETRY-CAPTURE",
+            ),
+        )
+        completed = payments.capture_paypal_order(payment, next_order["paypalOrderId"])
+        attempts = db.session.scalars(
+            db.select(PaymentAttempt)
+            .where(PaymentAttempt.payment_id == payment_id)
+            .order_by(PaymentAttempt.attempt_number)
+        ).all()
+        assert retried["paymentStatus"] == "pending"
+        assert next_order["paypalOrderId"] == "PAYPAL-SMART-RETRY"
+        assert completed["status"] == "successful"
+        assert len(attempts) == 2
+        assert attempts[0].status == "failed"
+        assert attempts[1].status == "successful"
+        assert db.session.get(PdfOrder, order_id).paid_at is not None
+
+
+def test_paypal_webhook_after_smart_capture_does_not_repeat_success_work(app, monkeypatch):
+    app.config.update(PAYPAL_MODE="sandbox", PAYPAL_CLIENT_ID="client", PAYPAL_CLIENT_SECRET="secret")
+    with app.app_context():
+        payment_id, _order_id = _make_smart_paypal_payment()
+        payment = db.session.get(Payment, payment_id)
+        monkeypatch.setattr(PayPalGateway, "create_smart_order", lambda *_args: "PAYPAL-SMART-WEBHOOK")
+        created = payments.create_paypal_order(payment)
+        monkeypatch.setattr(
+            PayPalGateway,
+            "capture_order",
+            lambda *_args: _paypal_completed_capture(
+                created["paypalOrderId"],
+                "PDF-PAYMENT-TEST",
+                capture_id="PAYPAL-SMART-WEBHOOK-CAPTURE",
+            ),
+        )
+        generation_calls = []
+        monkeypatch.setattr(payments, "_queue_pdf_generation", lambda item: generation_calls.append(item.id))
+        payments.capture_paypal_order(payment, created["paypalOrderId"])
+        notifications_before = db.session.scalar(
+            db.select(db.func.count(Notification.id)).where(Notification.user_id == payment.user_id)
+        )
+
+    event = {
+        "id": "WH-PAYPAL-SMART-CAPTURE-LATE",
+        "event_type": "PAYMENT.CAPTURE.COMPLETED",
+        "resource": {
+            "id": "PAYPAL-SMART-WEBHOOK-CAPTURE",
+            "amount": {"currency_code": "USD", "value": "10.08"},
+            "supplementary_data": {"related_ids": {"order_id": "PAYPAL-SMART-WEBHOOK"}},
+        },
+    }
+    monkeypatch.setattr(PayPalGateway, "handle_webhook", lambda *_args: event)
+    with app.app_context():
+        result = payments.process_paypal_event(json.dumps(event).encode(), _paypal_headers())
+        payment = db.session.get(Payment, payment_id)
+        notifications_after = db.session.scalar(
+            db.select(db.func.count(Notification.id)).where(Notification.user_id == payment.user_id)
+        )
+        assert result["processed"] is True
+        assert payment.status == "successful"
+        assert generation_calls == [payment_id]
+        assert notifications_after == notifications_before
+        assert db.session.scalar(
+            db.select(db.func.count(Invoice.id)).where(Invoice.payment_id == payment_id)
+        ) == 1
 
 
 def _paypal_headers():
@@ -331,7 +603,7 @@ def test_paypal_approved_order_captures_and_marks_paid_once(app, monkeypatch):
         "event_type": "CHECKOUT.ORDER.APPROVED",
         "resource": {
             "id": "PAYPAL-ORDER-1",
-            "purchase_units": [{"custom_id": payment_id}],
+            "purchase_units": [{"custom_id": payment_id, "reference_id": "PDF-PAYMENT-TEST"}],
         },
     }
     _fake_paypal_webhook(monkeypatch, event)
@@ -365,7 +637,7 @@ def test_paypal_approved_order_captures_and_marks_paid_once(app, monkeypatch):
         assert payment.exchange_rate == Decimal("0.00360000")
         assert order.status == "paid"
         assert order.paid_at is not None
-        assert captures == [("PAYPAL-ORDER-1", "PAYPAL-ORDER-1")]
+        assert captures == [("PAYPAL-ORDER-1", f"{payment_id}:attempt:1")]
         assert generated == [payment_id]
         history = db.session.scalars(
             db.select(OrderStatusHistory).where(OrderStatusHistory.pdf_order_id == order_id)
@@ -379,7 +651,10 @@ def test_paypal_wrong_capture_amount_does_not_mark_order_paid(app, monkeypatch):
     event = {
         "id": "WH-PAYPAL-WRONG-AMOUNT",
         "event_type": "CHECKOUT.ORDER.APPROVED",
-        "resource": {"id": "PAYPAL-ORDER-1", "purchase_units": [{"custom_id": payment_id}]},
+        "resource": {
+            "id": "PAYPAL-ORDER-1",
+            "purchase_units": [{"custom_id": payment_id, "reference_id": "PDF-PAYMENT-TEST"}],
+        },
     }
     _fake_paypal_webhook(monkeypatch, event)
     monkeypatch.setattr(
@@ -432,8 +707,8 @@ def test_paypal_cancelled_payment_can_retry_without_creating_another_order(app, 
     _fake_paypal_webhook(monkeypatch, event)
     monkeypatch.setattr(
         PayPalGateway,
-        "create_checkout",
-        lambda *_args: CheckoutSession("https://www.sandbox.paypal.com/checkoutnow?token=retry", "PAYPAL-ORDER-2"),
+        "create_smart_order",
+        lambda *_args: "PAYPAL-ORDER-2",
     )
     with app.app_context():
         failed = payments.process_paypal_event(json.dumps(event).encode(), _paypal_headers())
@@ -443,24 +718,24 @@ def test_paypal_cancelled_payment_can_retry_without_creating_another_order(app, 
         assert db.session.get(PdfOrder, order_id).paid_at is None
 
         retry = payments.retry_payment(payment, "retry-key-1", "paypal")
+        created = payments.create_paypal_order(payment)
         attempts = db.session.scalars(
             db.select(PaymentAttempt)
             .where(PaymentAttempt.payment_id == payment_id)
             .order_by(PaymentAttempt.attempt_number)
         ).all()
         assert retry["paymentStatus"] == "pending"
-        assert retry["checkoutUrl"].startswith("https://www.sandbox.paypal.com/")
+        assert retry["checkoutUrl"] is None
+        assert created["paypalOrderId"] == "PAYPAL-ORDER-2"
         assert len(attempts) == 2
         assert attempts[-1].provider_reference == "PAYPAL-ORDER-2"
 
 
-def test_paypal_checkout_uses_server_credentials_and_usd_snapshot(app, monkeypatch):
+def test_paypal_smart_order_uses_server_snapshot_and_order_number_reference(app, monkeypatch):
     app.config.update(
         PAYPAL_MODE="sandbox",
         PAYPAL_CLIENT_ID="server-client-id",
         PAYPAL_CLIENT_SECRET="server-only-secret",
-        PAYPAL_WEBHOOK_ID="webhook-id",
-        PUBLIC_APP_URL="https://memorybook.example.test",
     )
     with app.app_context():
         payment_id, _order_id = _make_paypal_payment()
@@ -469,19 +744,21 @@ def test_paypal_checkout_uses_server_credentials_and_usd_snapshot(app, monkeypat
 
         def fake_request(_self, method, path, payload, *, request_id=None):
             calls.append((method, path, payload, request_id))
-            return {
-                "id": "PAYPAL-CREATED-ORDER",
-                "status": "CREATED",
-                "links": [{"rel": "approve", "href": "https://www.sandbox.paypal.com/checkoutnow?token=abc"}],
-            }
+            return {"id": "PAYPAL-CREATED-ORDER", "status": "CREATED"}
 
         monkeypatch.setattr(PayPalGateway, "_request", fake_request)
-        checkout = PayPalGateway().create_checkout(payment, "My book", "test-idempotency-key")
+        paypal_order_id = PayPalGateway().create_smart_order(
+            payment,
+            "PDF-PAYMENT-TEST",
+            "test-idempotency-key",
+        )
 
-    assert checkout.reference == "PAYPAL-CREATED-ORDER"
-    assert checkout.url.startswith("https://www.sandbox.paypal.com/")
+    assert paypal_order_id == "PAYPAL-CREATED-ORDER"
+    assert calls[0][1] == "/v2/checkout/orders"
+    assert calls[0][2]["intent"] == "CAPTURE"
+    assert calls[0][2]["purchase_units"][0]["reference_id"] == "PDF-PAYMENT-TEST"
+    assert "application_context" not in calls[0][2]
     assert calls[0][2]["purchase_units"][0]["amount"] == {"currency_code": "USD", "value": "10.08"}
-    assert calls[0][2]["application_context"]["return_url"].endswith(f"/pdf/orders/{_order_id}/processing")
 
 
 def test_new_paypal_payment_snapshots_pkr_usd_and_admin_rate(app, monkeypatch):

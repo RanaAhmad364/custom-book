@@ -153,7 +153,6 @@ def _paypal_is_configured() -> bool:
         current_app.config.get("PAYPAL_MODE") in {"sandbox", "live"}
         and current_app.config.get("PAYPAL_CLIENT_ID")
         and current_app.config.get("PAYPAL_CLIENT_SECRET")
-        and current_app.config.get("PAYPAL_WEBHOOK_ID")
     )
 
 
@@ -227,48 +226,29 @@ class PayPalGateway:
         return _read_json_response(request, "PayPal")
 
     def create_checkout(self, payment: Payment, title: str, idempotency_key: str) -> CheckoutSession:
+        raise ValidationError("PayPal checkout must be created through the Smart Buttons flow.")
+
+    def create_smart_order(self, payment: Payment, reference_id: str, idempotency_key: str) -> str:
         if payment.usd_amount is None:
             raise ValidationError("A USD payment snapshot is required for PayPal.")
-        origin = current_app.config["PUBLIC_APP_URL"].rstrip("/")
-        route = "pdf" if payment.pdf_order_id else "print"
-        order_id = payment.pdf_order_id or payment.print_order_id
-        result_url = f"{origin}/{route}/orders/{order_id}/processing"
         payload = self._request(
             "POST",
             "/v2/checkout/orders",
             {
                 "intent": "CAPTURE",
                 "purchase_units": [{
-                    "reference_id": payment.id,
+                    "reference_id": reference_id,
                     "custom_id": payment.id,
                     "invoice_id": "MB-" + hashlib.sha256(idempotency_key.encode()).hexdigest()[:24],
-                    "description": title[:127],
                     "amount": {"currency_code": "USD", "value": format(payment.usd_amount, ".2f")},
                 }],
-                "application_context": {
-                    "return_url": result_url,
-                    "cancel_url": f"{result_url}?payment=cancelled",
-                    "user_action": "PAY_NOW",
-                },
             },
-            request_id=f"memorybook-{idempotency_key}"[:108],
+            request_id=f"memorybook-smart-{idempotency_key}"[:108],
         )
         paypal_order_id = payload.get("id")
-        approval_url = next(
-            (
-                link.get("href") for link in payload.get("links", [])
-                if isinstance(link, dict) and link.get("rel") == "approve"
-            ),
-            None,
-        )
-        if (
-            payload.get("status") != "CREATED"
-            or not isinstance(paypal_order_id, str)
-            or not isinstance(approval_url, str)
-            or not _is_paypal_approval_url(approval_url, current_app.config.get("PAYPAL_MODE"))
-        ):
+        if payload.get("status") != "CREATED" or not isinstance(paypal_order_id, str) or not paypal_order_id:
             raise ServiceUnavailableError("PayPal returned an invalid checkout order.")
-        return CheckoutSession(url=approval_url, reference=paypal_order_id)
+        return paypal_order_id
 
     def capture_order(self, paypal_order_id: str, idempotency_key: str) -> dict:
         return self._request(
@@ -326,12 +306,6 @@ class PayPalGateway:
         if not isinstance(refund_id, str) or status is None:
             raise ServiceUnavailableError("PayPal returned an invalid refund response.")
         return refund_id, status
-
-
-def _is_paypal_approval_url(value: str, mode: str | None) -> bool:
-    parsed = urlparse(value)
-    expected_host = "www.sandbox.paypal.com" if mode == "sandbox" else "www.paypal.com"
-    return parsed.scheme == "https" and parsed.hostname == expected_host
 
 
 def _manual_instructions(method: str) -> dict[str, str]:

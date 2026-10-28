@@ -12,6 +12,8 @@ from memorybook.integrations.payment_gateways import available_payment_methods
 from memorybook.models import Notification, Payment, PaymentAttempt, Refund
 from memorybook.permissions import active_user_required, get_authenticated_user, roles_required
 from memorybook.services.payments import (
+    capture_paypal_order,
+    create_paypal_order,
     process_jazzcash_callback,
     process_paypal_event,
     process_stripe_event,
@@ -108,6 +110,40 @@ def retry(payment_id: str):
     if not isinstance(body, dict):
         raise ValidationError("A JSON object is required.")
     return jsonify(retry_payment(payment, key, body.get("provider")))
+
+
+@payments_blueprint.post("/<payment_id>/paypal/create-order")
+@active_user_required
+@limiter.limit("10 per minute")
+def paypal_create_order(payment_id: str):
+    payment = _owned_paypal_payment(payment_id)
+    return jsonify(create_paypal_order(payment))
+
+
+@payments_blueprint.post("/<payment_id>/paypal/capture-order")
+@active_user_required
+@limiter.limit("10 per minute")
+def paypal_capture_order(payment_id: str):
+    payment = _owned_paypal_payment(payment_id)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        raise ValidationError("A JSON object is required.")
+    paypal_order_id = body.get("paypalOrderId")
+    if not isinstance(paypal_order_id, str) or not paypal_order_id.strip() or len(paypal_order_id) > 160:
+        raise ValidationError("A valid PayPal order ID is required.", {"paypalOrderId": "invalid"})
+    return jsonify(capture_paypal_order(payment, paypal_order_id.strip()))
+
+
+def _owned_paypal_payment(payment_id: str) -> Payment:
+    payment = db.session.scalar(
+        select(Payment).where(
+            Payment.id == payment_id,
+            Payment.user_id == get_authenticated_user().id,
+        ).with_for_update()
+    )
+    if payment is None:
+        raise NotFound("Payment was not found.")
+    return payment
 
 
 @payments_blueprint.get("/history")

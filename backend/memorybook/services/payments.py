@@ -23,6 +23,7 @@ from memorybook.integrations.payment_gateways import (
 )
 from memorybook.models import (
     DownloadEntitlement,
+    Invoice,
     OrderStatusHistory,
     Payment,
     PaymentAttempt,
@@ -144,6 +145,8 @@ def retry_payment(payment: Payment, idempotency_key: str, provider_name: str | N
 
 
 def _start_provider_checkout(payment, attempt, order, kind, provider) -> dict:
+    if provider.name == "paypal":
+        return serialize_order(order, kind)
     title = _order_title(order, kind)
     try:
         checkout = provider.create_checkout(
@@ -175,6 +178,145 @@ def _start_provider_checkout(payment, attempt, order, kind, provider) -> dict:
         checkout_url=checkout.url,
         payment_instructions=checkout.instructions,
     )
+
+
+def create_paypal_order(payment: Payment) -> dict:
+    if payment.provider != "paypal" or payment.status != "pending":
+        raise ConflictError("This payment is not awaiting PayPal checkout.")
+    if payment.usd_amount is None or payment.exchange_rate is None:
+        raise ValidationError("This payment is missing its PayPal currency snapshot.")
+    attempt = db.session.scalar(
+        select(PaymentAttempt)
+        .where(PaymentAttempt.payment_id == payment.id, PaymentAttempt.status == "pending")
+        .order_by(PaymentAttempt.attempt_number.desc())
+        .with_for_update()
+    )
+    if attempt is None:
+        raise ConflictError("This payment has no active checkout attempt.")
+    if attempt.provider_reference:
+        return {
+            "paypalOrderId": attempt.provider_reference,
+            "chargedAmountUsd": str(payment.usd_amount),
+            "rate": str(payment.exchange_rate),
+        }
+
+    order = _payment_order(payment)
+    if isinstance(order, PrintOrder) and (
+        order.status not in {"pending_payment", "order_placed"} or _print_order_payment_expired(order)
+    ):
+        raise ConflictError("This print order is no longer awaiting payment.")
+    paypal_order_id = PayPalGateway().create_smart_order(
+        payment,
+        order.order_number,
+        attempt.idempotency_key or attempt.id,
+    )
+    payment.provider_payment_id = paypal_order_id
+    attempt.provider_reference = paypal_order_id
+    db.session.commit()
+    return {
+        "paypalOrderId": paypal_order_id,
+        "chargedAmountUsd": str(payment.usd_amount),
+        "rate": str(payment.exchange_rate),
+    }
+
+
+def capture_paypal_order(payment: Payment, paypal_order_id: str) -> dict:
+    if payment.provider != "paypal":
+        raise ValidationError("This payment does not use PayPal.")
+    order = _payment_order(payment)
+    kind = "pdf" if payment.pdf_order_id else "print"
+    if payment.status == "successful":
+        if payment.provider_payment_id != paypal_order_id or not payment.provider_capture_id:
+            raise ConflictError("This payment was already completed with a different PayPal order.")
+        return {
+            "status": "successful",
+            "payment": serialize_transaction(payment),
+            "order": serialize_order(order, kind),
+        }
+    if payment.status != "pending":
+        raise ConflictError("This payment is no longer awaiting PayPal capture.")
+    if payment.usd_amount is None or payment.exchange_rate is None:
+        raise ValidationError("This payment is missing its PayPal currency snapshot.")
+    attempt = db.session.scalar(
+        select(PaymentAttempt)
+        .where(
+            PaymentAttempt.payment_id == payment.id,
+            PaymentAttempt.status == "pending",
+            PaymentAttempt.provider_reference == paypal_order_id,
+        )
+        .order_by(PaymentAttempt.attempt_number.desc())
+        .with_for_update()
+    )
+    if attempt is None or payment.provider_payment_id != paypal_order_id:
+        raise ValidationError("The PayPal order does not match the active payment attempt.")
+
+    captured = PayPalGateway().capture_order(
+        paypal_order_id,
+        f"{payment.id}:attempt:{attempt.attempt_number}",
+    )
+    if captured.get("id") != paypal_order_id:
+        raise ValidationError("PayPal capture response does not match the requested order.")
+    purchase_units = captured.get("purchase_units")
+    purchase_unit = (
+        purchase_units[0]
+        if isinstance(purchase_units, list) and purchase_units and isinstance(purchase_units[0], dict)
+        else None
+    )
+    capture = (
+        purchase_unit.get("payments", {}).get("captures", [None])[0]
+        if purchase_unit and isinstance(purchase_unit.get("payments"), dict)
+        else None
+    )
+    if captured.get("status") != "COMPLETED" or not isinstance(capture, dict) or capture.get("status") != "COMPLETED":
+        _process_verified_event(
+            provider="paypal",
+            event_id=f"sdk-capture-failed:{paypal_order_id}",
+            event_type="PAYMENT.CAPTURE.DENIED",
+            safe_payload={"orderId": paypal_order_id, "paymentId": payment.id},
+            payment_id=payment.id,
+            provider_reference=paypal_order_id,
+            success=False,
+            failure=True,
+            refund_event=False,
+            amount=None,
+            currency="USD",
+            provider_payload={},
+        )
+        return {
+            "status": "failed",
+            "payment": serialize_transaction(payment),
+            "order": serialize_order(order, kind),
+        }
+
+    if purchase_unit.get("reference_id") != order.order_number:
+        raise ValidationError("PayPal order reference does not match this payment.")
+    amount, currency = _paypal_capture_amount(capture)
+    capture_id = capture.get("id")
+    if amount != payment.usd_amount or currency != "USD":
+        raise ValidationError("PayPal capture amount or currency does not match the payment.")
+    if not isinstance(capture_id, str) or not capture_id:
+        raise ValidationError("PayPal capture response is missing its capture reference.")
+
+    _process_verified_event(
+        provider="paypal",
+        event_id=f"sdk-capture:{capture_id}",
+        event_type="PAYMENT.CAPTURE.COMPLETED",
+        safe_payload={"captureId": capture_id, "orderId": paypal_order_id, "paymentId": payment.id},
+        payment_id=payment.id,
+        provider_reference=paypal_order_id,
+        success=True,
+        failure=False,
+        refund_event=False,
+        amount=amount,
+        currency=currency,
+        provider_payload={},
+        capture_reference=capture_id,
+    )
+    return {
+        "status": "successful",
+        "payment": serialize_transaction(payment),
+        "order": serialize_order(order, kind),
+    }
 
 
 def submit_manual_payment_reference(payment: Payment, user_id: str, reference: str) -> dict:
@@ -319,7 +461,19 @@ def process_paypal_event(raw_body: bytes, headers: dict[str, str]) -> dict:
         custom_id = _paypal_payment_id(resource)
         if custom_id and custom_id != payment.id:
             raise ValidationError("PayPal checkout order reference does not match the payment.")
-        captured = gateway.capture_order(order_id, order_id)
+        purchase_units = resource.get("purchase_units")
+        purchase_unit = (
+            purchase_units[0]
+            if isinstance(purchase_units, list) and purchase_units and isinstance(purchase_units[0], dict)
+            else None
+        )
+        order = _payment_order(payment)
+        if not purchase_unit or purchase_unit.get("reference_id") != order.order_number:
+            raise ValidationError("PayPal checkout order reference does not match the order number.")
+        captured = gateway.capture_order(
+            order_id,
+            f"{payment.id}:attempt:{attempt.attempt_number}",
+        )
         purchase_units = captured.get("purchase_units")
         capture = (
             purchase_units[0].get("payments", {}).get("captures", [None])[0]
@@ -582,6 +736,7 @@ def _apply_payment_result(
                 "/dashboard/orders",
             )
             return
+        _issue_invoice(payment, order)
         order.paid_at = datetime.now(UTC)
         old_status = order.status
         order.status = "paid" if payment.pdf_order_id else "payment_confirmed"
@@ -658,6 +813,22 @@ def _apply_payment_result(
             f"Payment for order {order.order_number} was not completed. You can retry checkout.",
             "/dashboard/orders",
         )
+
+
+def _issue_invoice(payment: Payment, order: PdfOrder | PrintOrder) -> Invoice:
+    invoice = db.session.scalar(select(Invoice).where(Invoice.payment_id == payment.id))
+    if invoice is not None:
+        return invoice
+    invoice = Invoice(
+        invoice_number=f"INV-{order.order_number}"[:50],
+        payment_id=payment.id,
+        pdf_order_id=payment.pdf_order_id,
+        print_order_id=payment.print_order_id,
+        amount=payment.amount,
+        currency=payment.currency,
+    )
+    db.session.add(invoice)
+    return invoice
 
 
 def _queue_pdf_generation(payment: Payment) -> None:
@@ -1082,7 +1253,7 @@ def serialize_order(
             (Payment.pdf_order_id == order.id) if kind == "pdf" else (Payment.print_order_id == order.id)
         )
     )
-    if checkout_url is None and payment and payment.status == "pending":
+    if checkout_url is None and payment and payment.status == "pending" and payment.provider != "paypal":
         current_attempt = db.session.scalar(
             select(PaymentAttempt)
             .where(PaymentAttempt.payment_id == payment.id, PaymentAttempt.status == "pending")
