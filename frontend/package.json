@@ -10,6 +10,7 @@
     "test": "node --test src/features/admin/*.test.js src/features/bookEditor/*.test.js src/features/orders/*.test.js src/features/pdfPurchase/*.test.js src/features/printPurchase/*.test.js src/services/*.test.js"
   },
   "dependencies": {
+    "@paypal/react-paypal-js": "^10.6.1",
     "@tanstack/react-query": "^5.62.7",
     "axios": "^1.7.9",
     "fabric": "^7.4.0",

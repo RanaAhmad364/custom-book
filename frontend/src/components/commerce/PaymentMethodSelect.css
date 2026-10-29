@@ -45,3 +45,29 @@
 .payment-method-instructions strong {
   color: var(--ink, #292821);
 }
+
+.paypal-smart-checkout {
+  display: grid;
+  gap: 12px;
+  width: min(100%, 440px);
+  margin: 18px 0;
+  padding: 18px;
+  border: 1px solid var(--line, #dedbd2);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.paypal-charge-summary {
+  margin: 0;
+  color: var(--ink, #292821);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.paypal-smart-error {
+  margin: 0;
+  color: #a23b32;
+  font-size: 13px;
+  line-height: 1.5;
+}

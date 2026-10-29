@@ -4,6 +4,7 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../../../features/auth/AuthContext.jsx";
 import { PaymentMethodSelect } from "../../../components/commerce/PaymentMethodSelect.jsx";
 import { ManualPaymentPanel } from "../../../components/commerce/ManualPaymentPanel.jsx";
+import { PayPalSmartCheckout } from "../../../components/commerce/PayPalSmartCheckout.jsx";
 import { printOrderService } from "../../../services/printOrderService.js";
 import { projectService } from "../../../services/projectService.js";
 import "./PrintOrder.css";
@@ -171,6 +172,7 @@ export function PrintOrderFlow() {
   const [methodsLoading, setMethodsLoading] = useState(false);
   const [methodsError, setMethodsError] = useState("");
   const [selectedMethod, setSelectedMethod] = useState(null);
+  const [paypalCheckoutOrder, setPaypalCheckoutOrder] = useState(null);
   const [submitError, setSubmitError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const locationReady = Boolean(
@@ -277,6 +279,10 @@ export function PrintOrderFlow() {
         quantity: configuration.quantity,
         discountCode: configuration.discountCode,
       }, configuration.address, quote.id, selectedMethod);
+      if (selectedMethod.provider === "paypal") {
+        setPaypalCheckoutOrder(order);
+        return;
+      }
       if (order.checkoutUrl) {
         window.location.assign(order.checkoutUrl);
         return;
@@ -287,6 +293,11 @@ export function PrintOrderFlow() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function retryPaypalCheckout() {
+    const retried = await printOrderService.retryPayment(paypalCheckoutOrder.paymentId, "paypal");
+    setPaypalCheckoutOrder(retried);
   }
 
   const headings = {
@@ -332,7 +343,7 @@ export function PrintOrderFlow() {
 
           {step === "checkout" ? <><h2>Print order summary</h2><div className="print-choice-summary"><div><span>Tier</span><strong>{configuration.tier.toUpperCase()}</strong></div><div><span>Paper</span><strong>{paperOptions.find((item) => item.id === configuration.paper)?.title}</strong></div><div><span>Cover</span><strong>{coverOptions.find((item) => item.id === configuration.cover)?.title}</strong></div><div><span>Quantity</span><strong>{configuration.quantity}</strong></div><div><span>Delivery to</span><strong>{configuration.address.fullName}<br />{configuration.address.line1}, {configuration.address.city} {configuration.address.postalCode}</strong></div></div><label className="print-discount-field">Discount code<input value={configuration.discountCode} maxLength={80} autoCapitalize="characters" onChange={(event) => updateConfiguration({ discountCode: event.target.value })} placeholder="Enter code (optional)" /></label><p className="print-discount-note">Your code is validated by the server and reflected in the refreshed quote.</p><button className="print-refresh-quote" type="button" onClick={() => updateConfiguration({})} disabled={quoteLoading}><RefreshCw size={14} /> Refresh server quote</button></> : null}
 
-          {step === "checkout" ? <><QuoteBreakdown quote={quote} /><PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading} usdAmount={quote?.usdAmount} exchangeRate={quote?.exchangeRate} />{methodsError ? <p className="print-inline-error" role="alert">{methodsError}</p> : null}</> : null}
+          {step === "checkout" ? <><QuoteBreakdown quote={quote} /><PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading || Boolean(paypalCheckoutOrder)} pkrAmount={quote?.total} usdAmount={quote?.usdAmount} exchangeRate={quote?.exchangeRate} />{methodsError ? <p className="print-inline-error" role="alert">{methodsError}</p> : null}{paypalCheckoutOrder && selectedMethod?.provider === "paypal" ? <PayPalSmartCheckout paymentId={paypalCheckoutOrder.paymentId} pkrAmount={paypalCheckoutOrder.pkrAmount ?? quote?.total} usdAmount={paypalCheckoutOrder.usdAmount ?? quote?.usdAmount} onRetry={retryPaypalCheckout} onSuccess={() => navigate(`/print/orders/${encodeURIComponent(paypalCheckoutOrder.id)}/processing`, { replace: true })} /> : null}</> : null}
           {quoteLoading ? <div className="print-message"><LoaderCircle className="print-spin" size={18} /> Requesting a current quote from the printing service…</div> : null}
           {quoteError ? <div className="print-message print-error" role="alert"><CircleAlert size={18} /><span>{quoteError}</span><button className="button button-outline" type="button" onClick={() => updateConfiguration({})}><RefreshCw size={14} /> Try quote again</button></div> : null}
           {step !== "checkout" && step !== "shipping" ? <QuoteBreakdown quote={quote} compact /> : null}
@@ -340,8 +351,8 @@ export function PrintOrderFlow() {
 
           <div className="print-step-actions">
             {stepIndex > 0 ? <Link className="button button-outline" to={`/create/design/${encodeURIComponent(projectId)}/print${previousStep.id === "print" ? "" : `/${previousStep.id}`}`}><ArrowLeft size={15} /> Back</Link> : <Link className="button button-outline" to={`/create/design/${encodeURIComponent(projectId)}`}><ArrowLeft size={15} /> Back to editor</Link>}
-            {step === "checkout" ? <button className="button button-dark" type="button" onClick={placeOrder} disabled={submitting || quoteLoading || methodsLoading || !quote || !selectedMethod}>{submitting ? <><LoaderCircle className="print-spin" size={16} /> Starting secure checkout…</> : <>Continue to payment <ArrowRight size={15} /></>}</button>
-              : step === "shipping" ? null
+            {step === "checkout" && !paypalCheckoutOrder ? <button className="button button-dark" type="button" onClick={placeOrder} disabled={submitting || quoteLoading || methodsLoading || !quote || !selectedMethod}>{submitting ? <><LoaderCircle className="print-spin" size={16} /> Starting secure checkout…</> : <>Continue to payment <ArrowRight size={15} /></>}</button>
+              : step === "checkout" || step === "shipping" ? null
                 : <Link className="button button-dark" to={`/create/design/${encodeURIComponent(projectId)}/print/${nextStep.id}`}>Continue <ArrowRight size={15} /></Link>}
           </div>
         </section>
@@ -392,6 +403,7 @@ function usePrintOrder(orderId) {
 export function PrintOrderResult() {
   const { orderId } = useParams();
   const location = useLocation();
+  const navigate = useNavigate();
   const isTracking = location.pathname.endsWith("/tracking");
   const { order, loading, error, refresh } = usePrintOrder(orderId);
   const [cancelReason, setCancelReason] = useState("");
@@ -481,6 +493,7 @@ export function PrintOrderResult() {
         {!isTracking ? <div className="print-order-dates"><div><Clock3 size={16} /><span>Estimated production<strong>{formatDate(order.productionEstimate)}</strong></span></div><div><Truck size={16} /><span>Estimated delivery<strong>{formatDate(order.deliveryEstimate)}</strong></span></div></div> : null}
       </section>
       <ManualPaymentPanel order={order} onSubmitted={refresh} />
+      {order.paymentStatus === "pending" && !order.paymentExpired && order.paymentProvider === "paypal" ? <PayPalSmartCheckout paymentId={order.paymentId} pkrAmount={order.pkrAmount ?? order.amount ?? order.quote?.total} usdAmount={order.usdAmount} onRetry={retryCheckout} onSuccess={() => navigate(`/print/orders/${encodeURIComponent(order.id)}/processing`, { replace: true })} /> : null}
       <section className="print-timeline-card"><div className="print-timeline-heading"><div><span className="eyebrow">{isTracking ? "Live order progress" : "What happens next"}</span><h2>{productionSteps[statusIndex]?.[1] || "Order status"}</h2></div><button className="print-refresh-quote" type="button" onClick={refresh}><RefreshCw size={14} /> Refresh status</button></div>
         <ol className="print-production-timeline">{productionSteps.map(([id, label], index) => <li className={index < statusIndex ? "complete" : index === statusIndex ? "current" : ""} key={id}><span>{index < statusIndex ? <Check size={13} /> : index === statusIndex ? <PackageCheck size={13} /> : null}</span><div><strong>{label}</strong>{id === "shipped" && order.trackingNumber ? <small>Tracking number: {order.trackingNumber}</small> : null}</div></li>)}</ol>
       </section>

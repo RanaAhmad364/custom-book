@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../../../features/auth/AuthContext.jsx";
 import { PaymentMethodSelect } from "../../../components/commerce/PaymentMethodSelect.jsx";
 import { ManualPaymentPanel } from "../../../components/commerce/ManualPaymentPanel.jsx";
+import { PayPalSmartCheckout } from "../../../components/commerce/PayPalSmartCheckout.jsx";
 import { canDownloadPdf, pdfOrderService } from "../../../services/pdfOrderService.js";
 import { projectService } from "../../../services/projectService.js";
 import { SafeImage } from "../../../components/common/SafeImage.jsx";
@@ -89,6 +90,7 @@ export function PdfCheckout() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [selectedMethod, setSelectedMethod] = useState(null);
+  const [paypalCheckoutOrder, setPaypalCheckoutOrder] = useState(null);
   useEffect(() => {
     let active = true;
     setPaymentMethods([]);
@@ -118,6 +120,10 @@ export function PdfCheckout() {
     try {
       if (!selectedMethod) throw new Error("No verified payment method is available for this currency.");
       const order = await pdfOrderService.createOrder(projectId, selectedMethod);
+      if (selectedMethod.provider === "paypal") {
+        setPaypalCheckoutOrder(order);
+        return;
+      }
       if (order.checkoutUrl) {
         window.location.assign(order.checkoutUrl);
         return;
@@ -129,9 +135,13 @@ export function PdfCheckout() {
       setSubmitting(false);
     }
   }
+  async function retryPaypalCheckout() {
+    const retried = await pdfOrderService.retryPayment(paypalCheckoutOrder.paymentId, "paypal");
+    setPaypalCheckoutOrder(retried);
+  }
   return <PdfPage eyebrow="Secure checkout" title="Your PDF, ordered with care." description="The server determines the final charge and payment status. This browser cannot mark an order paid or unlock a file.">
     <LoadState loading={loading} error={error} onRetry={reload} />
-    {project && !loading && !error ? <><PdfProjectCard project={project} price={price} />    <section className="pdf-checkout-card"><LockKeyhole size={20} /><div><h2>Payment verification</h2><p>Continue to create a payment order. Payment remains pending until verified by the backend; PDF generation starts only after that confirmation.</p><strong>{formatPrice(price.amount, price.currency)} due</strong><PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading} usdAmount={price.usdAmount} exchangeRate={price.exchangeRate} />{methodsError ? <p className="pdf-inline-error" role="alert">{methodsError}</p> : null}</div></section>{submitError ? <p className="pdf-inline-error" role="alert"><CircleAlert size={16} />{submitError}</p> : null}<div className="pdf-actions"><Link className="button button-outline" to={`/create/design/${projectId}/pdf/summary`}><ArrowLeft size={15} /> Back to summary</Link><button className="button button-dark" type="button" onClick={submitOrder} disabled={submitting || !price || methodsLoading || !selectedMethod}>{submitting ? <><LoaderCircle className="pdf-spin" size={16} /> Starting checkout…</> : <>Continue to payment <ArrowRight size={15} /></>}</button></div></> : null}
+    {project && !loading && !error ? <><PdfProjectCard project={project} price={price} />    <section className="pdf-checkout-card"><LockKeyhole size={20} /><div><h2>Payment verification</h2><p>Continue to create a payment order. Payment remains pending until verified by the backend; PDF generation starts only after that confirmation.</p><strong>{formatPrice(price.amount, price.currency)} due</strong><PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading || Boolean(paypalCheckoutOrder)} pkrAmount={price.amount} usdAmount={price.usdAmount} exchangeRate={price.exchangeRate} />{methodsError ? <p className="pdf-inline-error" role="alert">{methodsError}</p> : null}</div></section>{submitError ? <p className="pdf-inline-error" role="alert"><CircleAlert size={16} />{submitError}</p> : null}{paypalCheckoutOrder && selectedMethod?.provider === "paypal" ? <PayPalSmartCheckout paymentId={paypalCheckoutOrder.paymentId} pkrAmount={paypalCheckoutOrder.pkrAmount ?? price.amount} usdAmount={paypalCheckoutOrder.usdAmount ?? price.usdAmount} onRetry={retryPaypalCheckout} onSuccess={() => navigate(`/pdf/orders/${encodeURIComponent(paypalCheckoutOrder.id)}/processing`, { replace: true })} /> : null}<div className="pdf-actions"><Link className="button button-outline" to={`/create/design/${projectId}/pdf/summary`}><ArrowLeft size={15} /> Back to summary</Link>{!paypalCheckoutOrder ? <button className="button button-dark" type="button" onClick={submitOrder} disabled={submitting || !price || methodsLoading || !selectedMethod}>{submitting ? <><LoaderCircle className="pdf-spin" size={16} /> Starting checkout…</> : <>Continue to payment <ArrowRight size={15} /></>}</button> : null}</div></> : null}
   </PdfPage>;
 }
 
@@ -140,6 +150,7 @@ const generationLabels = { queued: "Generation queued", generating: "Generating 
 
 export function PdfOrderProcessing() {
   const { orderId } = useParams();
+  const navigate = useNavigate();
   const [order, setOrder] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -191,6 +202,7 @@ export function PdfOrderProcessing() {
     {order ? <><div className="pdf-status-card"><div className="pdf-state-row"><span><span className="eyebrow">Payment</span><strong>{paymentLabels[order.paymentStatus]}</strong></span>{order.paymentStatus === "successful" ? <BadgeCheck /> : order.paymentStatus === "failed" ? <CircleAlert /> : <Clock3 />}</div><div className="pdf-state-row"><span><span className="eyebrow">PDF generation</span><strong>{generationLabels[order.generationStatus]}</strong></span>{order.generationStatus === "ready" ? <Check /> : order.generationStatus === "failed" ? <CircleAlert /> : <LoaderCircle className={order.generationStatus === "generating" || order.generationStatus === "queued" ? "pdf-spin" : ""} />}</div><div className="pdf-status-meta"><span>Order {order.id}</span>{order.amount !== null ? <strong>{formatPrice(order.amount, order.currency)}</strong> : null}</div></div>
       <ManualPaymentPanel order={order} onSubmitted={() => { setLoading(true); setRefreshKey((value) => value + 1); }} />
       {order.paymentStatus === "failed" ? <div className="pdf-inline-error" role="alert"><span>Payment was not confirmed. No PDF is available.</span><button className="button button-outline" type="button" onClick={retryCheckout} disabled={retrying}>{retrying ? "Starting retry…" : "Retry payment"}</button>{retryError ? <span>{retryError}</span> : null}</div> : null}
+      {order.paymentStatus === "pending" && order.paymentProvider === "paypal" ? <PayPalSmartCheckout paymentId={order.paymentId} pkrAmount={order.pkrAmount ?? order.amount} usdAmount={order.usdAmount} onRetry={retryCheckout} onSuccess={() => navigate(`/pdf/orders/${encodeURIComponent(order.id)}/processing`, { replace: true })} /> : null}
       {order.generationStatus === "failed" && order.paymentStatus === "successful" ? <p className="pdf-inline-error" role="alert">Payment is valid, but PDF generation failed. Use the retry option to generate it again without paying again.</p> : null}
       {downloadable ? <div className="pdf-actions"><Link className="button button-outline" to={`/pdf/downloads/${encodeURIComponent(order.id)}`}>View download details <ArrowRight size={15} /></Link><ProjectPdfAccessAction projectId={order.projectId} className="button button-dark" /></div> : <div className="pdf-actions"><ProjectPdfAccessAction projectId={order.projectId} className="button button-outline" /><button className="button button-outline" type="button" onClick={() => { setLoading(true); setRefreshKey((value) => value + 1); }}><RefreshCw size={15} /> Refresh status</button><Link className="pdf-text-link" to="/dashboard/downloads">PDF download history</Link></div>}
     </> : null}
