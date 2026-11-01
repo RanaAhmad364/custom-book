@@ -78,6 +78,15 @@ test("variant validation requires a complete, non-negative priced configuration"
     "Enter a non-negative variant price with up to two decimal places.");
 });
 
+test("cover and paper forms require stable lowercase machine codes", () => {
+  for (const kind of ["cover", "paper"]) {
+    const record = pricingRecordDefaults(kind);
+    assert.ok(validatePricingRecord(kind, record).code);
+    assert.deepEqual(validatePricingRecord(kind, { ...record, code: "linen_2", name: "Linen" }), {});
+    assert.ok(validatePricingRecord(kind, { ...record, code: "Linen", name: "Linen" }).code);
+  }
+});
+
 test("existing rules and discount records retain client-side edit validation", () => {
   assert.deepEqual(validatePricingRecord("rule", {
     name: "Holiday adjustment",

@@ -14,8 +14,8 @@ export function pricingRecordDefaults(kind, currency = "PKR") {
       active: true,
     },
     size: { code: "", name: "", widthMm: "", heightMm: "", active: true },
-    cover: { name: "", description: "", active: true },
-    paper: { name: "", description: "", weightGsm: "", active: true },
+    cover: { code: "", name: "", description: "", active: true },
+    paper: { code: "", name: "", description: "", weightGsm: "", active: true },
     variant: {
       sku: "",
       productId: "",
@@ -92,6 +92,10 @@ export function validatePricingRecord(kind, record) {
       }
     }
   } else if (kind === "cover" || kind === "paper") {
+    requireText("code", `a ${kind} code`);
+    if (!/^[a-z0-9_-]+$/.test(String(record.code ?? "").trim())) {
+      errors.code = `Use lowercase letters, numbers, underscores, or hyphens for the ${kind} code.`;
+    }
     requireText("name", `a ${kind} name`);
     if (kind === "paper" && !positiveInteger(record.weightGsm, true)) {
       errors.weightGsm = "Enter a positive paper weight in gsm.";

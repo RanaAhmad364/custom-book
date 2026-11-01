@@ -2112,7 +2112,16 @@ def list_pricing() -> dict:
     papers = db.session.scalars(select(PaperType).order_by(PaperType.name)).all()
     discounts = db.session.scalars(select(DiscountCode).order_by(DiscountCode.code)).all()
     variants = db.session.execute(
-        select(BookVariant, BookProduct.title, BookSize.name, CoverType.name, PaperType.name)
+        select(
+            BookVariant,
+            BookProduct.title,
+            BookSize.name,
+            CoverType.name,
+            PaperType.name,
+            BookSize.code,
+            CoverType.code,
+            PaperType.code,
+        )
         .join(BookProduct, BookProduct.id == BookVariant.product_id)
         .join(BookSize, BookSize.id == BookVariant.size_id)
         .join(CoverType, CoverType.id == BookVariant.cover_type_id)
@@ -2144,8 +2153,8 @@ def list_pricing() -> dict:
             "active": x.is_active,
         } for x in shipping],
         "sizes": [{"id": x.id, "code": x.code, "name": x.name, "widthMm": str(x.width_mm), "heightMm": str(x.height_mm), "active": x.is_active} for x in sizes],
-        "covers": [{"id": x.id, "name": x.name, "description": x.description, "active": x.is_active} for x in covers],
-        "papers": [{"id": x.id, "name": x.name, "description": x.description, "weightGsm": x.weight_gsm, "active": x.is_active} for x in papers],
+        "covers": [{"id": x.id, "code": x.code, "name": x.name, "description": x.description, "active": x.is_active} for x in covers],
+        "papers": [{"id": x.id, "code": x.code, "name": x.name, "description": x.description, "weightGsm": x.weight_gsm, "active": x.is_active} for x in papers],
         "discounts": [{"id": x.id, "code": x.code, "type": x.discount_type, "value": str(x.value), "currency": x.currency, "active": x.is_active, "maximumUses": x.maximum_uses, "usesCount": x.uses_count} for x in discounts],
         "variants": [{
             "id": row[0].id,
@@ -2156,8 +2165,11 @@ def list_pricing() -> dict:
             "paperTypeId": row[0].paper_type_id,
             "book": row[1],
             "size": row[2],
+            "sizeCode": row[5],
             "cover": row[3],
             "paper": row[4],
+            "coverCode": row[6],
+            "paperCode": row[7],
             "basePrice": str(row[0].base_price),
             "currency": row[0].currency,
             "active": row[0].is_active,
@@ -2272,19 +2284,31 @@ def create_pricing(kind: str, data: dict) -> dict:
             is_active=active,
         )
     elif kind == "cover":
+        code = _text(data, "code", required=True, maximum=40).lower()
+        if not re.fullmatch(r"[a-z0-9_-]+", code):
+            raise ValidationError("Cover code may contain lowercase letters, numbers, underscores, and hyphens.", {"code": "invalid"})
+        if db.session.scalar(select(CoverType.id).where(CoverType.code == code)):
+            raise ConflictError("A cover type with this code already exists.", {"code": "duplicate"})
         name = _text(data, "name", required=True, maximum=100)
         if db.session.scalar(select(CoverType.id).where(CoverType.name == name)):
             raise ConflictError("A cover type with this name already exists.", {"name": "duplicate"})
         item = CoverType(
+            code=code,
             name=name,
             description=_text(data, "description", maximum=500),
             is_active=active,
         )
     elif kind == "paper":
+        code = _text(data, "code", required=True, maximum=40).lower()
+        if not re.fullmatch(r"[a-z0-9_-]+", code):
+            raise ValidationError("Paper code may contain lowercase letters, numbers, underscores, and hyphens.", {"code": "invalid"})
+        if db.session.scalar(select(PaperType.id).where(PaperType.code == code)):
+            raise ConflictError("A paper type with this code already exists.", {"code": "duplicate"})
         name = _text(data, "name", required=True, maximum=100)
         if db.session.scalar(select(PaperType.id).where(PaperType.name == name)):
             raise ConflictError("A paper type with this name already exists.", {"name": "duplicate"})
         item = PaperType(
+            code=code,
             name=name,
             description=_text(data, "description", maximum=500),
             weight_gsm=_positive_int(data.get("weightGsm"), "weightGsm", optional=True),
@@ -2440,12 +2464,26 @@ def update_pricing(kind: str, item_id: str, data: dict) -> dict:
                 raise ValidationError("Variant currency must match its book product.", {"currency": "mismatch"})
             item.currency = currency
     elif kind == "cover":
+        if "code" in data:
+            code = _text(data, "code", required=True, maximum=40).lower()
+            if not re.fullmatch(r"[a-z0-9_-]+", code):
+                raise ValidationError("Cover code may contain lowercase letters, numbers, underscores, and hyphens.", {"code": "invalid"})
+            if db.session.scalar(select(CoverType.id).where(CoverType.code == code, CoverType.id != item.id)):
+                raise ConflictError("A cover type with this code already exists.", {"code": "duplicate"})
+            item.code = code
         if "name" in data:
             name = _text(data, "name", required=True, maximum=100)
             if db.session.scalar(select(CoverType.id).where(CoverType.name == name, CoverType.id != item.id)):
                 raise ConflictError("A cover type with this name already exists.", {"name": "duplicate"})
             item.name = name
     elif kind == "paper":
+        if "code" in data:
+            code = _text(data, "code", required=True, maximum=40).lower()
+            if not re.fullmatch(r"[a-z0-9_-]+", code):
+                raise ValidationError("Paper code may contain lowercase letters, numbers, underscores, and hyphens.", {"code": "invalid"})
+            if db.session.scalar(select(PaperType.id).where(PaperType.code == code, PaperType.id != item.id)):
+                raise ConflictError("A paper type with this code already exists.", {"code": "duplicate"})
+            item.code = code
         if "name" in data:
             name = _text(data, "name", required=True, maximum=100)
             if db.session.scalar(select(PaperType.id).where(PaperType.name == name, PaperType.id != item.id)):

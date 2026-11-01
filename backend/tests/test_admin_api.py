@@ -706,12 +706,12 @@ def test_pricing_catalog_crud_validation_and_variant_compatibility(app):
     )
     cover = client.post(
         "/api/v1/admin/pricing/cover",
-        json={"name": "Linen hardback", "description": "Linen finish"},
+        json={"code": "linen-hardback", "name": "Linen hardback", "description": "Linen finish"},
         headers=csrf,
     )
     paper = client.post(
         "/api/v1/admin/pricing/paper",
-        json={"name": "Matte", "weightGsm": 170},
+        json={"code": "matte", "name": "Matte", "weightGsm": 170},
         headers=csrf,
     )
     assert (size.status_code, cover.status_code, paper.status_code) == (201, 201, 201)
@@ -776,12 +776,12 @@ def test_print_quote_uses_catalog_price_components_and_product_page_limits(app, 
     ).json["item"]
     cover = client.post(
         "/api/v1/admin/pricing/cover",
-        json={"name": "Quote Linen hardback"},
+        json={"code": "quote-linen-hardback", "name": "Quote Linen hardback"},
         headers=csrf,
     ).json["item"]
     paper = client.post(
         "/api/v1/admin/pricing/paper",
-        json={"name": "Quote Premium matte"},
+        json={"code": "quote-premium-matte", "name": "Quote Premium matte"},
         headers=csrf,
     ).json["item"]
     tier = client.post(
@@ -829,8 +829,8 @@ def test_print_quote_uses_catalog_price_components_and_product_page_limits(app, 
         "projectId": project_id,
         "configuration": {
             "tier": "basic",
-            "cover": "Quote Linen hardback",
-            "paper": "Quote Premium matte",
+            "cover": "quote-linen-hardback",
+            "paper": "quote-premium-matte",
             "quantity": 2,
             "discountCode": "SAVE5",
         },

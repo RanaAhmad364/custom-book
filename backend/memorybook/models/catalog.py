@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from uuid import uuid4
 
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
@@ -155,6 +156,7 @@ class BookSize(IdMixin, TimestampMixin, db.Model):
 class CoverType(IdMixin, TimestampMixin, db.Model):
     __tablename__ = "cover_types"
 
+    code: Mapped[str] = mapped_column(String(40), nullable=False, unique=True, default=lambda: f"legacy-{uuid4().hex}")
     name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(String(500))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
@@ -163,6 +165,7 @@ class CoverType(IdMixin, TimestampMixin, db.Model):
 class PaperType(IdMixin, TimestampMixin, db.Model):
     __tablename__ = "paper_types"
 
+    code: Mapped[str] = mapped_column(String(40), nullable=False, unique=True, default=lambda: f"legacy-{uuid4().hex}")
     name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(String(500))
     weight_gsm: Mapped[int | None] = mapped_column(Integer)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import textwrap
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -40,6 +41,8 @@ from memorybook.services import admin
 from memorybook.services.catalog_projects import create_project
 
 DATASET_VERSION = "module-8a-v1"
+DEMO_ARTWORK_WIDTH = 3600
+DEMO_ARTWORK_SCALE = DEMO_ARTWORK_WIDTH / 900
 CURRENCY = "PKR"
 ASSET_OWNER_ID = "demo-catalog-seed"
 DEMO_CUSTOMERS = (
@@ -116,9 +119,9 @@ BOOKS = (
 )
 
 TIERS = (
-    ("DEMO-LIGHT", "Demo Light", Decimal("1200.00"), Decimal("0.00")),
-    ("DEMO-BASIC", "Demo Basic", Decimal("2400.00"), Decimal("65.00")),
-    ("DEMO-PREMIUM", "Demo Premium", Decimal("4200.00"), Decimal("120.00")),
+    ("LIGHT", "Light", Decimal("1200.00"), Decimal("0.00")),
+    ("BASIC", "Basic", Decimal("2400.00"), Decimal("65.00")),
+    ("PREMIUM", "Premium", Decimal("4200.00"), Decimal("120.00")),
 )
 
 
@@ -129,26 +132,30 @@ class DemoAssetOwner:
 
 def _artwork(title: str, palette: tuple[str, str, str], label: str) -> BytesIO:
     base, dark, accent = palette
-    image = Image.new("RGB", (900, 1100), base)
+    scale = DEMO_ARTWORK_SCALE
+    image = Image.new("RGB", (DEMO_ARTWORK_WIDTH, round(1100 * scale)), base)
     draw = ImageDraw.Draw(image)
     try:
-        title_font = ImageFont.truetype("arial.ttf", 57)
-        small_font = ImageFont.truetype("arial.ttf", 22)
+        title_font = ImageFont.truetype("arial.ttf", round(57 * scale))
+        small_font = ImageFont.truetype("arial.ttf", round(22 * scale))
     except OSError:
         title_font = ImageFont.load_default()
         small_font = ImageFont.load_default()
 
-    draw.ellipse((120, 130, 780, 790), fill=accent)
-    draw.ellipse((235, 235, 665, 665), fill=dark)
-    draw.arc((175, 205, 720, 750), 195, 345, fill=base, width=18)
-    draw.line((0, 830, 900, 830), fill=dark, width=3)
-    draw.text((72, 65), "MEMORYBOOK  /  DEMO", fill=dark, font=small_font)
+    def point(value: int) -> int:
+        return round(value * scale)
+
+    draw.ellipse(tuple(point(value) for value in (120, 130, 780, 790)), fill=accent)
+    draw.ellipse(tuple(point(value) for value in (235, 235, 665, 665)), fill=dark)
+    draw.arc(tuple(point(value) for value in (175, 205, 720, 750)), 195, 345, fill=base, width=point(18))
+    draw.line((0, point(830), DEMO_ARTWORK_WIDTH, point(830)), fill=dark, width=point(3))
+    draw.text((point(72), point(65)), "MEMORYBOOK  /  DEMO", fill=dark, font=small_font)
     lines = textwrap.wrap(title, width=22)
-    y = 875
+    y = point(875)
     for line in lines[:3]:
-        draw.text((72, y), line, fill=dark, font=title_font)
-        y += 66
-    draw.text((74, 1050), label.upper(), fill=dark, font=small_font)
+        draw.text((point(72), y), line, fill=dark, font=title_font)
+        y += point(66)
+    draw.text((point(74), point(1050)), label.upper(), fill=dark, font=small_font)
     output = BytesIO()
     image.save(output, format="PNG", optimize=True)
     output.seek(0)
@@ -163,6 +170,22 @@ def _upload_artwork(title: str, slug: str, palette: tuple[str, str, str], label:
         content_type="image/png",
     )
     return admin.upload_catalog_asset(file, DemoAssetOwner())
+
+
+def _catalog_asset_details(asset_key: str) -> dict:
+    storage = get_asset_storage()
+    contents = storage.download(asset_key)
+    with Image.open(BytesIO(contents)) as image:
+        width, height = image.size
+    return {
+        "assetKey": asset_key,
+        "filename": asset_key.rsplit("/", 1)[-1],
+        "mimeType": storage.content_type(asset_key),
+        "size": len(contents),
+        "checksum": hashlib.sha256(contents).hexdigest(),
+        "width": width,
+        "height": height,
+    }
 
 
 def _find_category(data: dict) -> BookCategory | None:
@@ -299,44 +322,58 @@ def _ensure_pricing(summary: dict) -> dict:
         sizes["LIGHT" if code == "DEMO_8_SQUARE" else "STANDARD"] = size
 
     covers = {}
-    for name, description in (
-        ("Demo Hardcover", "Sample case-bound cover for the development catalog."),
-        ("Demo Softcover", "Sample flexible cover for the development catalog."),
+    for code, name, old_name, description in (
+        ("hardcover", "Hardcover", "Demo Hardcover", "Case-bound cover for the development catalog."),
+        ("softcover", "Softcover", "Demo Softcover", "Flexible cover for the development catalog."),
+        ("linen", "Linen", "Demo Linen", "Textured linen cover for the development catalog."),
     ):
-        cover = db.session.scalar(select(CoverType).where(CoverType.name == name))
+        cover = db.session.scalar(select(CoverType).where(CoverType.code == code))
+        if cover is None:
+            cover = db.session.scalar(select(CoverType).where(CoverType.name.in_((old_name, name))))
         if cover is None:
             result = admin.create_pricing("cover", {
-                "name": name, "description": description, "active": True,
+                "code": code, "name": name, "description": description, "active": True,
             })
             cover = db.session.get(CoverType, result["id"])
             summary["pricing"]["created"] += 1
         else:
             summary["pricing"]["reused"] += 1
+            cover.code = code
+            if cover.name == old_name:
+                cover.name = name
         if not cover.is_active:
             raise ValueError(f"Cover type '{name}' is inactive and was not changed.")
-        covers[name] = cover
+        covers[code] = cover
 
     papers = {}
-    for name, gsm, description in (
-        ("Demo Matte", 170, "Uncoated matte paper sample used by the demo books."),
-        ("Demo Satin", 200, "Smooth satin paper sample used by the demo books."),
+    for code, name, old_name, gsm, description in (
+        ("standard", "Standard", "Demo Matte", 170, "Uncoated standard paper sample used by the demo books."),
+        ("premium", "Premium", "Demo Satin", 200, "Smooth premium paper sample used by the demo books."),
+        ("archival", "Archival", "Demo Archival", 220, "Archival paper sample used by the demo books."),
     ):
-        paper = db.session.scalar(select(PaperType).where(PaperType.name == name))
+        paper = db.session.scalar(select(PaperType).where(PaperType.code == code))
+        if paper is None:
+            paper = db.session.scalar(select(PaperType).where(PaperType.name.in_((old_name, name))))
         if paper is None:
             result = admin.create_pricing("paper", {
-                "name": name, "weightGsm": gsm, "description": description, "active": True,
+                "code": code, "name": name, "weightGsm": gsm, "description": description, "active": True,
             })
             paper = db.session.get(PaperType, result["id"])
             summary["pricing"]["created"] += 1
         else:
             summary["pricing"]["reused"] += 1
+            paper.code = code
+            if paper.name == old_name:
+                paper.name = name
         if not paper.is_active:
             raise ValueError(f"Paper type '{name}' is inactive and was not changed.")
-        papers[name] = paper
+        papers[code] = paper
 
     tiers = {}
     for code, name, base_price, page_rate in TIERS:
         tier = db.session.scalar(select(PricingTier).where(PricingTier.code == code))
+        if tier is None:
+            tier = db.session.scalar(select(PricingTier).where(PricingTier.code == f"DEMO-{code}"))
         if tier is None:
             result = admin.create_pricing("tier", {
                 "code": code,
@@ -350,6 +387,9 @@ def _ensure_pricing(summary: dict) -> dict:
             summary["pricing"]["created"] += 1
         else:
             summary["pricing"]["reused"] += 1
+            tier.code = code
+            if tier.name == f"Demo {name}":
+                tier.name = name
         if not tier.is_active or tier.currency.upper() != CURRENCY or tier.base_price != base_price:
             raise ValueError(f"Pricing tier '{code}' is incompatible and was not changed.")
         band = db.session.scalar(
@@ -518,7 +558,7 @@ def _ensure_variants(product: BookProduct, pricing: dict, summary: dict) -> None
     size = pricing["sizes"][size_key]
     for cover in pricing["covers"].values():
         for paper in pricing["papers"].values():
-            sku = f"DEMO-{product.slug.removeprefix('demo-')}-{size.code}-{cover.name}-{paper.name}"[:80]
+            sku = f"DEMO-{product.slug.removeprefix('demo-')}-{size.code}-{cover.code}-{paper.code}"[:80]
             existing = db.session.scalar(
                 select(BookVariant).where(
                     BookVariant.product_id == product.id,
@@ -537,9 +577,9 @@ def _ensure_variants(product: BookProduct, pricing: dict, summary: dict) -> None
                 "BASIC": Decimal("2650.00"),
                 "PREMIUM": Decimal("4350.00"),
             }[product.book_type or "BASIC"]
-            if paper.name == "Demo Satin":
+            if paper.code in {"premium", "archival"}:
                 price += Decimal("350.00")
-            if cover.name == "Demo Softcover":
+            if cover.code == "softcover":
                 price -= Decimal("450.00")
             admin.create_variant({
                 "productId": product.id,
@@ -596,51 +636,77 @@ def _ensure_template(
     return template
 
 
+def _refresh_template_artwork(
+    product: BookProduct,
+    template: BookTemplate,
+    replacements: dict[str, dict],
+) -> BookTemplate:
+    if not replacements:
+        return template
+    document = deepcopy(template.design_document)
+    replacements_by_key = {
+        old_key: {key: value for key, value in replacement.items() if key != "url"}
+        for old_key, replacement in replacements.items()
+    }
+    changed = False
+    for asset in document.get("assets", []):
+        replacement = replacements_by_key.get(asset.get("assetKey"))
+        if replacement is not None:
+            asset.update(replacement)
+            changed = True
+    if not changed:
+        raise ValueError(f"Master design for '{product.title}' does not reference its seeded artwork.")
+    admin.save_book_design(product.id, document, template.version)
+    template = db.session.get(BookTemplate, template.id)
+    admin.publish_book_design(product.id, template.version)
+    return db.session.get(BookTemplate, template.id)
+
+
 def _create_or_reuse_product(
     book_data: tuple,
     category: BookCategory,
     collection: BookCollection,
     pricing: dict,
     summary: dict,
-) -> tuple[BookProduct | None, dict | None, dict | None]:
+) -> tuple[BookProduct | None, dict | None, dict | None, dict]:
     title, slug_suffix, category_index, collection_index, book_type, style, occasion, min_pages, max_pages, description = book_data
     slug = f"demo-{slug_suffix}"
     product = db.session.scalar(select(BookProduct).where(BookProduct.slug == slug))
     if product is not None:
         if (product.admin_metadata or {}).get("datasetKey") != DATASET_VERSION:
             summary["products"]["skipped"] += 1
-            return None, None, None
+            return None, None, None, {}
         summary["products"]["reused"] += 1
-        assets = (product.admin_metadata or {}).get("previewImageKeys", [])
+        product_type = book_type
+        product_size = pricing["sizes"]["LIGHT" if product_type == "LIGHT" else "STANDARD"]
+        product_metadata = dict(product.admin_metadata or {})
+        old_preview_keys = list(product_metadata.get("previewImageKeys", []))
         cover_key = product.cover_asset_key
-        gallery_key = assets[1] if len(assets) > 1 else (assets[0] if assets else None)
+        gallery_key = old_preview_keys[1] if len(old_preview_keys) > 1 else (old_preview_keys[0] if old_preview_keys else None)
         if not cover_key or not gallery_key:
             summary["products"]["skipped"] += 1
-            return None, None, None
-        storage = get_asset_storage()
-        cover_asset = {
-            "assetKey": cover_key,
-            "filename": cover_key.rsplit("/", 1)[-1],
-            "mimeType": storage.content_type(cover_key),
-            "size": 0,
-            "checksum": "",
-            "width": 900,
-            "height": 1100,
-        }
-        cover_bytes = storage.download(cover_key)
-        cover_asset["size"] = len(cover_bytes)
-        cover_asset["checksum"] = hashlib.sha256(cover_bytes).hexdigest()
-        gallery_bytes = storage.download(gallery_key)
-        gallery_asset = {
-            "assetKey": gallery_key,
-            "filename": gallery_key.rsplit("/", 1)[-1],
-            "mimeType": storage.content_type(gallery_key),
-            "size": len(gallery_bytes),
-            "checksum": hashlib.sha256(gallery_bytes).hexdigest(),
-            "width": 900,
-            "height": 1100,
-        }
-        return product, cover_asset, gallery_asset
+            return None, None, None, {}
+        palette = CATEGORIES[category_index]["color"]
+        replacements = {}
+        cover_asset = _catalog_asset_details(cover_key)
+        if min(cover_asset["width"], cover_asset["height"]) < DEMO_ARTWORK_WIDTH:
+            cover_asset = _upload_artwork(title, f"{slug}-cover", palette, "Book cover")
+            replacements[cover_key] = cover_asset
+            product.cover_asset_key = cover_asset["assetKey"]
+        gallery_asset = _catalog_asset_details(gallery_key)
+        if min(gallery_asset["width"], gallery_asset["height"]) < DEMO_ARTWORK_WIDTH:
+            gallery_asset = _upload_artwork(title, f"{slug}-gallery", palette, "Interior image")
+            replacements[gallery_key] = gallery_asset
+            gallery_key = gallery_asset["assetKey"]
+        product_metadata.update({
+            "sizeOptions": [product_size.id],
+            "coverOptions": [cover.id for cover in pricing["covers"].values()],
+            "paperOptions": [paper.id for paper in pricing["papers"].values()],
+            "printingTiers": list(pricing["tiers"]),
+            "previewImageKeys": [cover_asset["assetKey"], gallery_key, *old_preview_keys[2:]],
+        })
+        product.admin_metadata = product_metadata
+        return product, cover_asset, gallery_asset, replacements
 
     palette = CATEGORIES[category_index]["color"]
     cover_asset = _upload_artwork(title, f"{slug}-cover", palette, "Book cover")
@@ -678,7 +744,7 @@ def _create_or_reuse_product(
     })
     product = db.session.get(BookProduct, product_response["id"])
     summary["products"]["created"] += 1
-    return product, cover_asset, gallery_asset
+    return product, cover_asset, gallery_asset, {}
 
 
 def _ensure_customer(email: str, index: int) -> User:
@@ -776,8 +842,24 @@ def _verify_seed(
         variants = db.session.scalars(
             select(BookVariant).where(BookVariant.product_id == product.id, BookVariant.is_active.is_(True))
         ).all()
-        if len(variants) < 4 or any(variant.currency.upper() != CURRENCY for variant in variants):
+        if len(variants) < 9 or any(variant.currency.upper() != CURRENCY for variant in variants):
             raise ValueError(f"Product '{product.slug}' has incomplete or inconsistent variants.")
+        demo_covers = db.session.scalars(
+            select(CoverType).where(CoverType.code.in_(("hardcover", "softcover", "linen")))
+        ).all()
+        demo_papers = db.session.scalars(
+            select(PaperType).where(PaperType.code.in_(("standard", "premium", "archival")))
+        ).all()
+        expected_pairs = {
+            (cover.id, paper.id)
+            for cover in demo_covers
+            for paper in demo_papers
+        }
+        actual_pairs = {(variant.cover_type_id, variant.paper_type_id) for variant in variants}
+        if not expected_pairs.issubset(actual_pairs):
+            raise ValueError(f"Product '{product.slug}' is missing an active cover and paper combination.")
+        if (product.admin_metadata or {}).get("printingTiers") != [code for code, *_ in TIERS]:
+            raise ValueError(f"Product '{product.slug}' has inconsistent printing tier codes.")
         template = templates.get(product.slug)
         if template is None or not template.is_active or not template.published_design_document:
             raise ValueError(f"Product '{product.slug}' has no published master design.")
@@ -816,7 +898,7 @@ def seed_demo_catalog() -> dict:
         _, _, category_index, collection_index = book_data[:4]
         category = categories[category_index]
         collection = collections[collection_index]
-        product, cover_asset, gallery_asset = _create_or_reuse_product(
+        product, cover_asset, gallery_asset, artwork_replacements = _create_or_reuse_product(
             book_data,
             category,
             collection,
@@ -829,6 +911,7 @@ def seed_demo_catalog() -> dict:
             raise ValueError(f"Product '{product.slug}' has mismatched category or collection relationships.")
         _ensure_variants(product, pricing, summary)
         template = _ensure_template(product, category, cover_asset, gallery_asset, summary)
+        template = _refresh_template_artwork(product, template, artwork_replacements)
         templates[product.slug] = template
         if not product.is_active:
             admin.set_product_published(product.id, True)

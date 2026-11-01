@@ -34,7 +34,7 @@ const paperOptions = [
 const coverOptions = [
   { id: "softcover", title: "Softcover", description: "A flexible cover with a clean, contemporary feel." },
   { id: "hardcover", title: "Hardcover", description: "A sturdy, classic book finish." },
-  { id: "layflat", title: "Layflat", description: "A seamless opening for wide photographs and spreads." },
+  { id: "linen", title: "Linen", description: "A textured, considered finish for a lasting keepsake." },
 ];
 
 const productionSteps = [
@@ -160,6 +160,9 @@ export function PrintOrderFlow() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { project, loading, error: projectError, reload } = usePrintProject(projectId);
+  const [availableCombinations, setAvailableCombinations] = useState(null);
+  const [availabilityLoading, setAvailabilityLoading] = useState(true);
+  const [availabilityError, setAvailabilityError] = useState("");
   const currentStep = location.pathname.split("/").filter(Boolean).at(-1) || "print";
   const step = steps.some((item) => item.id === currentStep) ? currentStep : "print";
   const configKey = `memorybook-print:${user.email.trim().toLowerCase()}::${projectId}`;
@@ -175,6 +178,41 @@ export function PrintOrderFlow() {
   const [paypalCheckoutOrder, setPaypalCheckoutOrder] = useState(null);
   const [submitError, setSubmitError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  useEffect(() => {
+    let active = true;
+    setAvailableCombinations(null);
+    setAvailabilityLoading(true);
+    setAvailabilityError("");
+    if (!project) {
+      setAvailabilityLoading(false);
+      return () => { active = false; };
+    }
+    projectService.getPrintOptions(user.email, projectId).then((combinations) => {
+      if (active) setAvailableCombinations(combinations);
+    }).catch((failure) => {
+      if (active) setAvailabilityError(failure instanceof Error ? failure.message : "Print options could not be loaded.");
+    }).finally(() => {
+      if (active) setAvailabilityLoading(false);
+    });
+    return () => { active = false; };
+  }, [project, projectId, user.email]);
+
+  useEffect(() => {
+    if (!availableCombinations?.length) return;
+    setConfiguration((current) => {
+      const configuredCombination = availableCombinations.some((item) =>
+        item.tier === current.tier && item.paper === current.paper && item.cover === current.cover);
+      if (configuredCombination) return current;
+      const first = availableCombinations[0];
+      return {
+        ...current,
+        tier: first.tier,
+        paper: first.paper,
+        cover: first.cover,
+      };
+    });
+  }, [availableCombinations]);
+
   const locationReady = Boolean(
     configuration.address.country
     && configuration.address.fullName.trim()
@@ -199,8 +237,22 @@ export function PrintOrderFlow() {
     let timer;
     setQuote(null);
     setQuoteError("");
-    if (!project || !locationReady) {
+    if (!project || !locationReady || availabilityLoading) {
       setQuoteLoading(false);
+      return () => { active = false; };
+    }
+    if (availabilityError) {
+      setQuoteLoading(false);
+      setQuoteError(availabilityError);
+      return () => { active = false; };
+    }
+    const configurationAvailable = availableCombinations?.some((item) =>
+      item.tier === configuration.tier && item.paper === configuration.paper && item.cover === configuration.cover);
+    if (!configurationAvailable) {
+      setQuoteLoading(false);
+      setQuoteError(availableCombinations?.length
+        ? "This print combination is no longer available. Choose from the available options."
+        : "No print options are currently available for this book.");
       return () => { active = false; };
     }
     setQuoteLoading(true);
@@ -220,7 +272,7 @@ export function PrintOrderFlow() {
       });
     }, 250);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [configuration, locationReady, project, projectId]);
+  }, [availabilityError, availabilityLoading, availableCombinations, configuration, locationReady, project, projectId]);
 
   useEffect(() => {
     let active = true;
@@ -258,6 +310,13 @@ export function PrintOrderFlow() {
   const stepIndex = steps.findIndex((item) => item.id === step);
   const nextStep = steps[Math.min(stepIndex + 1, steps.length - 1)];
   const previousStep = steps[Math.max(stepIndex - 1, 0)];
+  const matchingOptions = availableCombinations ?? [];
+  const availableTiers = tierOptions.filter((option) => matchingOptions.some((item) =>
+    item.tier === option.id && item.cover === configuration.cover && item.paper === configuration.paper));
+  const availablePapers = paperOptions.filter((option) => matchingOptions.some((item) =>
+    item.paper === option.id && item.cover === configuration.cover && item.tier === configuration.tier));
+  const availableCovers = coverOptions.filter((option) => matchingOptions.some((item) =>
+    item.cover === option.id && item.paper === configuration.paper && item.tier === configuration.tier));
 
   async function placeOrder(event) {
     event.preventDefault();
@@ -319,13 +378,17 @@ export function PrintOrderFlow() {
     {!loading && !projectError && project ? <>
       <BookSummary project={project} />
       {storageError ? <p className="print-inline-error" role="alert"><CircleAlert size={15} />{storageError}</p> : null}
+      {availabilityLoading ? <div className="print-message" role="status"><LoaderCircle className="print-spin" size={18} /> Checking print availability…</div> : null}
+      {availabilityError ? <div className="print-message print-error" role="alert"><CircleAlert size={18} /><span>{availabilityError}</span></div> : null}
+      {!availabilityLoading && !availabilityError && !matchingOptions.length
+        ? <div className="print-message print-error" role="alert"><CircleAlert size={18} /><span>No print options are currently available for this book.</span></div> : null}
       <div className="print-workflow-layout">
         <section className="print-step-panel">
           {step === "print" ? <div className="print-configuration-intro"><span className="print-feature-icon"><Printer size={20} /></span><h2>From your saved pages to a printed keepsake.</h2><p>We use your existing design, book dimensions, and page count. Final print compatibility is checked by the production service.</p><dl><div><dt>Book size</dt><dd>{project.document.book.size.width} × {project.document.book.size.height} in</dd></div><div><dt>Interior pages</dt><dd>{project.document.book.pageCount}</dd></div><div><dt>Current cover setup</dt><dd>{project.document.book.coverType || "Not specified"}</dd></div></dl><div className="print-note"><ShieldCheck size={17} /><span>Print orders are separate from PDF purchases. Payment and production status come from the order service.</span></div></div> : null}
 
-          {step === "tier" ? <><h2>Choose a printing tier</h2><OptionCards name="tier" items={tierOptions} value={configuration.tier} onChange={(tier) => updateConfiguration({ tier })} /></> : null}
-          {step === "paper" ? <><h2>Choose your paper</h2><OptionCards name="paper" items={paperOptions} value={configuration.paper} onChange={(paper) => updateConfiguration({ paper })} /></> : null}
-          {step === "cover" ? <><h2>Choose a cover finish</h2><OptionCards name="cover" items={coverOptions} value={configuration.cover} onChange={(cover) => updateConfiguration({ cover })} /></> : null}
+          {step === "tier" ? <><h2>Choose a printing tier</h2><OptionCards name="tier" items={availableTiers} value={configuration.tier} onChange={(tier) => updateConfiguration({ tier })} /></> : null}
+          {step === "paper" ? <><h2>Choose your paper</h2><OptionCards name="paper" items={availablePapers} value={configuration.paper} onChange={(paper) => updateConfiguration({ paper })} /></> : null}
+          {step === "cover" ? <><h2>Choose a cover finish</h2><OptionCards name="cover" items={availableCovers} value={configuration.cover} onChange={(cover) => updateConfiguration({ cover })} /></> : null}
           {step === "quantity" ? <div className="print-quantity-control"><h2>Choose a quantity</h2><p>Order between 1 and 100 copies. The backend confirms availability and any quantity pricing.</p><label htmlFor="print-quantity">Copies</label><div><button type="button" aria-label="Decrease quantity" disabled={configuration.quantity <= 1} onClick={() => updateConfiguration({ quantity: Math.max(1, configuration.quantity - 1) })}>−</button><input id="print-quantity" type="number" min="1" max="100" value={configuration.quantity} onChange={(event) => updateConfiguration({ quantity: Math.min(100, Math.max(1, Number(event.target.value) || 1)) })} /><button type="button" aria-label="Increase quantity" disabled={configuration.quantity >= 100} onClick={() => updateConfiguration({ quantity: Math.min(100, configuration.quantity + 1) })}>+</button></div></div> : null}
 
           {step === "shipping" ? <form className="print-address-form" onSubmit={(event) => { event.preventDefault(); navigate(`/create/design/${encodeURIComponent(projectId)}/print/checkout`); }}>
@@ -353,7 +416,11 @@ export function PrintOrderFlow() {
             {stepIndex > 0 ? <Link className="button button-outline" to={`/create/design/${encodeURIComponent(projectId)}/print${previousStep.id === "print" ? "" : `/${previousStep.id}`}`}><ArrowLeft size={15} /> Back</Link> : <Link className="button button-outline" to={`/create/design/${encodeURIComponent(projectId)}`}><ArrowLeft size={15} /> Back to editor</Link>}
             {step === "checkout" && !paypalCheckoutOrder ? <button className="button button-dark" type="button" onClick={placeOrder} disabled={submitting || quoteLoading || methodsLoading || !quote || !selectedMethod}>{submitting ? <><LoaderCircle className="print-spin" size={16} /> Starting secure checkout…</> : <>Continue to payment <ArrowRight size={15} /></>}</button>
               : step === "checkout" || step === "shipping" ? null
-                : <Link className="button button-dark" to={`/create/design/${encodeURIComponent(projectId)}/print/${nextStep.id}`}>Continue <ArrowRight size={15} /></Link>}
+                : <Link className="button button-dark" aria-disabled={availabilityLoading || Boolean(availabilityError) || !matchingOptions.length}
+                  onClick={(event) => {
+                    if (availabilityLoading || availabilityError || !matchingOptions.length) event.preventDefault();
+                  }}
+                  to={`/create/design/${encodeURIComponent(projectId)}/print/${nextStep.id}`}>Continue <ArrowRight size={15} /></Link>}
           </div>
         </section>
         <aside className="print-sidebar-card"><span className="eyebrow">Production & delivery</span><h2>Thoughtfully made, carefully sent.</h2><p>Estimated dates are provided with the server quote once your delivery details are entered.</p><div><Clock3 size={16} /><span>Production estimate<strong>{quote ? formatDate(quote.productionEstimate) : "Pending quote"}</strong></span></div><div><Truck size={16} /><span>Delivery estimate<strong>{quote ? formatDate(quote.deliveryEstimate) : "Pending quote"}</strong></span></div><Link to="/print/orders">View print order history <ArrowRight size={14} /></Link></aside>
@@ -444,39 +511,39 @@ export function PrintOrderResult() {
         window.location.assign(retried.checkoutUrl);
         return;
       }
-
-      async function cancelUnpaidOrder() {
-        if (!window.confirm("Cancel this unpaid print order? It cannot be paid after cancellation.")) return;
-        setCancelling(true);
-        setCancelError("");
-        try {
-          await printOrderService.cancelUnpaidOrder(order.id);
-          setCancelStatus("Your unpaid order has been cancelled.");
-          refresh();
-        } catch (failure) {
-          setCancelError(failure instanceof Error ? failure.message : "The unpaid order could not be cancelled.");
-        } finally {
-          setCancelling(false);
-        }
-      }
-
-      async function retryPrintPdf() {
-        setPdfRetrying(true);
-        setPdfRetryError("");
-        try {
-          await printOrderService.retryPrintPdf(order.id);
-          refresh();
-        } catch (failure) {
-          setPdfRetryError(failure instanceof Error ? failure.message : "The print PDF could not be retried.");
-        } finally {
-          setPdfRetrying(false);
-        }
-      }
       refresh();
     } catch (failure) {
       setRetryError(failure instanceof Error ? failure.message : "Checkout could not be retried.");
     } finally {
       setRetrying(false);
+    }
+  }
+
+  async function cancelUnpaidOrder() {
+    if (!window.confirm("Cancel this unpaid print order? It cannot be paid after cancellation.")) return;
+    setCancelling(true);
+    setCancelError("");
+    try {
+      await printOrderService.cancelUnpaidOrder(order.id);
+      setCancelStatus("Your unpaid order has been cancelled.");
+      refresh();
+    } catch (failure) {
+      setCancelError(failure instanceof Error ? failure.message : "The unpaid order could not be cancelled.");
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  async function retryPrintPdf() {
+    setPdfRetrying(true);
+    setPdfRetryError("");
+    try {
+      await printOrderService.retryPrintPdf(order.id);
+      refresh();
+    } catch (failure) {
+      setPdfRetryError(failure instanceof Error ? failure.message : "The print PDF could not be retried.");
+    } finally {
+      setPdfRetrying(false);
     }
   }
 
@@ -489,7 +556,7 @@ export function PrintOrderResult() {
         <div className="print-order-status-heading"><span className={`print-order-status-icon${order.paymentStatus === "successful" ? " confirmed" : ""}`}>{order.paymentStatus === "successful" ? <BadgeCheck size={23} /> : <Clock3 size={23} />}</span><div><span className="eyebrow">Order {order.id}</span><h2>{order.paymentStatus === "successful" ? "Payment confirmed" : order.paymentStatus === "failed" ? "Payment failed" : "Payment pending"}</h2><p>{order.bookTitle || "Your MemoryBook"}{order.quantity ? ` · ${order.quantity} ${order.quantity === 1 ? "copy" : "copies"}` : ""}</p></div><strong>{order.quote ? formatPrice(order.quote.total, order.quote.currency) : ""}</strong></div>
         {order.paymentStatus === "failed" ? <div className="print-inline-error"><CircleAlert size={15} /> Payment was not confirmed. Your book will not enter production until payment is verified. <button className="button button-outline" type="button" onClick={retryCheckout} disabled={retrying}>{retrying ? "Starting retry…" : "Retry payment"}</button>{retryError ? <span role="alert">{retryError}</span> : null}</div> : null}
         {order.paymentStatus === "pending" ? <div className="print-order-note"><Clock3 size={15} /><span>{order.paymentExpired ? "The payment window has expired. This order can no longer be paid." : "We are waiting for the payment service to confirm your transaction."}</span>{!order.paymentExpired && order.checkoutUrl ? <button className="button button-outline" type="button" onClick={() => window.location.assign(order.checkoutUrl)}>Pay now</button> : null}{!order.paymentExpired ? <button className="button button-outline" type="button" disabled={cancelling} onClick={cancelUnpaidOrder}>{cancelling ? "Cancelling…" : "Cancel order"}</button> : null}</div> : null}
-        {order.printPdf?.print?.status === "failed" ? <div className="print-inline-error" role="alert"><CircleAlert size={15} /><span>{order.printPdf.print.error?.message || "The print-ready PDF could not be generated."}</span><button className="button button-outline" type="button" disabled={pdfRetrying} onClick={retryPrintPdf}>{pdfRetrying ? "Retrying…" : "Retry PDF generation"}</button>{pdfRetryError ? <small>{pdfRetryError}</small> : null}</div> : null}
+        {order.printPdf?.print?.status === "failed" ? <div className="print-inline-error" role="alert"><CircleAlert size={15} /><span>{order.printPdf.print.error?.message || "The print-ready PDF could not be generated."}</span><Link className="button button-outline" to={`/create/design/${encodeURIComponent(order.projectId)}`}>Open project and replace photo</Link><button className="button button-outline" type="button" disabled={pdfRetrying} onClick={retryPrintPdf}>{pdfRetrying ? "Retrying…" : "Retry PDF generation"}</button>{pdfRetryError ? <small>{pdfRetryError}</small> : null}</div> : null}
         {!isTracking ? <div className="print-order-dates"><div><Clock3 size={16} /><span>Estimated production<strong>{formatDate(order.productionEstimate)}</strong></span></div><div><Truck size={16} /><span>Estimated delivery<strong>{formatDate(order.deliveryEstimate)}</strong></span></div></div> : null}
       </section>
       <ManualPaymentPanel order={order} onSubmitted={refresh} />

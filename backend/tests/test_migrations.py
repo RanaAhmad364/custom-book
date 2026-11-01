@@ -87,6 +87,8 @@ def test_initial_migration_upgrades_database(tmp_path):
         inspector = inspect(app.extensions["sqlalchemy"].engine)
         assert EXPECTED_SCHEMA_TABLES.issubset(inspector.get_table_names())
         assert "alembic_version" in inspector.get_table_names()
+        assert "code" in {column["name"] for column in inspector.get_columns("cover_types")}
+        assert "code" in {column["name"] for column in inspector.get_columns("paper_types")}
         assert {
             "full_name",
             "phone",

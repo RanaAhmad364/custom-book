@@ -173,14 +173,17 @@ def create_print_quote(
         for candidate, size, cover, paper in variant_row
         if abs(Decimal(size.width_mm) - width_mm) <= Decimal("0.5")
         and abs(Decimal(size.height_mm) - height_mm) <= Decimal("0.5")
-        and _matches_choice(cover.name, config["cover"])
-        and _matches_choice(paper.name, config["paper"])
+        and cover.code.casefold() == config["cover"]
+        and paper.code.casefold() == config["paper"]
     ]
     if len(matching_variants) > 1:
         raise ConflictError("The selected print configuration matches multiple variants. Contact support.")
     variant = matching_variants[0] if matching_variants else None
     if variant is None:
-        raise ConflictError("The selected size, cover, and paper combination is not configured for this book.")
+        raise ConflictError(
+            "The selected cover and paper combination is not available for this book size. "
+            "Choose from the available print options."
+        )
     selected_variant, size, cover, paper = variant
     product_metadata = product.admin_metadata or {}
     validate_order_page_count(product, int(project.page_count), cover.name)
@@ -345,6 +348,84 @@ def create_print_quote(
         "productionEstimate": production_estimate,
         "deliveryEstimate": delivery_estimate,
         "expiresAt": quote.expires_at.isoformat(),
+    }
+
+
+def available_print_options(project_id: str, user_id: str) -> dict:
+    project, product = _owned_project_and_product(project_id, user_id)
+    if not project.document:
+        raise ConflictError("Save your book before checking print options.")
+    if product.currency.upper() != default_currency():
+        return {"combinations": []}
+    width = _decimal(project.document.get("book", {}).get("size", {}).get("width"), "book width") * Decimal("25.4")
+    height = _decimal(project.document.get("book", {}).get("size", {}).get("height"), "book height") * Decimal("25.4")
+    metadata = product.admin_metadata or {}
+    configured_sizes = metadata.get("sizeOptions")
+    configured_covers = metadata.get("coverOptions")
+    configured_papers = metadata.get("paperOptions")
+    configured_tiers = metadata.get("printingTiers")
+
+    variants = db.session.execute(
+        select(BookVariant, BookSize, CoverType, PaperType)
+        .join(BookSize, BookSize.id == BookVariant.size_id)
+        .join(CoverType, CoverType.id == BookVariant.cover_type_id)
+        .join(PaperType, PaperType.id == BookVariant.paper_type_id)
+        .where(
+            BookVariant.product_id == product.id,
+            BookVariant.is_active.is_(True),
+            BookVariant.currency == default_currency(),
+            BookSize.is_active.is_(True),
+            CoverType.is_active.is_(True),
+            PaperType.is_active.is_(True),
+        )
+    ).all()
+    matching_variants = [
+        (variant, cover, paper)
+        for variant, size, cover, paper in variants
+        if abs(Decimal(size.width_mm) - width) <= Decimal("0.5")
+        and abs(Decimal(size.height_mm) - height) <= Decimal("0.5")
+        and (not isinstance(configured_sizes, list) or not configured_sizes or variant.size_id in configured_sizes)
+        and (not isinstance(configured_covers, list) or not configured_covers or variant.cover_type_id in configured_covers)
+        and (not isinstance(configured_papers, list) or not configured_papers or variant.paper_type_id in configured_papers)
+    ]
+
+    allowed_tiers = None
+    if "printingTiers" in metadata:
+        if not isinstance(configured_tiers, list):
+            allowed_tiers = set()
+        else:
+            allowed_tiers = {item.upper() for item in configured_tiers if isinstance(item, str)}
+    active_tiers = db.session.scalars(
+        select(PricingTier).where(
+            PricingTier.is_active.is_(True),
+            PricingTier.currency == default_currency(),
+        )
+    ).all()
+    page_count = int(project.page_count)
+    tier_codes = []
+    for tier in active_tiers:
+        if allowed_tiers is not None and tier.code.upper() not in allowed_tiers:
+            continue
+        page_rules = db.session.scalars(
+            select(PagePricing).where(
+                PagePricing.tier_id == tier.id,
+                PagePricing.minimum_pages <= page_count,
+                PagePricing.maximum_pages >= page_count,
+            ).limit(2)
+        ).all()
+        if len(page_rules) == 1:
+            tier_codes.append(tier.code.casefold())
+
+    combinations = sorted({
+        (cover.code.casefold(), paper.code.casefold(), tier_code)
+        for _variant, cover, paper in matching_variants
+        for tier_code in tier_codes
+    })
+    return {
+        "combinations": [
+            {"cover": cover, "paper": paper, "tier": tier}
+            for cover, paper, tier in combinations
+        ]
     }
 
 
@@ -762,15 +843,6 @@ def _choice(value, field: str) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > 60:
         raise ValidationError(f"{field} is invalid.", {field: "invalid"})
     return value.strip().lower()
-
-
-def _matches_choice(name: str, choice: str) -> bool:
-    def normalize(value: str) -> str:
-        return "".join(char for char in value.casefold() if char.isalnum())
-
-    normalized_name = normalize(name)
-    normalized_choice = normalize(choice)
-    return normalized_choice == normalized_name or normalized_choice in normalized_name
 
 
 def _money(value, field: str) -> Decimal:

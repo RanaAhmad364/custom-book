@@ -199,6 +199,16 @@ export const projectService = {
     return responseProject({ data }, key);
   },
 
+  async getPrintOptions(owner, projectId) {
+    ownerKey(owner);
+    const { data } = await apiRequest(`${projectPath(projectId)}/print-options`);
+    if (!Array.isArray(data?.combinations) || data.combinations.some((item) =>
+      !item || typeof item.cover !== "string" || typeof item.paper !== "string" || typeof item.tier !== "string")) {
+      throw new Error("The print-options service returned an invalid response.");
+    }
+    return data.combinations;
+  },
+
   async getPdfAccess(owner, projectId) {
     ownerKey(owner);
     const { data } = await apiRequest(`${projectPath(projectId)}/access`);

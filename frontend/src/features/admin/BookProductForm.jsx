@@ -56,7 +56,7 @@ function MultiSelectField({ label, name, options, selected, onChange, loading, e
       onChange([...event.target.selectedOptions].map((option) => option.value));
     }} disabled={loading || options.length === 0} aria-invalid={Boolean(error)}>
       {options.map((option) => <option key={option.id} value={option.id}
-        disabled={option.active === false && !selected.includes(option.id)}>{option.name}{option.active === false ? " (inactive)" : ""}</option>)}
+          disabled={option.active === false && !selected.includes(option.id)}>{option.name}{option.code ? ` (${option.code})` : ""}{option.active === false ? " (inactive)" : ""}</option>)}
     </select>
     {error ? <small className="book-form-field-error">{error}</small> : null}
     {options.length ? <small className="book-form-help">Use Ctrl or Command to select multiple options.</small> : null}
@@ -79,7 +79,7 @@ export default function BookProductForm({
   const [initialPayload, setInitialPayload] = useState(() => JSON.stringify(buildBookPayload(initialValues)));
   const [categories, setCategories] = useState([]);
   const [collections, setCollections] = useState([]);
-  const [pricing, setPricing] = useState({ sizes: [], covers: [], papers: [], tiers: [], variants: [], currency: "PKR" });
+  const [pricing, setPricing] = useState({ sizes: [], covers: [], papers: [], tiers: [], pagePricing: [], variants: [], currency: "PKR" });
   const [variantDraft, setVariantDraft] = useState({ sizeId: "", coverTypeId: "", paperTypeId: "", sku: "", basePrice: "" });
   const [variantSaving, setVariantSaving] = useState(false);
   const [variantError, setVariantError] = useState("");
@@ -97,6 +97,20 @@ export default function BookProductForm({
   const availableCategories = categories.filter((category) => category.isPublished !== false);
   const selectedCategory = categories.find((category) => category.id === values.categoryId);
   const selectedCollection = collections.find((collection) => collection.id === values.collectionId);
+  const hasValidVariant = pricing.variants.some((variant) =>
+    variant.active
+      && variant.currency?.toUpperCase() === values.currency.toUpperCase()
+      && values.adminMetadata.sizeOptions.includes(variant.sizeId)
+      && values.adminMetadata.coverOptions.includes(variant.coverTypeId)
+      && values.adminMetadata.paperOptions.includes(variant.paperTypeId));
+  const hasValidTier = values.adminMetadata.printingTiers.some((code) => {
+    const tier = pricing.tiers.find((item) => item.code === code && item.active && item.currency?.toUpperCase() === values.currency.toUpperCase());
+    return tier && pricing.pagePricing.some((band) =>
+      band.tierId === tier.id
+        && band.minimumPages <= Number(values.pageCountMin)
+        && band.maximumPages >= Number(values.pageCountMax));
+  });
+  const hasValidPrintCombination = hasValidVariant && hasValidTier;
   const isDirty = JSON.stringify(buildBookPayload(values)) !== initialPayload;
 
   useEffect(() => {
@@ -115,6 +129,7 @@ export default function BookProductForm({
       if (!active) return;
       if (!Array.isArray(nextPricing.sizes) || !Array.isArray(nextPricing.covers) ||
           !Array.isArray(nextPricing.papers) || !Array.isArray(nextPricing.tiers) ||
+          !Array.isArray(nextPricing.pagePricing) ||
           !Array.isArray(nextPricing.variants) || !/^[A-Z]{3}$/.test(nextPricing.currency ?? "")) {
         throw new Error("The pricing service returned invalid book configuration options.");
       }
@@ -125,6 +140,7 @@ export default function BookProductForm({
         covers: nextPricing.covers,
         papers: nextPricing.papers,
         tiers: nextPricing.tiers,
+        pagePricing: nextPricing.pagePricing,
         variants: nextPricing.variants.filter((variant) => variant.productId === record.id),
         currency: nextPricing.currency,
       });
@@ -327,6 +343,9 @@ export default function BookProductForm({
           ? <small className="book-form-help">Create or activate a category before saving a book product.</small> : null}
         {!optionsLoading && !optionsError && values.categoryId && availableCollections.length === 0
           ? <small className="book-form-help">No collections are assigned to this category.</small> : null}
+        {record.isPublished && !optionsLoading && !optionsError && !hasValidPrintCombination
+          ? <div className="admin-inline-error" role="alert"><AlertCircle size={15} />This published book has no valid print variant and tier combination. Configure active variants and tier page pricing before keeping it published.</div>
+          : null}
       </section>
 
       <section className="book-form-section">
@@ -376,7 +395,7 @@ export default function BookProductForm({
               onChange={(event) => updateMetadata("printingTiers", event.target.checked
                 ? [...values.adminMetadata.printingTiers, tier.code]
                 : values.adminMetadata.printingTiers.filter((item) => item !== tier.code))} />
-            {tier.name}{tier.active ? "" : " (inactive)"}
+            {tier.name} ({tier.code}){tier.active ? "" : " (inactive)"}
           </label>)}</div> : <small className="book-form-help">No printing tiers are configured in Pricing.</small>}
         </div>
       </section>
@@ -385,18 +404,19 @@ export default function BookProductForm({
         <div className="book-form-section-heading"><span>04</span><div><h3>Product variants</h3><p>Manage the product's size, cover, paper, and currency-specific options.</p></div></div>
         {pricing.variants.length ? <ul className="book-variant-list">{pricing.variants.map((variant) => <li key={variant.id}>
           <strong>{variant.sku}</strong><span>{variant.size} · {variant.cover} · {variant.paper}</span>
+          <span>{variant.sizeCode ? `Size code: ${variant.sizeCode} · ` : ""}Cover code: {variant.coverCode} · Paper code: {variant.paperCode}</span>
           <span>{variant.currency} {variant.basePrice}{variant.active ? "" : " · inactive"}</span>
         </li>)}</ul> : <p className="book-form-help">No variants are linked to this product yet.</p>}
         {variantError ? <div className="admin-inline-error" role="alert"><AlertCircle size={15} />{variantError}</div> : null}
         <form className="book-form-grid" onSubmit={(event) => { void submitVariant(event); }}>
           <SelectField label="Size" name="variant-size" value={variantDraft.sizeId} onChange={(event) => setVariantDraft((current) => ({ ...current, sizeId: event.target.value }))} required>
-            <option value="">Choose size</option>{pricing.sizes.filter((option) => option.active).map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}
+            <option value="">Choose size</option>{pricing.sizes.filter((option) => option.active).map((option) => <option key={option.id} value={option.id}>{option.name} ({option.code})</option>)}
           </SelectField>
           <SelectField label="Cover" name="variant-cover" value={variantDraft.coverTypeId} onChange={(event) => setVariantDraft((current) => ({ ...current, coverTypeId: event.target.value }))} required>
-            <option value="">Choose cover</option>{pricing.covers.filter((option) => option.active).map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}
+            <option value="">Choose cover</option>{pricing.covers.filter((option) => option.active).map((option) => <option key={option.id} value={option.id}>{option.name} ({option.code})</option>)}
           </SelectField>
           <SelectField label="Paper" name="variant-paper" value={variantDraft.paperTypeId} onChange={(event) => setVariantDraft((current) => ({ ...current, paperTypeId: event.target.value }))} required>
-            <option value="">Choose paper</option>{pricing.papers.filter((option) => option.active).map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}
+            <option value="">Choose paper</option>{pricing.papers.filter((option) => option.active).map((option) => <option key={option.id} value={option.id}>{option.name} ({option.code})</option>)}
           </SelectField>
           <Field label="SKU" name="variant-sku" value={variantDraft.sku} onChange={(event) => setVariantDraft((current) => ({ ...current, sku: event.target.value }))} maxLength={80} required />
           <Field label={`Variant price (${values.currency})`} name="variant-price" type="number" min="0" step="0.01" value={variantDraft.basePrice}

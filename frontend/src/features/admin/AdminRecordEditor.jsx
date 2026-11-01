@@ -252,23 +252,23 @@ function FormFields({ section, record, update, categories = [], books = [], pric
           ]} onChange={(value) => update("productId", value)} required />
           <Select label="Size" value={record.sizeId} options={[
             { value: "", label: "Select a size" },
-            ...(pricingOptions?.sizes ?? []).filter((size) => size.active).map((size) => ({ value: size.id, label: size.name })),
+            ...(pricingOptions?.sizes ?? []).filter((size) => size.active).map((size) => ({ value: size.id, label: `${size.name} (${size.code})` })),
           ]} onChange={(value) => update("sizeId", value)} required />
           <Select label="Cover type" value={record.coverTypeId} options={[
             { value: "", label: "Select a cover" },
-            ...(pricingOptions?.covers ?? []).filter((cover) => cover.active).map((cover) => ({ value: cover.id, label: cover.name })),
+            ...(pricingOptions?.covers ?? []).filter((cover) => cover.active).map((cover) => ({ value: cover.id, label: `${cover.name} (${cover.code})` })),
           ]} onChange={(value) => update("coverTypeId", value)} required />
           <Select label="Paper type" value={record.paperTypeId} options={[
             { value: "", label: "Select paper" },
-            ...(pricingOptions?.papers ?? []).filter((paper) => paper.active).map((paper) => ({ value: paper.id, label: paper.name })),
+            ...(pricingOptions?.papers ?? []).filter((paper) => paper.active).map((paper) => ({ value: paper.id, label: `${paper.name} (${paper.code})` })),
           ]} onChange={(value) => update("paperTypeId", value)} required />
           <Input label="Printing price" type="number" value={record.basePrice} onChange={(value) => update("basePrice", value)} min="0" step="0.01" required />
           <Input label="Currency" value={record.currency} onChange={(value) => update("currency", value.toUpperCase())} maxLength={3} required />
         </div> : <div className="admin-detail-grid">
           <ReadOnlyValue label="Book" value={record.book} />
           <ReadOnlyValue label="Size" value={record.size} />
-          <ReadOnlyValue label="Cover" value={record.cover} />
-          <ReadOnlyValue label="Paper" value={record.paper} />
+          <ReadOnlyValue label="Cover" value={`${record.cover} (${record.coverCode})`} />
+          <ReadOnlyValue label="Paper" value={`${record.paper} (${record.paperCode})`} />
           <Input label="Printing price" type="number" value={record.basePrice} onChange={(value) => update("basePrice", value)} min="0" step="0.01" required />
           <Input label="Currency" value={record.currency} onChange={(value) => update("currency", value.toUpperCase())} maxLength={3} required />
         </div>}
@@ -313,11 +313,13 @@ function FormFields({ section, record, update, categories = [], books = [], pric
       <Toggle label="Active" checked={record.active} onChange={(value) => update("active", value)} />
     </div>;
     if (record.kind === "cover") return <div className="admin-form-grid">
+      <Input label="Cover code" required value={record.code} onChange={(value) => update("code", value.toLowerCase())} maxLength={40} pattern="[a-z0-9_-]+" />
       <Input label="Cover type" required value={record.name} onChange={(value) => update("name", value)} maxLength={100} />
       <Textarea label="Description" value={record.description} onChange={(value) => update("description", value)} maxLength={500} />
       <Toggle label="Active" checked={record.active} onChange={(value) => update("active", value)} />
     </div>;
     if (record.kind === "paper") return <div className="admin-form-grid">
+      <Input label="Paper code" required value={record.code} onChange={(value) => update("code", value.toLowerCase())} maxLength={40} pattern="[a-z0-9_-]+" />
       <Input label="Paper type" required value={record.name} onChange={(value) => update("name", value)} maxLength={100} />
       <Textarea label="Description" value={record.description} onChange={(value) => update("description", value)} maxLength={500} />
       <Input label="Weight (gsm)" type="number" min="1" step="1" value={record.weightGsm} onChange={(value) => update("weightGsm", value === "" ? "" : Number(value))} />

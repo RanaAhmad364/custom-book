@@ -303,6 +303,9 @@ export default function AdminSection({ sectionOverride }) {
     if (section === "pricing") return [
       ...(payload?.tiers || []).map((item) => ({ ...item, kind: "tier" })),
       ...(payload?.pagePricing || []).map((item) => ({ ...item, name: `${item.tierCode} · ${item.minimumPages}–${item.maximumPages} pages`, kind: "pagePricing" })),
+      ...(payload?.sizes || []).map((item) => ({ ...item, kind: "size" })),
+      ...(payload?.covers || []).map((item) => ({ ...item, kind: "cover" })),
+      ...(payload?.papers || []).map((item) => ({ ...item, kind: "paper" })),
       ...(payload?.rules || []).map((item) => ({ ...item, kind: "rule" })),
       ...(payload?.discounts || []).map((item) => ({ ...item, kind: "discount" })),
       ...(payload?.variants || []).map((item) => ({ ...item, name: `${item.book} · ${item.size} · ${item.cover} · ${item.paper}`, kind: "variant" })),

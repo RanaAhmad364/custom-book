@@ -87,6 +87,27 @@ test("project PDF access is fetched from the owner-scoped access endpoint", asyn
   }
 });
 
+test("print availability is fetched for the owned project and validates combinations", async () => {
+  const projectId = "60b49d00-220e-4ab3-99c8-14b81dcdd602";
+  const combinations = [{ cover: "hardcover", paper: "standard", tier: "basic" }];
+  const previousFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return new Response(JSON.stringify({ combinations }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  try {
+    assert.deepEqual(await projectService.getPrintOptions("member@example.test", projectId), combinations);
+    assert.equal(requests[0].options.method, "GET");
+    assert.match(requests[0].url, new RegExp(`/projects/${projectId}/print-options`));
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test("stale saves keep the local recovery copy and require a freshly loaded version", async () => {
   const projectId = "6a8a10b3-5572-4a58-a779-1d067d9a2adf";
   const owner = "save-recovery@example.test";
