@@ -42,7 +42,7 @@ class BaseConfig:
     AUTH_EMAIL_MODE = os.getenv("AUTH_EMAIL_MODE", "smtp").strip().lower()
     PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "http://localhost:5173")
     PUBLIC_API_URL = os.getenv("PUBLIC_API_URL", "")
-    PAYMENT_DEFAULT_CURRENCY = os.getenv("PAYMENT_DEFAULT_CURRENCY", "PKR").upper()
+    PAYMENT_DEFAULT_CURRENCY = os.getenv("PAYMENT_DEFAULT_CURRENCY", "USD").upper()
     PAYMENT_PRIMARY_GATEWAY = os.getenv("PAYMENT_PRIMARY_GATEWAY", "paypal").strip().lower()
     MANUAL_PAYMENTS_ENABLED = os.getenv("MANUAL_PAYMENTS_ENABLED", "false").lower() == "true"
     MANUAL_BANK_NAME = os.getenv("MANUAL_BANK_NAME", "")
@@ -121,7 +121,7 @@ class BaseConfig:
         os.getenv("RATELIMIT_STORAGE_URI", "memory://"),
     )
     RATELIMIT_STORAGE_URI = RATE_LIMIT_STORAGE_URI
-    RATELIMIT_DEFAULT = "200 per day; 60 per hour"
+    RATELIMIT_DEFAULT = os.getenv("RATELIMIT_DEFAULT", "2000 per day; 300 per hour")
     RATELIMIT_HEADERS_ENABLED = True
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "0"))

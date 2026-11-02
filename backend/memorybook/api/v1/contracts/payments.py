@@ -221,6 +221,7 @@ def refund_request(payment_id: str):
 
 @payments_blueprint.get("/notifications")
 @active_user_required
+@limiter.limit("120 per minute")
 def list_notifications():
     user_id = get_authenticated_user().id
     items = db.session.scalars(

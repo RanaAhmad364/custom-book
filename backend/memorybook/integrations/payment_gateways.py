@@ -15,12 +15,16 @@ from urllib.request import Request, urlopen
 from flask import current_app
 from sqlalchemy import select
 
-from memorybook.errors import ServiceUnavailableError, ValidationError
+from memorybook.errors import ConflictError, ServiceUnavailableError, ValidationError
 from memorybook.extensions import db
 from memorybook.models import Payment, PlatformSetting
 
 
 class GatewayError(Exception):
+    pass
+
+
+class PayPalOrderAlreadyCaptured(Exception):
     pass
 
 
@@ -44,8 +48,9 @@ class PaymentGateway(Protocol):
 
 
 def available_payment_methods(currency: str) -> list[dict]:
-    if currency.strip().upper() == "PKR":
-        methods = []
+    normalized_currency = currency.strip().upper()
+    methods = []
+    if normalized_currency == "PKR":
         if current_app.config.get("MANUAL_PAYMENTS_ENABLED", False):
             methods.extend([
                 {
@@ -98,21 +103,21 @@ def available_payment_methods(currency: str) -> list[dict]:
                     "method": "jazzcash_wallet",
                     "label": "JazzCash wallet",
                 })
-        if (
+    elif normalized_currency == "USD":
+        if _paypal_is_configured():
+            methods.append({
+                "provider": "paypal",
+                "method": "paypal_checkout",
+                "label": "PayPal",
+            })
+
+    if (
             current_app.config.get("STRIPE_ENABLED")
             and current_app.config.get("STRIPE_SECRET_KEY")
             and current_app.config.get("STRIPE_WEBHOOK_SECRET")
-        ):
-            methods.append({"provider": "stripe", "method": "card", "label": "Card"})
-        return methods
-
-    if (
-        current_app.config.get("STRIPE_ENABLED")
-        and current_app.config.get("STRIPE_SECRET_KEY")
-        and current_app.config.get("STRIPE_WEBHOOK_SECRET")
-    ):
-        return [{"provider": "stripe", "method": "card", "label": "Card"}]
-    return []
+    ) and normalized_currency in {"PKR", "USD"}:
+        methods.append({"provider": "stripe", "method": "card", "label": "Card"})
+    return methods
 
 
 def provider_for(currency: str, preferred: str | None = None, method: str | None = None):
@@ -122,11 +127,7 @@ def provider_for(currency: str, preferred: str | None = None, method: str | None
         raise ValidationError("Payment method must be a string.", {"paymentMethod": "invalid"})
     options = available_payment_methods(currency)
     if preferred is None:
-        preferred = (
-            current_app.config.get("PAYMENT_PRIMARY_GATEWAY", "paypal").strip().lower()
-            if currency.upper() == "PKR"
-            else "stripe"
-        )
+        preferred = current_app.config.get("PAYMENT_PRIMARY_GATEWAY", "paypal").strip().lower()
     name = preferred.strip().lower()
     selected = next(
         (
@@ -258,6 +259,9 @@ class PayPalGateway:
             request_id=f"memorybook-capture-{idempotency_key}"[:108],
         )
 
+    def get_order(self, paypal_order_id: str) -> dict:
+        return self._request("GET", f"/v2/checkout/orders/{paypal_order_id}")
+
     def handle_webhook(self, raw_body: bytes, headers: dict[str, str]) -> dict:
         event = self.verify_event(raw_body, headers)
         return event
@@ -292,13 +296,27 @@ class PayPalGateway:
         return event
 
     def refund(self, payment: Payment, amount: Decimal, key: str) -> tuple[str, str]:
-        if not payment.provider_capture_id or not payment.exchange_rate:
+        if not payment.provider_capture_id:
             raise ValidationError("The confirmed PayPal capture reference is unavailable.")
-        usd_amount = pkr_amount_to_usd(amount, Decimal(payment.exchange_rate))
+        if payment.status == "needs_review":
+            if not payment.provider_capture_currency:
+                raise ValidationError("The captured PayPal currency is unavailable for refund.")
+            refund_currency = payment.provider_capture_currency
+            provider_amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        elif payment.currency.upper() == "USD":
+            refund_currency = "USD"
+            usd_amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            provider_amount = usd_amount
+        elif payment.exchange_rate:
+            refund_currency = "USD"
+            usd_amount = pkr_amount_to_usd(amount, Decimal(payment.exchange_rate))
+            provider_amount = usd_amount
+        else:
+            raise ValidationError("The confirmed PayPal exchange rate is unavailable.")
         result = self._request(
             "POST",
             f"/v2/payments/captures/{payment.provider_capture_id}/refund",
-            {"amount": {"value": format(usd_amount, ".2f"), "currency_code": "USD"}},
+            {"amount": {"value": format(provider_amount, ".2f"), "currency_code": refund_currency}},
             request_id=f"memorybook-refund-{key}"[:108],
         )
         refund_id = result.get("id")
@@ -546,7 +564,23 @@ def _read_json_response(request: Request, provider: str) -> dict:
             body = response.read(1024 * 1024)
             status = response.status
     except HTTPError as failure:
-        failure.read(2048)
+        error_body = failure.read(2048)
+        if provider == "PayPal":
+            try:
+                error_payload = json.loads(error_body)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                error_payload = {}
+            details = error_payload.get("details", []) if isinstance(error_payload, dict) else []
+            if (
+                isinstance(details, list)
+                and any(isinstance(detail, dict) and detail.get("issue") == "ORDER_ALREADY_CAPTURED" for detail in details)
+            ):
+                raise PayPalOrderAlreadyCaptured from failure
+            if (
+                isinstance(details, list)
+                and any(isinstance(detail, dict) and detail.get("issue") == "ORDER_NOT_APPROVED" for detail in details)
+            ):
+                raise ConflictError("PayPal checkout was not approved. Please try again and approve the payment.") from failure
         current_app.logger.warning("%s request failed with HTTP %s.", provider, failure.code)
         raise ServiceUnavailableError(f"{provider} is temporarily unavailable.") from failure
     except (TimeoutError, URLError, OSError) as failure:

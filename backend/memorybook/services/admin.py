@@ -1439,7 +1439,9 @@ def _order_dict(
         "orderNumber": order.order_number,
         "type": kind,
         "userId": order.user_id,
-        "userName": (user.full_name if user else None) or "Name not provided",
+        "userName": (user.full_name if user else None) or (
+            (order.shipping_address_snapshot or {}).get("fullName") if kind == "print" else None
+        ) or "Name not provided",
         "userEmail": user.email if user else None,
         "projectId": order.project_id,
         "projectTitle": project.title if project else None,
@@ -1457,6 +1459,7 @@ def _order_dict(
         "currency": order.currency,
         "amount": str(order.total_amount),
         "paidAt": order.paid_at.isoformat() if order.paid_at else None,
+        "consentAt": order.consent_at.isoformat() if kind == "print" and order.consent_at else None,
         "createdAt": order.created_at.isoformat(),
     }
     if not private_project:
@@ -1475,7 +1478,9 @@ def _order_dict(
         ).all()
         specification = items[0].specification_snapshot if items else {}
         payload["customer"] = {
-            "name": (user.full_name if user else None) or "Name not provided",
+            "name": (user.full_name if user else None) or (
+                (order.shipping_address_snapshot or {}).get("fullName")
+            ) or "Name not provided",
             "email": user.email if user else None,
             "phone": user.phone if user else None,
         }
@@ -1940,6 +1945,11 @@ def update_order(order_id: str, kind: str, data: dict, actor_id: str) -> dict:
                 "out_for_delivery", "delivered",
             } and (order.paid_at is None or not _order_has_successful_payment(order.id)):
                 raise ConflictError("Production can begin only after payment is confirmed.")
+            if kind == "print" and state in {
+                "processing", "printed", "design_verified", "in_production",
+                "quality_check", "packed", "shipped", "out_for_delivery", "delivered",
+            } and not _print_order_pdf_is_ready(order.id):
+                raise ConflictError("Production cannot continue until the print-ready PDF has completed.")
             if state == "cancelled" and order.paid_at is not None:
                 raise ConflictError("Paid orders must be refunded through the payment provider before cancellation.")
             if kind == "print" and state == "shipped":
@@ -2039,6 +2049,21 @@ def _order_has_successful_payment(order_id: str) -> bool:
     ) is not None
 
 
+def _print_order_pdf_is_ready(order_id: str) -> bool:
+    pdf_order = db.session.scalar(
+        select(PdfOrder).where(PdfOrder.idempotency_key == f"print-free:{order_id}")
+    )
+    if pdf_order is None:
+        return False
+    job = db.session.scalar(
+        select(PdfJob).where(
+            PdfJob.order_id == pdf_order.id,
+            PdfJob.generation_profile == "print",
+        )
+    )
+    return job is not None and job.status == "ready"
+
+
 def list_payments(args, *, refunds: bool = False) -> dict:
     page, per_page = _page_params(args)
     model = Refund if refunds else Payment
@@ -2092,7 +2117,12 @@ def _admin_payment_dict(payment: Payment) -> dict:
         "submittedReference": attempt.provider_reference if attempt and attempt.status == "submitted" else None,
         "attemptStatus": attempt.status if attempt else None,
         "status": payment.status, "amount": str(payment.amount), "currency": payment.currency,
-        "orderId": payment.pdf_order_id or payment.print_order_id, "createdAt": payment.created_at.isoformat(),
+        "orderId": payment.pdf_order_id or payment.print_order_id,
+        "providerCaptureId": payment.provider_capture_id,
+        "providerCaptureAmount": str(payment.provider_capture_amount) if payment.provider_capture_amount is not None else None,
+        "providerCaptureCurrency": payment.provider_capture_currency,
+        "reviewReason": attempt.failure_message if attempt and attempt.failure_code == "provider_capture_mismatch" else None,
+        "createdAt": payment.created_at.isoformat(),
     }
 
 

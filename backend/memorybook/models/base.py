@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import os
 from uuid import uuid4
 
+from flask import current_app, has_app_context
 from sqlalchemy import DateTime, String, func
 from sqlalchemy.orm import Mapped, mapped_column
+
+
+def configured_currency() -> str:
+    if has_app_context():
+        return str(current_app.config.get("PAYMENT_DEFAULT_CURRENCY", "USD")).upper()
+    return os.getenv("PAYMENT_DEFAULT_CURRENCY", "USD").upper()
 
 
 class IdMixin:

@@ -31,6 +31,7 @@ from memorybook.models import (
     PaymentAttempt,
     OrderStatusHistory,
     PdfOrder,
+    PdfJob,
     ProjectAsset,
     PricingTier,
     PrintOrder,
@@ -624,7 +625,85 @@ def admin_client(app, email="admin@example.test", *, assign_admin=True):
     return client, {"X-CSRF-TOKEN": csrf}
 
 
+def test_admin_can_review_and_refund_mismatched_paypal_capture(app, monkeypatch):
+    client, csrf = admin_client(app, "capture-review-admin@example.test")
+    with app.app_context():
+        user = db.session.scalar(db.select(User).where(User.email == "capture-review-admin@example.test"))
+        project = UserProject(
+            user_id=user.id,
+            title="Capture review",
+            page_count=24,
+            document={"schemaVersion": 1, "pages": []},
+        )
+        db.session.add(project)
+        db.session.flush()
+        revision = ProjectRevision(
+            project_id=project.id,
+            revision_number=1,
+            document_version=1,
+            document=project.document,
+            checksum_sha256="b" * 64,
+        )
+        db.session.add(revision)
+        db.session.flush()
+        order = PdfOrder(
+            order_number="PDF-REVIEW-101",
+            user_id=user.id,
+            project_id=project.id,
+            project_revision_id=revision.id,
+            status="pending",
+            currency="USD",
+            service_price=Decimal("8.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("8.00"),
+            price_snapshot={"total": "8.00"},
+            page_count=24,
+        )
+        db.session.add(order)
+        db.session.flush()
+        payment = Payment(
+            user_id=user.id,
+            pdf_order_id=order.id,
+            provider="paypal",
+            status="needs_review",
+            amount=Decimal("8.00"),
+            currency="USD",
+            usd_amount=Decimal("8.00"),
+            provider_capture_id="CAPTURE-REVIEW-101",
+            provider_capture_amount=Decimal("8.50"),
+            provider_capture_currency="USD",
+        )
+        db.session.add(payment)
+        db.session.commit()
+        payment_id = payment.id
+
+    payments_response = client.get("/api/v1/admin/payments")
+    assert payments_response.status_code == 200
+    reviewed = next(item for item in payments_response.json["items"] if item["id"] == payment_id)
+    assert reviewed["status"] == "needs_review"
+    assert reviewed["providerCaptureId"] == "CAPTURE-REVIEW-101"
+    assert reviewed["providerCaptureAmount"] == "8.50"
+    admin_notices = client.get("/api/v1/admin/notifications")
+    assert any(item["title"] == "PayPal payment needs review" for item in admin_notices.json["items"])
+
+    monkeypatch.setattr(
+        "memorybook.integrations.payment_gateways.PayPalGateway.refund",
+        lambda *_args: ("PAYPAL-REFUND-101", "succeeded"),
+    )
+    refund_response = client.post(
+        f"/api/v1/payments/{payment_id}/refunds",
+        json={"amount": "8.50", "reason": "Refund mismatched capture"},
+        headers={**csrf, "Idempotency-Key": "review-refund-101"},
+    )
+    assert refund_response.status_code == 202, refund_response.get_json()
+    assert refund_response.json["refund"]["status"] == "succeeded"
+    with app.app_context():
+        assert db.session.get(Payment, payment_id).status == "refunded"
+
+
 def test_pricing_catalog_crud_validation_and_variant_compatibility(app):
+    app.config["PAYMENT_DEFAULT_CURRENCY"] = "PKR"
     client, csrf = admin_client(app, "pricing-catalog-admin@example.test")
     invalid_tier = client.post(
         "/api/v1/admin/pricing/tier",
@@ -738,6 +817,7 @@ def test_pricing_catalog_crud_validation_and_variant_compatibility(app):
 
 
 def test_print_quote_uses_catalog_price_components_and_product_page_limits(app, monkeypatch):
+    app.config["PAYMENT_DEFAULT_CURRENCY"] = "PKR"
     client, csrf = admin_client(app, "pricing-quote-admin@example.test")
     category = create_category(client, csrf, slug="pricing-quote-category")
     book = create_draft_book(client, csrf, category["id"])
@@ -868,18 +948,35 @@ def test_print_quote_uses_catalog_price_components_and_product_page_limits(app, 
         "create_payment",
         lambda order, *args, **kwargs: {"id": order.id, "total": str(order.total_amount)},
     )
+    missing_consent = client.post(
+        "/api/v1/print/orders",
+        json={
+            **quote_payload,
+            "quoteId": quote.json["id"],
+        },
+        headers={**csrf, "Idempotency-Key": "missing-print-consent"},
+    )
+    assert missing_consent.status_code == 400
+    assert "consent" in missing_consent.json["error"]["message"].lower()
     tampered_total = client.post(
         "/api/v1/print/orders",
         json={
             **quote_payload,
             "quoteId": quote.json["id"],
             "total": "0.01",
+            "consentAccepted": True,
         },
         headers={**csrf, "Idempotency-Key": "tampered-price-check"},
     )
     assert tampered_total.status_code == 201, tampered_total.get_json()
     assert tampered_total.json["total"] == quote.json["total"]
     with app.app_context():
+        from memorybook.models import PrintOrder
+
+        created_order = db.session.scalar(
+            db.select(PrintOrder).where(PrintOrder.idempotency_key == "tampered-price-check")
+        )
+        assert created_order.consent_at is not None
         discount_record = db.session.scalar(db.select(DiscountCode).where(DiscountCode.code == "SAVE5"))
         assert discount_record.uses_count == 1
 
@@ -1102,6 +1199,7 @@ def test_local_asset_retrieval_rejects_invalid_and_expired_signatures(app, tmp_p
 
 
 def test_admin_book_and_template_workflow_preserves_published_template_versions(app):
+    app.config["PAYMENT_DEFAULT_CURRENCY"] = "PKR"
     client, csrf = admin_client(app)
     category_response = client.post(
         "/api/v1/admin/categories",
@@ -1482,6 +1580,7 @@ def test_product_publish_api_cannot_bypass_the_design_requirement(app):
 
 
 def test_published_book_design_creates_independent_user_project_copy(app):
+    app.config["PAYMENT_DEFAULT_CURRENCY"] = "PKR"
     storage = FakeStorage()
     app.extensions["asset_storage"] = storage
     admin, csrf = admin_client(app, "book-copy-admin@example.test")
@@ -1618,7 +1717,7 @@ def test_admin_can_suspend_users_and_soft_delete_catalog_records(app):
         assert db.session.get(BookCategory, category["id"]).deleted_at is not None
 
 
-def test_admin_manages_print_orders_support_settings_pricing_and_notifications(app):
+def test_admin_manages_print_orders_support_settings_pricing_and_notifications(app, monkeypatch):
     client, csrf = admin_client(app, "ops-admin@example.test")
     with app.app_context():
         user = db.session.scalar(db.select(User).where(User.email == "ops-admin@example.test"))
@@ -1641,7 +1740,7 @@ def test_admin_manages_print_orders_support_settings_pricing_and_notifications(a
         order = PrintOrder(
             order_number="PRINT-101", user_id=user.id, project_id=project.id,
             project_revision_id=revision.id, shipping_address_id=address.id,
-            shipping_address_snapshot={"city": "Portland"}, status="payment_confirmed",
+            shipping_address_snapshot={"fullName": "Studio Admin Recipient", "city": "Portland"}, status="payment_confirmed",
             currency="USD", book_amount=Decimal("20.00"), printing_amount=Decimal("15.00"),
             shipping_amount=Decimal("5.00"), discount_amount=Decimal("0.00"),
             tax_amount=Decimal("0.00"), total_amount=Decimal("40.00"),
@@ -1659,10 +1758,20 @@ def test_admin_manages_print_orders_support_settings_pricing_and_notifications(a
             service_price=Decimal("8.00"), discount_amount=Decimal("0.00"),
             tax_amount=Decimal("0.00"), total_amount=Decimal("8.00"),
             price_snapshot={"total": "8.00"}, page_count=24, paid_at=datetime.now(UTC),
+            idempotency_key=f"print-free:{order.id}",
         )
         db.session.add_all([payment, pdf_order])
+        db.session.flush()
+        print_job = PdfJob(
+            order_id=pdf_order.id,
+            generation_profile="print",
+            status="failed",
+            error_code="low_resolution_image",
+            error_message='Photo "cover.jpg" on page "Cover" is below the required 300 DPI.',
+        )
+        db.session.add(print_job)
         db.session.commit()
-        order_id, pdf_order_id = order.id, pdf_order.id
+        order_id, pdf_order_id, print_job_id = order.id, pdf_order.id, print_job.id
         ticket = SupportTicket(
             ticket_number="TICKET-101", user_id=user.id, subject="Order question",
             category="orders", status="open",
@@ -1689,12 +1798,28 @@ def test_admin_manages_print_orders_support_settings_pricing_and_notifications(a
     assert orders.status_code == 200
     assert orders.json["items"][0]["projectRevision"]["document"]["pages"][0]["id"] == "page-a"
     assert orders.json["items"][0]["photosAvailable"] is False
+    assert orders.json["items"][0]["customer"]["name"] == "Studio Admin Recipient"
+    assert orders.json["items"][0]["printPdf"]["print"]["error"]["code"] == "low_resolution_image"
     shipment_update = client.patch(
         f"/api/v1/admin/orders/print/{order_id}",
-        json={"status": "printed"},
+        json={"status": "processing"},
         headers=csrf,
     )
     assert shipment_update.status_code == 409
+    assert "print-ready PDF" in shipment_update.json["error"]["message"]
+    monkeypatch.setattr(
+        "memorybook.api.v1.admin.routes.retry_print_order_pdf",
+        lambda *_args: {"id": "retry-job", "status": "queued"},
+    )
+    retry_pdf = client.post(
+        f"/api/v1/admin/orders/print/{order_id}/retry-pdf",
+        headers=csrf,
+    )
+    assert retry_pdf.status_code == 202
+    assert retry_pdf.json["job"]["status"] == "queued"
+    with app.app_context():
+        db.session.get(PdfJob, print_job_id).status = "ready"
+        db.session.commit()
     shipment_update = client.patch(
         f"/api/v1/admin/orders/print/{order_id}",
         json={"status": "processing"},
@@ -1765,9 +1890,8 @@ def test_admin_manages_print_orders_support_settings_pricing_and_notifications(a
     assert any(item["title"] == "New support ticket" for item in notices.json["items"])
     assert any(item["title"] == "Print order placed" for item in notices.json["items"])
     assert any(item["title"] == "New paid print order" for item in notices.json["items"])
-    assert any(item["title"] == "Payment failed" for item in notices.json["items"])
+    assert not any(item["title"] == "Payment failed" for item in notices.json["items"])
     assert any(item["title"] == "Payment confirmed" for item in notices.json["items"])
-    assert any(item["title"] == "PDF purchased" for item in notices.json["items"])
     assert any(item["title"] == "Cancellation requested" for item in notices.json["items"])
     with app.app_context():
         event_email = db.session.scalar(

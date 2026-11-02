@@ -117,6 +117,31 @@ export async function loadAdminPrintOrderPdf(orderId) {
   return data;
 }
 
+export async function retryAdminPrintOrderPdf(orderId) {
+  const { data } = await apiRequest(`/admin/orders/print/${encodeURIComponent(orderId)}/retry-pdf`, {
+    method: "POST",
+  });
+  if (!data?.job) throw new Error("The print PDF retry service returned an invalid response.");
+  return data.job;
+}
+
+export async function refundAdminReviewCapture(payment) {
+  if (!payment?.id || !payment.providerCaptureId || !payment.providerCaptureAmount
+    || !payment.providerCaptureCurrency) {
+    throw new Error("This payment does not have a refundable captured amount.");
+  }
+  const { data } = await apiRequest(`/payments/${encodeURIComponent(payment.id)}/refunds`, {
+    method: "POST",
+    body: {
+      amount: payment.providerCaptureAmount,
+      reason: "Refund of PayPal capture requiring administrative review.",
+    },
+    headers: { "Idempotency-Key": `review-capture-refund:${payment.id}:${payment.providerCaptureId}` },
+  });
+  if (!data?.refund) throw new Error("The PayPal refund service returned an invalid response.");
+  return data.refund;
+}
+
 export async function updateAdminUser(user) {
   return (await apiRequest(`/admin/users/${encodeURIComponent(user.id)}`, {
     method: "PATCH",

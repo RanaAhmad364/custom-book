@@ -2,7 +2,7 @@ import { apiRequest } from "./apiClient.js";
 import { paymentMethodService } from "./paymentMethodService.js";
 
 const API_ROOT = "/pdf";
-const paymentStates = new Set(["pending", "successful", "failed", "partially_refunded", "refunded"]);
+const paymentStates = new Set(["pending", "successful", "failed", "needs_review", "partially_refunded", "refunded"]);
 const generationStates = new Set(["queued", "generating", "ready", "failed", "not_started"]);
 
 async function request(path, options = {}) {

@@ -103,6 +103,7 @@ def create():
 
 @projects_blueprint.get("")
 @active_user_required
+@limiter.limit("120 per minute")
 def list_projects():
     args = request.args
     page, per_page = 1, 24
@@ -143,12 +144,14 @@ def list_projects():
 
 @projects_blueprint.get("/<string:project_id>")
 @active_user_required
+@limiter.limit("120 per minute")
 def get_project(project_id: str):
     return _project_response(_owned_project(project_id))
 
 
 @projects_blueprint.get("/<string:project_id>/access")
 @active_user_required
+@limiter.limit("120 per minute")
 def get_project_access(project_id: str):
     return jsonify(project_pdf_access(project_id, get_authenticated_user().id))
 

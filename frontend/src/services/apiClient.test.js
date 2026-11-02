@@ -162,3 +162,26 @@ test("an unauthenticated session bootstrap does not redirect public routes to lo
     restoreBrowser();
   }
 });
+
+test("429 errors expose Retry-After as milliseconds for polling backoff", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    const response = jsonResponse({
+      error: { code: "TOO_MANY_REQUESTS", message: "Please wait a moment and retry." },
+    }, 429);
+    response.headers.set("Retry-After", "12");
+    return response;
+  };
+
+  try {
+    await assert.rejects(apiRequest("/pdf/orders/order-1"), (error) => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.status, 429);
+      assert.equal(error.message, "Please wait a moment and retry.");
+      assert.equal(error.retryAfterMs, 12000);
+      return true;
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

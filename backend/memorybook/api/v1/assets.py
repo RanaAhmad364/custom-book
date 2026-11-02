@@ -8,7 +8,7 @@ from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
 from sqlalchemy import or_, select
 
 from memorybook.errors import ConflictError, ServiceUnavailableError
-from memorybook.extensions import db
+from memorybook.extensions import db, limiter
 from memorybook.integrations.asset_storage import get_asset_storage
 from memorybook.models import (
     BookTemplate,
@@ -52,6 +52,7 @@ def retrieve_public_asset(key: str):
 
 
 @assets_blueprint.get("/private/<token>")
+@limiter.limit("120 per minute")
 def retrieve_private_asset(token: str):
     storage = get_asset_storage()
     try:

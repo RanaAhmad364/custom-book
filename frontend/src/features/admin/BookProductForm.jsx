@@ -79,7 +79,7 @@ export default function BookProductForm({
   const [initialPayload, setInitialPayload] = useState(() => JSON.stringify(buildBookPayload(initialValues)));
   const [categories, setCategories] = useState([]);
   const [collections, setCollections] = useState([]);
-  const [pricing, setPricing] = useState({ sizes: [], covers: [], papers: [], tiers: [], pagePricing: [], variants: [], currency: "PKR" });
+  const [pricing, setPricing] = useState({ sizes: [], covers: [], papers: [], tiers: [], pagePricing: [], variants: [], currency: "USD" });
   const [variantDraft, setVariantDraft] = useState({ sizeId: "", coverTypeId: "", paperTypeId: "", sku: "", basePrice: "" });
   const [variantSaving, setVariantSaving] = useState(false);
   const [variantError, setVariantError] = useState("");

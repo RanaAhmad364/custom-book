@@ -44,6 +44,31 @@ def test_fifty_pages_on_a_thirty_page_template_apply_ten_extra_pages(app):
     assert quote["total"] == Decimal("580.00")
 
 
+@pytest.mark.parametrize(
+    ("tier", "base_price", "extra_page_price"),
+    [
+        ("LIGHT", "24.00", "0.10"),
+        ("BASIC", "40.00", "0.25"),
+        ("PREMIUM", "60.00", "0.50"),
+    ],
+)
+def test_fifty_page_print_quote_costs_more_than_twenty_four_pages_in_every_tier(
+    app,
+    tier,
+    base_price,
+    extra_page_price,
+):
+    with app.app_context():
+        base = Decimal(base_price)
+        per_page = Decimal(extra_page_price)
+        quote_24 = calculate_book_price(base, 24, 24, per_page)
+        quote_50 = calculate_book_price(base, 50, 24, per_page)
+
+    assert quote_24["total"] == base
+    assert quote_50["total"] == base + 26 * per_page
+    assert quote_50["total"] > quote_24["total"], tier
+
+
 def test_discounts_and_shipping_are_accounted_for_by_the_price_calculator(app):
     with app.app_context():
         percentage = calculate_discount(Decimal("600.00"), "percent", Decimal("10.00"))
@@ -66,7 +91,7 @@ def test_discounts_and_shipping_are_accounted_for_by_the_price_calculator(app):
 
 def test_configured_currency_and_plan_page_rules_are_enforced(app):
     product = SimpleNamespace(
-        currency="PKR",
+        currency="USD",
         book_type="BASIC",
         page_count_min=24,
         page_count_max=80,
@@ -74,7 +99,7 @@ def test_configured_currency_and_plan_page_rules_are_enforced(app):
     )
 
     with app.app_context():
-        assert default_currency() == "PKR"
+        assert default_currency() == "USD"
         assert validate_order_page_count(product, 50)["plan"] == "BASIC"
         with pytest.raises(ConflictError, match="even page count"):
             validate_order_page_count(product, 51, print_order=True)

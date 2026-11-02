@@ -18,7 +18,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from memorybook.extensions import db
-from memorybook.models.base import IdMixin, TimestampMixin
+from memorybook.models.base import IdMixin, TimestampMixin, configured_currency
 
 MONEY = Numeric(12, 2)
 
@@ -31,7 +31,7 @@ class PricingTier(IdMixin, TimestampMixin, db.Model):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     base_price: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="PKR", server_default="PKR")
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default=configured_currency, server_default="USD")
     is_active: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=True, server_default="true")
 
 
@@ -78,7 +78,7 @@ class ShippingRate(IdMixin, TimestampMixin, db.Model):
     service_code: Mapped[str] = mapped_column(String(40), nullable=False)
     service_name: Mapped[str] = mapped_column(String(100), nullable=False)
     price: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="PKR", server_default="PKR")
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default=configured_currency, server_default="USD")
     estimated_days_min: Mapped[int | None] = mapped_column(Integer)
     estimated_days_max: Mapped[int | None] = mapped_column(Integer)
     is_active: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=True, server_default="true")
@@ -239,6 +239,7 @@ class PrintOrder(IdMixin, TimestampMixin, db.Model):
     total_amount: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
     price_snapshot: Mapped[dict] = mapped_column(db.JSON, nullable=False)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
 
 
@@ -355,6 +356,8 @@ class Payment(IdMixin, TimestampMixin, db.Model):
     usd_amount: Mapped[Decimal | None] = mapped_column(MONEY)
     exchange_rate: Mapped[Decimal | None] = mapped_column(Numeric(14, 8))
     provider_capture_id: Mapped[str | None] = mapped_column(String(160), unique=True)
+    provider_capture_amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    provider_capture_currency: Mapped[str | None] = mapped_column(String(3))
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
 
 

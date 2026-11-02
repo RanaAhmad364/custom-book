@@ -157,26 +157,73 @@ export function PdfOrderProcessing() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState("");
+  const [pollingMessage, setPollingMessage] = useState("");
   useEffect(() => {
     let active = true;
     let timer;
+    let latestOrder = null;
+    let pollCount = 0;
+    const startedAt = Date.now();
+    const maxPollingDuration = 3 * 60 * 1000;
+    const isPending = (value) => value && (
+      value.paymentStatus === "pending"
+      || value.generationStatus === "queued"
+      || value.generationStatus === "generating"
+    );
+    function schedule(delay) {
+      if (!active || document.hidden) return;
+      const remaining = maxPollingDuration - (Date.now() - startedAt);
+      if (remaining <= 0) {
+        setPollingMessage("Still working, check Downloads in your dashboard.");
+        return;
+      }
+      timer = window.setTimeout(refresh, Math.min(delay, remaining));
+    }
     async function refresh() {
+      if (!active || document.hidden) return;
+      if (Date.now() - startedAt >= maxPollingDuration) {
+        setPollingMessage("Still working, check Downloads in your dashboard.");
+        return;
+      }
       try {
         const updated = await pdfOrderService.getOrder(orderId);
         if (!active) return;
+        latestOrder = updated;
         setOrder(updated);
         setError("");
-        if (updated.paymentStatus === "pending" || updated.generationStatus === "queued" || updated.generationStatus === "generating") {
-          timer = window.setTimeout(refresh, 5000);
+        setPollingMessage("");
+        if (isPending(updated)) {
+          const delays = [5000, 10000, 15000];
+          schedule(delays[Math.min(pollCount, delays.length - 1)]);
+          pollCount += 1;
         }
       } catch (failure) {
-        if (active) setError(failure instanceof Error ? failure.message : "Order status could not be retrieved.");
+        if (!active) return;
+        if (failure?.status === 429) {
+          setError("");
+          setPollingMessage("Status checks are temporarily busy. Retrying shortly.");
+          const delays = [5000, 10000, 15000];
+          const backoff = delays[Math.min(pollCount, delays.length - 1)];
+          schedule(Math.max(backoff, failure.retryAfterMs ?? 0));
+          pollCount += 1;
+        } else {
+          setError(failure instanceof Error ? failure.message : "Order status could not be retrieved.");
+        }
       } finally {
         if (active) setLoading(false);
       }
     }
+    function onVisibilityChange() {
+      window.clearTimeout(timer);
+      if (!document.hidden && isPending(latestOrder)) refresh();
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
     refresh();
-    return () => { active = false; window.clearTimeout(timer); };
+    return () => {
+      active = false;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.clearTimeout(timer);
+    };
   }, [orderId, refreshKey]);
 
   const downloadable = canDownloadPdf(order);
@@ -198,6 +245,7 @@ export function PdfOrderProcessing() {
   }
   return <PdfPage eyebrow="Order status" title={downloadable ? "Your PDF is ready." : "We’re checking on your book."} description="Payment and generation states below are read from the backend order record.">
     {loading && !order ? <div className="pdf-state"><LoaderCircle className="pdf-spin" size={20} /> Checking payment and generation status…</div> : null}
+    {pollingMessage ? <p className="pdf-inline-message" role="status">{pollingMessage}</p> : null}
     {error ? <div className="pdf-state pdf-error" role="alert"><CircleAlert size={20} /><span>{error}</span><button className="button button-outline" type="button" onClick={() => { setLoading(true); setRefreshKey((value) => value + 1); }}><RefreshCw size={15} /> Check again</button></div> : null}
     {order ? <><div className="pdf-status-card"><div className="pdf-state-row"><span><span className="eyebrow">Payment</span><strong>{paymentLabels[order.paymentStatus]}</strong></span>{order.paymentStatus === "successful" ? <BadgeCheck /> : order.paymentStatus === "failed" ? <CircleAlert /> : <Clock3 />}</div><div className="pdf-state-row"><span><span className="eyebrow">PDF generation</span><strong>{generationLabels[order.generationStatus]}</strong></span>{order.generationStatus === "ready" ? <Check /> : order.generationStatus === "failed" ? <CircleAlert /> : <LoaderCircle className={order.generationStatus === "generating" || order.generationStatus === "queued" ? "pdf-spin" : ""} />}</div><div className="pdf-status-meta"><span>Order {order.id}</span>{order.amount !== null ? <strong>{formatPrice(order.amount, order.currency)}</strong> : null}</div></div>
       <ManualPaymentPanel order={order} onSubmitted={() => { setLoading(true); setRefreshKey((value) => value + 1); }} />

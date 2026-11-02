@@ -131,6 +131,8 @@
 .print-discount-field { display: grid; gap: 7px; max-width: 360px; margin-top: 16px; color: var(--ink); font-size: 12px; }
 .print-discount-field input { min-height: 40px; padding: 9px 11px; border: 1px solid #d8ded7; border-radius: 2px; background: #fff; color: var(--ink); font: inherit; }
 .print-discount-note { margin: -5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.print-consent { display: flex; max-width: 520px; align-items: flex-start; gap: 10px; margin: 20px 0 4px; color: var(--ink); font-size: 12px; line-height: 1.55; cursor: pointer; }
+.print-consent input { flex: 0 0 auto; margin: 2px 0 0; accent-color: var(--green); }
 
 .print-quote { margin-top: 19px; padding: 18px; border: 1px solid var(--border); background: #fbfcf9; }
 .print-quote.compact { margin: 17px 0 0; }

@@ -41,9 +41,9 @@ from memorybook.services import admin
 from memorybook.services.catalog_projects import create_project
 
 DATASET_VERSION = "module-8a-v1"
-DEMO_ARTWORK_WIDTH = 3600
+DEMO_ARTWORK_WIDTH = 4200
 DEMO_ARTWORK_SCALE = DEMO_ARTWORK_WIDTH / 900
-CURRENCY = "PKR"
+CURRENCY = "USD"
 ASSET_OWNER_ID = "demo-catalog-seed"
 DEMO_CUSTOMERS = (
     "demo.customer.1@memorybook.local",
@@ -119,9 +119,9 @@ BOOKS = (
 )
 
 TIERS = (
-    ("LIGHT", "Light", Decimal("1200.00"), Decimal("0.00")),
-    ("BASIC", "Basic", Decimal("2400.00"), Decimal("65.00")),
-    ("PREMIUM", "Premium", Decimal("4200.00"), Decimal("120.00")),
+    ("LIGHT", "Light", Decimal("24.00"), Decimal("0.10")),
+    ("BASIC", "Basic", Decimal("40.00"), Decimal("0.25")),
+    ("PREMIUM", "Premium", Decimal("60.00"), Decimal("0.50")),
 )
 
 
@@ -236,6 +236,10 @@ def _ensure_categories(summary: dict) -> list[BookCategory]:
             asset = _upload_artwork(data["name"], data["slug"], data["color"], "Category")
             category.hero_asset_key = asset["assetKey"]
             db.session.flush()
+        elif min(_catalog_asset_details(category.hero_asset_key)[key] for key in ("width", "height")) < DEMO_ARTWORK_WIDTH:
+            asset = _upload_artwork(data["name"], data["slug"], data["color"], "Category")
+            category.hero_asset_key = asset["assetKey"]
+            db.session.flush()
         categories.append(category)
     db.session.commit()
     return categories
@@ -288,6 +292,14 @@ def _ensure_collections(categories: list[BookCategory], summary: dict) -> list[B
             if not collection.is_active:
                 raise ValueError(f"Collection '{collection.name}' is inactive; it was not changed.")
             if not collection.hero_asset_key:
+                asset = _upload_artwork(
+                    name,
+                    slug,
+                    CATEGORIES[category_index]["color"],
+                    "Collection",
+                )
+                collection.hero_asset_key = asset["assetKey"]
+            elif min(_catalog_asset_details(collection.hero_asset_key)[key] for key in ("width", "height")) < DEMO_ARTWORK_WIDTH:
                 asset = _upload_artwork(
                     name,
                     slug,
@@ -390,8 +402,9 @@ def _ensure_pricing(summary: dict) -> dict:
             tier.code = code
             if tier.name == f"Demo {name}":
                 tier.name = name
-        if not tier.is_active or tier.currency.upper() != CURRENCY or tier.base_price != base_price:
-            raise ValueError(f"Pricing tier '{code}' is incompatible and was not changed.")
+        tier.is_active = True
+        tier.currency = CURRENCY
+        tier.base_price = base_price
         band = db.session.scalar(
             select(PagePricing).where(
                 PagePricing.tier_id == tier.id,
@@ -411,8 +424,7 @@ def _ensure_pricing(summary: dict) -> dict:
             summary["pricing"]["created"] += 1
         else:
             summary["pricing"]["reused"] += 1
-        if band.price_per_page != page_rate:
-            raise ValueError(f"Page pricing for '{code}' differs from the demo values; it was not changed.")
+        band.price_per_page = page_rate
         tiers[code] = tier
 
     shipping = db.session.scalar(
@@ -427,7 +439,7 @@ def _ensure_pricing(summary: dict) -> dict:
             "countryCode": "PK",
             "serviceCode": "DEMO-HOME",
             "serviceName": "Demo home delivery",
-            "price": "350.00",
+            "price": "5.99",
             "currency": CURRENCY,
             "estimatedDaysMin": 3,
             "estimatedDaysMax": 7,
@@ -440,10 +452,14 @@ def _ensure_pricing(summary: dict) -> dict:
     if (
         not shipping.is_active
         or shipping.currency.upper() != CURRENCY
-        or shipping.price != Decimal("350.00")
+        or shipping.price != Decimal("5.99")
         or shipping.estimated_days_max != 7
     ):
-        raise ValueError("Demo home delivery configuration is incompatible and was not changed.")
+        shipping.is_active = True
+        shipping.currency = CURRENCY
+        shipping.price = Decimal("5.99")
+        shipping.estimated_days_max = 7
+    shipping.country_code = "PK"
     return {"sizes": sizes, "covers": covers, "papers": papers, "tiers": tiers, "shipping": shipping}
 
 
@@ -456,7 +472,10 @@ def _product_metadata(product_type: str, size: BookSize, covers: dict, papers: d
         "paperOptions": [paper.id for paper in papers.values()],
         "printingTiers": list(tiers),
         "productionDays": 7 if product_type == "LIGHT" else 10,
-        "pdfPrice": "850.00",
+        "pdfPrice": {"LIGHT": "3.99", "BASIC": "5.99", "PREMIUM": "9.99"}.get(product_type, "5.99"),
+        "printingPrice": {"LIGHT": "6.00", "BASIC": "10.00", "PREMIUM": "15.00"}.get(product_type, "10.00"),
+        "basePageCount": 24,
+        "extraPagePrice": {"LIGHT": "0.10", "BASIC": "0.25", "PREMIUM": "0.50"}.get(product_type, "0.25"),
         "previewImageKeys": artwork_keys,
         "dimensions": {
             "widthMm": str(size.width_mm),
@@ -568,19 +587,12 @@ def _ensure_variants(product: BookProduct, pricing: dict, summary: dict) -> None
                 )
             )
             if existing is not None:
-                if not existing.is_active or existing.currency.upper() != CURRENCY:
-                    raise ValueError(f"Variant for '{product.title}' is inactive or uses a different currency.")
                 summary["variants"]["reused"] += 1
+                existing.is_active = True
+                existing.currency = CURRENCY
+                existing.base_price = _demo_variant_price(product, cover, paper)
                 continue
-            price = {
-                "LIGHT": Decimal("1450.00"),
-                "BASIC": Decimal("2650.00"),
-                "PREMIUM": Decimal("4350.00"),
-            }[product.book_type or "BASIC"]
-            if paper.code in {"premium", "archival"}:
-                price += Decimal("350.00")
-            if cover.code == "softcover":
-                price -= Decimal("450.00")
+            price = _demo_variant_price(product, cover, paper)
             admin.create_variant({
                 "productId": product.id,
                 "sizeId": size.id,
@@ -591,6 +603,19 @@ def _ensure_variants(product: BookProduct, pricing: dict, summary: dict) -> None
                 "currency": CURRENCY,
             })
             summary["variants"]["created"] += 1
+
+
+def _demo_variant_price(product: BookProduct, cover: CoverType, paper: PaperType) -> Decimal:
+    price = {
+        "LIGHT": Decimal("6.00"),
+        "BASIC": Decimal("10.00"),
+        "PREMIUM": Decimal("15.00"),
+    }[product.book_type or "BASIC"]
+    if paper.code in {"premium", "archival"}:
+        price += Decimal("2.00")
+    if cover.code == "softcover":
+        price -= Decimal("1.00")
+    return price
 
 
 def _ensure_template(
@@ -703,9 +728,23 @@ def _create_or_reuse_product(
             "coverOptions": [cover.id for cover in pricing["covers"].values()],
             "paperOptions": [paper.id for paper in pricing["papers"].values()],
             "printingTiers": list(pricing["tiers"]),
+            "pdfPrice": {"LIGHT": "3.99", "BASIC": "5.99", "PREMIUM": "9.99"}.get(product_type, "5.99"),
+            "printingPrice": {"LIGHT": "6.00", "BASIC": "10.00", "PREMIUM": "15.00"}.get(product_type, "10.00"),
+            "basePageCount": 24,
+            "extraPagePrice": {
+                "LIGHT": "0.10",
+                "BASIC": "0.25",
+                "PREMIUM": "0.50",
+            }.get(product_type, "0.25"),
             "previewImageKeys": [cover_asset["assetKey"], gallery_key, *old_preview_keys[2:]],
         })
         product.admin_metadata = product_metadata
+        product.currency = CURRENCY
+        product.starting_price = {
+            "LIGHT": Decimal("18.00"),
+            "BASIC": Decimal("30.00"),
+            "PREMIUM": Decimal("45.00"),
+        }[product_type]
         return product, cover_asset, gallery_asset, replacements
 
     palette = CATEGORIES[category_index]["color"]
@@ -721,9 +760,9 @@ def _create_or_reuse_product(
         [cover_asset["assetKey"], gallery_asset["assetKey"]],
     )
     start_price = {
-        "LIGHT": Decimal("4200.00"),
-        "BASIC": Decimal("5900.00"),
-        "PREMIUM": Decimal("7900.00"),
+        "LIGHT": Decimal("18.00"),
+        "BASIC": Decimal("30.00"),
+        "PREMIUM": Decimal("45.00"),
     }[book_type]
     product_response = admin.save_product({
         "title": title,
@@ -804,6 +843,7 @@ def _ensure_customer_projects(products: list[BookProduct], templates: dict[str, 
                 "document": None,
             })
             summary["projects"]["created"] += 1
+        _refresh_customer_demo_artwork(project, product, template)
         if (
             project.user_id != owner.id
             or project.product_id != product.id
@@ -817,6 +857,66 @@ def _ensure_customer_projects(products: list[BookProduct], templates: dict[str, 
         ).all()
         if not project_assets or any(not asset.storage_key.startswith(f"projects/{owner.id}/{project.id}/") for asset in project_assets):
             raise ValueError(f"Demo draft assets for {email} are not owned by that customer project.")
+
+
+def _refresh_customer_demo_artwork(
+    project: UserProject,
+    product: BookProduct,
+    template: BookTemplate,
+) -> None:
+    design = template.published_design_document or {}
+    demo_filenames = {f"{product.slug}-cover.png", f"{product.slug}-gallery.png"}
+    source_assets = {
+        asset.get("name"): asset
+        for asset in design.get("assets", [])
+        if isinstance(asset, dict)
+        and asset.get("name") in demo_filenames
+        and isinstance(asset.get("assetKey"), str)
+    }
+    project_assets = {
+        asset.original_filename: asset
+        for asset in db.session.scalars(
+            select(ProjectAsset).where(ProjectAsset.project_id == project.id)
+        ).all()
+    }
+    document = deepcopy(project.document)
+    document_assets = {
+        asset.get("name"): asset
+        for asset in document.get("assets", [])
+        if isinstance(asset, dict) and isinstance(asset.get("name"), str)
+    }
+    storage = get_asset_storage()
+    updated = False
+    for filename, source in source_assets.items():
+        target = project_assets.get(filename)
+        document_asset = document_assets.get(filename)
+        if target is None or document_asset is None:
+            continue
+        current_bytes = storage.download(target.storage_key)
+        with Image.open(BytesIO(current_bytes)) as current_image:
+            if min(current_image.size) >= DEMO_ARTWORK_WIDTH:
+                continue
+        source_bytes = storage.download(source["assetKey"])
+        with Image.open(BytesIO(source_bytes)) as source_image:
+            source_width, source_height = source_image.size
+        if min(source_width, source_height) < DEMO_ARTWORK_WIDTH:
+            raise ValueError(f"Demo artwork '{filename}' is below the print resolution requirement.")
+        storage.upload(target.storage_key, BytesIO(source_bytes), source.get("mimeType", "image/png"))
+        checksum = hashlib.sha256(source_bytes).hexdigest()
+        target.byte_size = len(source_bytes)
+        target.checksum_sha256 = checksum
+        target.width_px = source_width
+        target.height_px = source_height
+        document_asset.update({
+            "size": len(source_bytes),
+            "checksum": checksum,
+            "width": source_width,
+            "height": source_height,
+        })
+        updated = True
+    if updated:
+        project.document = document
+        project.version += 1
 
 
 def _verify_seed(
@@ -872,6 +972,10 @@ def _verify_seed(
             asset_keys.append(asset["assetKey"])
     client = current_app.test_client()
     for key in set(asset_keys):
+        contents = storage.download(key)
+        with Image.open(BytesIO(contents)) as image:
+            if min(image.size) < DEMO_ARTWORK_WIDTH:
+                raise ValueError("A demo artwork image is below the configured print resolution.")
         response = client.get(f"/api/v1/assets/public/{quote(key, safe='/')}")
         if response.status_code != 200 or not response.data:
             raise ValueError("A catalog image URL failed its local asset retrieval check.")

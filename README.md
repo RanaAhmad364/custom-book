@@ -76,7 +76,7 @@ Edit `backend/.env`: use the PostgreSQL URL format
 `postgresql+psycopg://memorybook:CHANGE_ME@127.0.0.1:5432/memorybook`, replace
 `CHANGE_ME` with the local role password, and set distinct signing keys. Generate
 keys with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. The
-example already selects file-based development email, PKR, in-memory rate
+example already selects file-based development email, USD, in-memory rate
 limiting, the Vite origin, and in-process background jobs. Its signing-key
 values are placeholders and must be replaced before using the app.
 
@@ -157,7 +157,7 @@ PostgreSQL. PostgreSQL blocks updates and deletes to project revisions.
 
 ### Pricing policy
 
-The catalog and pricing endpoints use `PAYMENT_DEFAULT_CURRENCY` (PKR by
+The catalog and pricing endpoints use `PAYMENT_DEFAULT_CURRENCY` (USD by
 default). Admin price records must use that currency. The server computes PDF
 prices, print base prices, extra-page charges, discounts, and shipping; browser
 totals are never accepted as checkout authority. Print checkout consumes a
@@ -228,10 +228,10 @@ intentionally identical for existing and unknown email addresses.
 | `AUTH_EMAIL_MODE` | `smtp` for normal mail delivery; `file` enables the CLI-only mailbox in development. |
 | `PUBLIC_APP_URL` | Frontend origin used to compose password-reset links. |
 | `PUBLIC_API_URL` | API origin used to create absolute service links. |
-| `PAYMENT_DEFAULT_CURRENCY` | Currency policy for payment checkout (default `PKR`). |
+| `PAYMENT_DEFAULT_CURRENCY` | Currency policy for catalog and checkout (default `USD`). |
 | `PAYMENT_PRIMARY_GATEWAY` | Preferred gateway (`paypal` by default). |
 | `PAYPAL_MODE`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID` | PayPal Orders API v2 settings. Credentials and webhook ID are server-only. Configure sandbox first, then live. |
-| `PAYPAL_PKR_TO_USD_RATE` | Initial USD-per-PKR rate. Admins can update the live value in Settings using key `paypal_pkr_to_usd_rate` and value `{"rate":"0.0036"}`. Each payment snapshots its rate and both currency amounts. |
+| `PAYPAL_PKR_TO_USD_RATE` | Reserved for future PKR checkout. USD orders are charged in USD without conversion. When PKR mode is enabled, admins can update the live rate in Settings and each payment snapshots it. |
 | `MANUAL_PAYMENTS_ENABLED`, `MANUAL_BANK_NAME`, `MANUAL_BANK_ACCOUNT_TITLE`, `MANUAL_BANK_ACCOUNT_NUMBER`, `MANUAL_JAZZCASH_NUMBER`, `MANUAL_EASYPAISA_NUMBER` | Manual transfer is disabled unless `MANUAL_PAYMENTS_ENABLED=true`; configured transfer destinations are only shown when enabled. |
 | `STRIPE_ENABLED`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Explicit Stripe enablement and server-only API/webhook secrets. Do not expose either secret to Vite. |
 | `PAYFAST_ENABLED`, `PAYFAST_MODE`, `PAYFAST_MERCHANT_ID`, `PAYFAST_MERCHANT_SECRET`, `PAYFAST_API_BASE_URL`, `PAYFAST_CONTRACT_VERIFIED`, `PAYFAST_PAYMENT_METHODS` | Illustrative disabled-by-default PayFast settings; no adapter is active until merchant-specific checkout/callback details are verified and implemented. |
@@ -259,11 +259,10 @@ Catalog and project services now consume the versioned APIs; browser local
 storage is retained only for editor recovery copies. The existing frontend
 `/api/print/*` and `/api/pdf/*` paths remain mounted as compatibility routes.
 PDF and print checkout uses server-calculated prices and selected methods from
-`GET /api/v1/payments/methods?currency=PKR`. PayPal checkout is the default
-automatic provider when its server credentials and webhook ID are configured.
-The backend converts the authoritative PKR order total to USD using the current
-admin-managed rate; the customer sees both amounts before redirecting to
-PayPal. A signed PayPal webhook is verified through the PayPal API, and the
+`GET /api/v1/payments/methods?currency=USD`. PayPal checkout is the default
+automatic provider when its server credentials are configured; webhook ID is
+optional for Smart Buttons checkout. USD order totals are charged directly
+without conversion. A configured PayPal webhook is verified through the API, and the
 backend captures approved orders and checks the capture amount, currency, and
 order reference before marking an order paid. Configure the webhook URL as
 `https://<api-host>/api/v1/payments/webhooks/paypal` and subscribe to

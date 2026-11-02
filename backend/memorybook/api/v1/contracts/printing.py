@@ -52,18 +52,21 @@ def create_order():
         key,
         body.get("provider"),
         body.get("paymentMethod"),
+        body.get("consentAccepted"),
     )
     return jsonify(result), 201
 
 
 @print_blueprint.get("/orders")
 @active_user_required
+@limiter.limit("120 per minute")
 def list_orders():
     return jsonify({"items": list_user_orders("print", get_authenticated_user().id)})
 
 
 @print_blueprint.get("/orders/<order_id>")
 @active_user_required
+@limiter.limit("120 per minute")
 def get_order(order_id: str):
     result = get_user_order("print", order_id, get_authenticated_user().id)
     payment = db.session.scalar(

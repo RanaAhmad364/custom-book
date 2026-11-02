@@ -6,7 +6,7 @@ export function formatCurrency(value, currency = "USD") {
     ? currency.toUpperCase()
     : "USD";
 
-  return new Intl.NumberFormat("en-PK", {
+  return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: code,
   }).format(amount);

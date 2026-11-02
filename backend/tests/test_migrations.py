@@ -1,9 +1,31 @@
 import json
+import importlib.util
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from sqlalchemy import inspect, text
 
 from memorybook import create_app
+from memorybook.extensions import db
+from memorybook.models import (
+    BookCategory,
+    BookProduct,
+    BookSize,
+    BookVariant,
+    CoverType,
+    DiscountCode,
+    PagePricing,
+    PaperType,
+    PdfOrder,
+    PricingTier,
+    ProjectRevision,
+    ShippingRate,
+    User,
+    UserProject,
+)
 
 
 EXPECTED_SCHEMA_TABLES = {
@@ -121,9 +143,115 @@ def test_initial_migration_upgrades_database(tmp_path):
             "usd_amount",
             "exchange_rate",
             "provider_capture_id",
+            "provider_capture_amount",
+            "provider_capture_currency",
         }.issubset({column["name"] for column in inspector.get_columns("payments")})
+        assert "consent_at" in {column["name"] for column in inspector.get_columns("print_orders")}
         assert "checkout_url" in {column["name"] for column in inspector.get_columns("payment_attempts")}
         assert "event_key" in {column["name"] for column in inspector.get_columns("notifications")}
+
+
+def test_usd_catalog_migration_converts_active_prices_and_preserves_paid_order_currency(app):
+    with app.app_context():
+        category = BookCategory(name="Migration", slug="migration-usd")
+        db.session.add(category)
+        tier = PricingTier(code="BASIC", name="Basic", base_price=Decimal("4000"), currency="PKR")
+        size = BookSize(code="MIGRATION_SIZE", name="Migration", width_mm=Decimal("200"), height_mm=Decimal("200"))
+        cover = CoverType(code="hardcover", name="Hardcover")
+        paper = PaperType(code="standard", name="Standard")
+        shipping = ShippingRate(
+            country_code="PK", service_code="standard", service_name="Standard",
+            price=Decimal("1000"), currency="PKR",
+        )
+        fixed_discount = DiscountCode(
+            code="FIXEDUSD", discount_type="fixed", value=Decimal("500"), currency="PKR",
+        )
+        percent_discount = DiscountCode(
+            code="PERCENTUSD", discount_type="percent", value=Decimal("15"), currency="PKR",
+        )
+        db.session.add_all([tier, size, cover, paper, shipping, fixed_discount, percent_discount])
+        db.session.flush()
+        band = PagePricing(
+            tier_id=tier.id, minimum_pages=24, maximum_pages=80, price_per_page=Decimal("25"),
+        )
+        product = BookProduct(
+            category_id=category.id,
+            title="Migration book",
+            slug="migration-usd-book",
+            description="Migration fixture",
+            book_type="BASIC",
+            starting_price=Decimal("5000"),
+            currency="PKR",
+            admin_metadata={"pdfPrice": "500", "printingPrice": "2500"},
+        )
+        db.session.add_all([band, product])
+        db.session.flush()
+        variant = BookVariant(
+            product_id=product.id,
+            size_id=size.id,
+            cover_type_id=cover.id,
+            paper_type_id=paper.id,
+            sku="MIGRATION-USD",
+            base_price=Decimal("2500"),
+            currency="PKR",
+        )
+        user = User(email="migration-usd@example.test", password_hash="test-hash")
+        db.session.add_all([variant, user])
+        db.session.flush()
+        project = UserProject(
+            user_id=user.id, title="Migration project", page_count=24, version=1, document={"pages": []},
+        )
+        db.session.add(project)
+        db.session.flush()
+        revision = ProjectRevision(
+            project_id=project.id,
+            revision_number=1,
+            document_version=1,
+            document={"pages": []},
+            checksum_sha256="a" * 64,
+        )
+        db.session.add(revision)
+        db.session.flush()
+        paid_order = PdfOrder(
+            order_number="MIGRATION-PAID-ORDER",
+            user_id=user.id,
+            project_id=project.id,
+            project_revision_id=revision.id,
+            status="paid",
+            currency="PKR",
+            service_price=Decimal("5000"),
+            total_amount=Decimal("5000"),
+            price_snapshot={"total": "5000.00"},
+            page_count=24,
+            paid_at=datetime.now(UTC),
+        )
+        db.session.add(paid_order)
+        db.session.commit()
+
+        migration_path = Path(__file__).resolve().parents[1] / "migrations" / "versions" / "0c5d8a2f71b4_usd_catalog_pricing.py"
+        spec = importlib.util.spec_from_file_location("usd_catalog_pricing_migration", migration_path)
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        with db.engine.begin() as connection:
+            with Operations.context(MigrationContext.configure(connection)):
+                migration.upgrade()
+
+        db.session.expire_all()
+        assert db.session.get(PricingTier, tier.id).base_price == Decimal("40.00")
+        assert db.session.get(PricingTier, tier.id).currency == "USD"
+        assert db.session.get(PagePricing, band.id).price_per_page == Decimal("0.25")
+        assert db.session.get(ShippingRate, shipping.id).price == Decimal("5.99")
+        assert db.session.get(DiscountCode, fixed_discount.id).value == Decimal("5.00")
+        assert db.session.get(DiscountCode, fixed_discount.id).currency == "USD"
+        assert db.session.get(DiscountCode, percent_discount.id).value == Decimal("15.00")
+        assert db.session.get(DiscountCode, percent_discount.id).currency is None
+        migrated_product = db.session.get(BookProduct, product.id)
+        assert migrated_product.starting_price == Decimal("30.00")
+        assert migrated_product.currency == "USD"
+        assert migrated_product.admin_metadata["pdfPrice"] == "5.99"
+        assert db.session.get(BookVariant, variant.id).base_price == Decimal("10.00")
+        assert db.session.get(BookVariant, variant.id).currency == "USD"
+        assert db.session.get(PdfOrder, paid_order.id).currency == "PKR"
 
 
 def test_collection_category_migration_maps_only_unambiguous_legacy_references(tmp_path):

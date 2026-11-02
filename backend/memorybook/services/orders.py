@@ -56,6 +56,8 @@ def pdf_offer(project_id: str, user_id: str) -> dict:
     if default_currency() == "PKR":
         rate = pkr_to_usd_rate()
         offer.update({"usdAmount": str(pkr_amount_to_usd(amount, rate)), "exchangeRate": str(rate)})
+    elif default_currency() == "USD":
+        offer.update({"usdAmount": str(amount), "exchangeRate": None})
     return offer
 
 
@@ -327,6 +329,8 @@ def create_print_quote(
     if default_currency() == "PKR":
         rate = pkr_to_usd_rate()
         conversion = {"usdAmount": str(pkr_amount_to_usd(total, rate)), "exchangeRate": str(rate)}
+    elif default_currency() == "USD":
+        conversion = {"usdAmount": str(total), "exchangeRate": None}
     quote = PrintQuote(
         user_id=user_id,
         project_id=project.id,
@@ -438,7 +442,13 @@ def create_print_order(
     idempotency_key: str,
     provider: str | None,
     payment_method: str | None = None,
+    consent_accepted: bool = False,
 ) -> dict:
+    if consent_accepted is not True:
+        raise ValidationError(
+            "Consent to share the book and delivery address with the MemoryBook team is required.",
+            {"consentAccepted": "required"},
+        )
     existing = db.session.scalar(
         select(PrintOrder).where(PrintOrder.user_id == user_id, PrintOrder.idempotency_key == idempotency_key)
     )
@@ -511,6 +521,7 @@ def create_print_order(
         tax_amount=Decimal(price["tax"]),
         total_amount=quote.total_amount,
         price_snapshot={**price, "quoteId": quote.id},
+        consent_at=now,
         idempotency_key=idempotency_key,
     )
     db.session.add(order)

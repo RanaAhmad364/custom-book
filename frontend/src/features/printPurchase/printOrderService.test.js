@@ -62,6 +62,7 @@ test("print order accepts only backend payment and production states", () => {
   assert.equal(normalizePrintOrder({ ...order, productionStatus: "pending_payment" }).productionStatus, "pending_payment");
   assert.throws(() => normalizePrintOrder({ ...order, productionStatus: "forged" }), /unsupported production status/);
   assert.equal(normalizePrintOrder({ ...order, paymentStatus: "refunded" }).paymentStatus, "refunded");
+  assert.equal(normalizePrintOrder({ ...order, paymentStatus: "needs_review" }).paymentStatus, "needs_review");
 });
 
 test("print order detail preserves customer timeline and shipment data", async () => {
@@ -83,6 +84,33 @@ test("print order detail preserves customer timeline and shipment data", async (
   assert.equal(order.statusHistory[0].status, "shipped");
   assert.equal(order.shipment.trackingNumber, "TRACK-123");
   assert.equal(order.shippingAddress.city, "Lahore");
+});
+
+test("print order creation sends the required sharing consent", async () => {
+  let requestBody;
+  globalThis.fetch = async (_url, options) => {
+    requestBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      status: 201,
+      headers: { get: () => null },
+      json: async () => ({
+        id: "order-consent",
+        paymentStatus: "pending",
+        productionStatus: "pending_payment",
+        quote: validQuote,
+      }),
+    };
+  };
+  await printOrderService.createOrder(
+    "project-1",
+    { tier: "basic" },
+    { fullName: "Book Buyer" },
+    "quote-1",
+    { provider: "paypal", method: "paypal_checkout" },
+    true,
+  );
+  assert.equal(requestBody.consentAccepted, true);
 });
 
 test("unpaid print orders can be cancelled and failed print PDFs can be retried", async () => {

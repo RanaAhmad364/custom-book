@@ -85,13 +85,15 @@ At minimum configure independent random `SECRET_KEY` and `JWT_SECRET_KEY`,
 PostgreSQL runtime/migration URLs, exact HTTPS `CORS_ORIGINS`, canonical app/API
 URLs, secure cookies, trusted proxy hops, shared Redis
 `RATE_LIMIT_STORAGE_URI`, SMTP, the private asset path, and PayPal's mode,
-client ID, client secret, and webhook ID. Use sandbox credentials and the
-PayPal webhook endpoint `/api/v1/payments/webhooks/paypal` to verify the full
+client ID, and client secret. A webhook ID is optional for Smart Buttons
+checkout; configure one to enable the backup webhook endpoint
+`/api/v1/payments/webhooks/paypal`. Use sandbox credentials to verify the full
 checkout/capture flow before switching `PAYPAL_MODE=live`. Set
 `PAYMENT_PRIMARY_GATEWAY=paypal`; manual transfer is disabled by default and
 should only be enabled deliberately with `MANUAL_PAYMENTS_ENABLED=true`.
-Set an initial USD-per-PKR value in `PAYPAL_PKR_TO_USD_RATE` and maintain the
-admin-editable `paypal_pkr_to_usd_rate` setting under Admin → Settings.
+`PAYMENT_DEFAULT_CURRENCY` defaults to USD and PayPal charges the server-stored
+USD amount directly. `PAYPAL_PKR_TO_USD_RATE` and the admin-editable
+`paypal_pkr_to_usd_rate` setting are reserved for a future PKR checkout mode.
 Never place secrets in `VITE_*` variables or the built frontend.
 
 For an external database, set the database URL's TLS and CA options according

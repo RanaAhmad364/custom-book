@@ -1,4 +1,4 @@
-export function pricingRecordDefaults(kind, currency = "PKR") {
+export function pricingRecordDefaults(kind, currency = "USD") {
   const defaults = {
     tier: { code: "", name: "", description: "", basePrice: "0.00", currency, active: true },
     pagePricing: { tierId: "", minimumPages: 24, maximumPages: 80, pricePerPage: "0.00" },

@@ -26,6 +26,8 @@ from memorybook.models import (
     User,
     UserProject,
 )
+from memorybook.integrations.payment_gateways import PayPalGateway
+from memorybook.services import payments
 from memorybook.services.pdf_renderer import PdfRenderError, render_project_pdf
 
 
@@ -286,6 +288,7 @@ def authenticated_client(app, email):
 
 def test_pdf_order_creation_persists_status_history_with_order_id(app):
     app.config["MANUAL_PAYMENTS_ENABLED"] = True
+    app.config["PAYMENT_DEFAULT_CURRENCY"] = "PKR"
     client, csrf = authenticated_client(app, "pdf-history@example.test")
     with app.app_context():
         user = db.session.scalar(db.select(User).where(User.email == "pdf-history@example.test"))
@@ -554,6 +557,173 @@ def test_pdf_generation_requires_payment_is_idempotent_and_download_is_owner_sco
         assert entitlement.download_count == 2
         assert entitlement.max_downloads is None
         assert entitlement.expires_at is None
+
+
+def test_paypal_pdf_order_capture_generates_downloadable_owner_scoped_pdf(app, monkeypatch):
+    app.config.update(
+        PAYPAL_MODE="sandbox",
+        PAYPAL_CLIENT_ID="sandbox-client",
+        PAYPAL_CLIENT_SECRET="sandbox-secret",
+    )
+    email = "paypal-pdf-e2e@example.test"
+    client, csrf = authenticated_client(app, email)
+    other_client, _ = authenticated_client(app, "paypal-pdf-e2e-other@example.test")
+    storage = MemoryStorage()
+    app.extensions["asset_storage"] = storage
+
+    document = {
+        "schemaVersion": 1,
+        "metadata": {"title": "A Paid Sandbox Story"},
+        "book": {"pageCount": 24, "size": {"width": 8, "height": 8}},
+        "pageOrder": ["cover", "inside"],
+        "pages": [
+            {"id": "cover", "type": "cover", "label": "Cover", "background": {"color": "#ffffff"}, "elements": []},
+            {
+                "id": "inside",
+                "type": "page",
+                "label": "Inside",
+                "background": {"color": "#ffffff"},
+                "elements": [{
+                    "id": "story-title",
+                    "type": "text",
+                    "text": "A Paid Sandbox Story",
+                    "x": 0.1,
+                    "y": 0.2,
+                    "width": 0.8,
+                    "height": 0.2,
+                    "fontSize": 0.06,
+                    "fontFamily": "Georgia",
+                    "color": "#20352d",
+                    "alignment": "center",
+                }],
+            },
+        ],
+        "assets": [],
+    }
+    with app.app_context():
+        user = db.session.scalar(db.select(User).where(User.email == email))
+        category = BookCategory(name="Sandbox", slug="sandbox-e2e")
+        db.session.add(category)
+        db.session.flush()
+        product = BookProduct(
+            category_id=category.id,
+            title="Sandbox Test Book",
+            slug="sandbox-test-book",
+            description="A book for the payment integration test.",
+            book_type="BASIC",
+            page_count_min=24,
+            page_count_max=80,
+            starting_price=Decimal("3.99"),
+            currency="USD",
+            is_active=True,
+            admin_metadata={
+                "pdfPrice": "3.99",
+                "basePageCount": 24,
+                "evenPageCountRequired": True,
+            },
+        )
+        db.session.add(product)
+        db.session.flush()
+        project = UserProject(
+            user_id=user.id,
+            product_id=product.id,
+            title="A Paid Sandbox Story",
+            status="completed",
+            page_count=24,
+            version=1,
+            document=document,
+        )
+        db.session.add(project)
+        db.session.commit()
+        project_id = project.id
+
+    assert client.get(f"/api/v1/projects/{project_id}/access").json["state"] == "not_purchased"
+    created = client.post(
+        "/api/v1/pdf/orders",
+        json={"projectId": project_id, "provider": "paypal"},
+        headers={**csrf, "Idempotency-Key": "paypal-pdf-e2e-create"},
+    )
+    assert created.status_code == 201, created.get_json()
+    order_id = created.json["id"]
+    payment_id = created.json["paymentId"]
+    assert client.get(f"/api/v1/projects/{project_id}/access").json["state"] == "payment_pending"
+
+    unpaid_generation = client.post(
+        f"/api/v1/pdf/orders/{order_id}/generate",
+        json={"profile": "digital"},
+        headers=csrf,
+    )
+    assert unpaid_generation.status_code == 409
+    assert unpaid_generation.json["error"]["code"] == "PDF_PAYMENT_PENDING"
+    assert "payment" in unpaid_generation.json["error"]["message"].lower()
+
+    monkeypatch.setattr(
+        PayPalGateway,
+        "create_smart_order",
+        lambda _self, _payment, _reference_id, _key: "PAYPAL-PDF-E2E",
+    )
+    monkeypatch.setattr(
+        PayPalGateway,
+        "capture_order",
+        lambda _self, paypal_order_id, _key: {
+            "id": paypal_order_id,
+            "status": "COMPLETED",
+            "purchase_units": [{
+                "reference_id": created.json["orderNumber"],
+                "payments": {"captures": [{
+                    "id": "PAYPAL-PDF-E2E-CAPTURE",
+                    "status": "COMPLETED",
+                    "amount": {"currency_code": "USD", "value": "3.99"},
+                }]},
+            }],
+        },
+    )
+    paypal_order = client.post(f"/api/v1/payments/{payment_id}/paypal/create-order", headers=csrf)
+    assert paypal_order.status_code == 200, paypal_order.get_json()
+    captured = client.post(
+        f"/api/v1/payments/{payment_id}/paypal/capture-order",
+        json={"paypalOrderId": paypal_order.json["paypalOrderId"]},
+        headers=csrf,
+    )
+    assert captured.status_code == 200, captured.get_json()
+    assert captured.json["status"] == "successful"
+
+    with app.app_context():
+        payment = db.session.get(Payment, payment_id)
+        order = db.session.get(PdfOrder, order_id)
+        job = db.session.scalar(
+            db.select(PdfJob).where(
+                PdfJob.order_id == order_id,
+                PdfJob.generation_profile == "digital",
+            )
+        )
+        background_job_id = db.session.scalar(
+            db.select(BackgroundJob.id).where(
+                BackgroundJob.job_type == "generate_pdf",
+                BackgroundJob.reference_id == job.id,
+            )
+        )
+        assert payment.status == "successful"
+        assert order.paid_at is not None
+        assert job.status == "queued"
+        assert background_job_id
+
+    app.extensions["background_jobs"]._run_job(background_job_id)
+    access = client.get(f"/api/v1/projects/{project_id}/access")
+    assert access.status_code == 200
+    assert access.json["state"] == "ready"
+    downloads = client.get("/api/v1/pdf/downloads")
+    assert downloads.status_code == 200
+    entitlement_id = next(item["id"] for item in downloads.json["items"] if item["orderId"] == order_id)
+    link = client.get(f"/api/v1/pdf/downloads/{entitlement_id}")
+    assert link.status_code == 200
+    pdf_response = client.get(link.json["download"]["url"])
+    assert pdf_response.status_code == 200
+    assert pdf_response.mimetype == "application/pdf"
+    assert pdf_response.data.startswith(b"%PDF")
+
+    assert other_client.get(f"/api/v1/pdf/downloads/{entitlement_id}").status_code in {403, 404}
+    assert other_client.get(f"/api/v1/projects/{project_id}/access").status_code in {403, 404}
 
 
 def test_project_pdf_access_reports_purchase_lifecycle_and_requires_ownership(app):

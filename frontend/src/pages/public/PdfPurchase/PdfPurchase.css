@@ -44,6 +44,7 @@
 .pdf-error { color: #794839; }
 .pdf-error > span { flex: 1; }
 .pdf-inline-error { display: flex; align-items: center; gap: 8px; margin: 18px 0 0; color: #8d3b2b; font-size: 13px; line-height: 1.5; }
+.pdf-inline-message { margin: 16px 0 0; padding: 14px 18px; border: 1px solid var(--border); background: var(--surface); color: var(--muted); font-size: 13px; line-height: 1.5; }
 .pdf-status-card { margin-top: 20px; padding: 8px 22px; }
 .pdf-state-row { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 18px 0; border-bottom: 1px solid var(--border); }
 .pdf-state-row:last-of-type { border-bottom: 0; }

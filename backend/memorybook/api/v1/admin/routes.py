@@ -9,16 +9,18 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from memorybook.errors import ServiceUnavailableError, ValidationError
 from memorybook.integrations.asset_storage import get_asset_storage
-from memorybook.extensions import limiter
-from memorybook.models import BookCategory, BookCollection
+from memorybook.extensions import db, limiter
+from memorybook.models import BookCategory, BookCollection, PrintOrder
 from memorybook.permissions import get_authenticated_user, roles_required
 from memorybook.services import admin
+from memorybook.services.pdf_generation import retry_print_order_pdf
 from memorybook.services.payments import (
     approve_refund_request,
     complete_manual_refund,
     reject_refund_request,
     review_manual_payment,
 )
+from werkzeug.exceptions import NotFound
 
 admin_blueprint = Blueprint("admin", __name__)
 
@@ -411,6 +413,15 @@ def private_print_order_pdf(order_id: str):
         "fileName": f"{order.order_number}-print.pdf",
         "expiresInSeconds": current_app.config["ASSET_S3_PRESIGNED_URL_TTL"],
     })
+
+
+@admin_blueprint.post("/orders/print/<string:order_id>/retry-pdf")
+@roles_required("admin")
+def retry_print_order_pdf_admin(order_id: str):
+    order = db.session.get(PrintOrder, order_id)
+    if order is None:
+        raise NotFound("Print order was not found.")
+    return jsonify({"job": retry_print_order_pdf(order.id, order.user_id)}), 202
 
 
 @admin_blueprint.get("/orders/print/<string:order_id>/pdf/<string:token>")

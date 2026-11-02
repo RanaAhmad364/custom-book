@@ -49,6 +49,7 @@ def create_order():
 
 @pdf_blueprint.get("/orders/<order_id>")
 @active_user_required
+@limiter.limit("120 per minute")
 def get_order(order_id: str):
     return jsonify(get_user_order("pdf", order_id, get_authenticated_user().id))
 
@@ -96,6 +97,7 @@ def request_generation(order_id: str):
 
 @pdf_blueprint.get("/jobs/<job_id>")
 @active_user_required
+@limiter.limit("120 per minute")
 def get_generation_job(job_id: str):
     job = db.session.scalar(
         select(PdfJob)
@@ -109,12 +111,14 @@ def get_generation_job(job_id: str):
 
 @pdf_blueprint.get("/downloads")
 @active_user_required
+@limiter.limit("120 per minute")
 def list_downloads():
     return jsonify({"items": list_user_downloads(get_authenticated_user().id)})
 
 
 @pdf_blueprint.get("/downloads/<download_id>")
 @active_user_required
+@limiter.limit("120 per minute")
 def get_download(download_id: str):
     download = create_download_link(
         get_authenticated_user().id,

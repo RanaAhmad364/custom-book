@@ -58,7 +58,11 @@ def _before_flush(session: Session, *_args) -> None:
     for row in tuple(session.new):
         if isinstance(row, PrintOrder):
             _queue_admin_event(session, f"print_order_placed:{row.id}", "Print order placed", f"Print order {row.order_number} has been placed.")
-        elif isinstance(row, PdfOrder) and row.paid_at is not None:
+        elif (
+            isinstance(row, PdfOrder)
+            and row.paid_at is not None
+            and not (row.idempotency_key or "").startswith("print-free:")
+        ):
             _queue_admin_event(session, f"pdf_purchased:{row.id}", "PDF purchased", f"PDF order {row.order_number} has been paid.")
         elif isinstance(row, SupportTicket):
             _queue_admin_event(session, f"support_ticket:{row.id}", "New support ticket", f"Ticket {row.ticket_number}: {row.subject}")
@@ -77,9 +81,6 @@ def _before_flush(session: Session, *_args) -> None:
             if row.status == "cancellation_requested":
                 order_number = row.pdf_order_id or row.print_order_id
                 _queue_admin_event(session, f"cancellation_requested:{order_number}", "Cancellation requested", f"Cancellation requested for order {order_number}.")
-            elif row.status == "payment_failed":
-                order_id = row.pdf_order_id or row.print_order_id or row.changed_by_user_id or row.id
-                _queue_admin_event(session, f"payment_failed:{row.id}", "Payment failed", f"Payment for order {order_id} failed.")
     for row in tuple(session.dirty):
         if isinstance(row, Payment) and inspect(row).attrs.status.history.has_changes():
             _payment_event(session, row)
@@ -93,18 +94,24 @@ def _before_flush(session: Session, *_args) -> None:
 
 
 def _payment_event(session: Session, payment: Payment) -> None:
+    if payment.purpose == "print_order_pdf":
+        return
     status = (payment.status or "").lower()
     order_id = payment.pdf_order_id or payment.print_order_id or payment.id
+    order = None
+    if payment.pdf_order_id:
+        order = session.get(PdfOrder, payment.pdf_order_id)
+    elif payment.print_order_id:
+        order = session.get(PrintOrder, payment.print_order_id)
+    order_number = order.order_number if order else order_id
     if status in {"paid", "succeeded", "successful", "confirmed"}:
-        _queue_admin_event(session, f"payment_confirmed:{payment.id}", "Payment confirmed", f"Payment for order {order_id} was confirmed.")
+        _queue_admin_event(session, f"payment_confirmed:{payment.id}", "Payment confirmed", f"Payment for order {order_number} was confirmed.")
         if payment.pdf_order_id:
-            _queue_admin_event(session, f"pdf_purchased:{payment.pdf_order_id}", "PDF purchased", f"PDF order {payment.pdf_order_id} was paid.")
+            _queue_admin_event(session, f"pdf_purchased:{payment.pdf_order_id}", "PDF purchased", f"PDF order {order_number} was paid.")
         elif payment.print_order_id:
-            order = session.get(PrintOrder, payment.print_order_id)
-            order_number = order.order_number if order else payment.print_order_id
             _queue_admin_event(
                 session,
-                f"paid_print_order:{payment.id}",
+                f"paid_print_order:{payment.print_order_id}",
                 "New paid print order",
                 f"Print order {order_number} has been paid and is ready for production.",
             )
@@ -117,11 +124,21 @@ def _payment_event(session: Session, payment: Payment) -> None:
             ).limit(1)
         )
         if failed_history is not None:
-            _queue_admin_event(session, f"payment_failed:{payment.id}:history", "Payment failed", f"Payment for order {order_id} failed.")
-
-        _queue_admin_event(session, f"payment_failed:{payment.id}:legacy", "Payment failed", f"Payment for order {order_id} failed.")
+            _queue_admin_event(
+                session,
+                f"payment_recovered:{payment.id}",
+                "Payment recovered",
+                f"Payment for order {order_number} was completed after a previous failed attempt.",
+            )
     elif status in {"failed", "declined"}:
-        _queue_admin_event(session, f"payment_failed:{payment.id}", "Payment failed", f"Payment for order {order_id} failed.")
+        _queue_admin_event(session, f"payment_failed:{payment.id}", "Payment failed", f"Payment for order {order_number} failed.")
+    elif status == "needs_review":
+        _queue_admin_event(
+            session,
+            f"payment_needs_review:{payment.id}",
+            "PayPal payment needs review",
+            f"PayPal reported a capture that could not be matched to payment {payment.id}. Review it before taking further action.",
+        )
 
 
 def _print_pdf_failed_event(session: Session, job: PdfJob) -> None:

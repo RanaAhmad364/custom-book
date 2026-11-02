@@ -5,19 +5,8 @@ export function PaymentMethodSelect({
   value,
   onChange,
   loading = false,
-  pkrAmount,
-  usdAmount,
-  exchangeRate,
 }) {
   const selected = methods.find((method) => method.id === value);
-  const hasPkrAmount = pkrAmount !== null && pkrAmount !== undefined && pkrAmount !== "";
-  const resolvedPkrAmount = hasPkrAmount && Number.isFinite(Number(pkrAmount))
-    ? Number(pkrAmount)
-    : usdAmount !== null && usdAmount !== undefined && usdAmount !== ""
-      && exchangeRate !== null && exchangeRate !== undefined && exchangeRate !== ""
-      && Number.isFinite(Number(usdAmount)) && Number.isFinite(Number(exchangeRate))
-      ? Number(usdAmount) / Number(exchangeRate)
-      : null;
   return <div className="payment-method-select">
     <label htmlFor="payment-method">Payment method</label>
     {methods.length ? <select
@@ -33,12 +22,5 @@ export function PaymentMethodSelect({
         <p key={key}><strong>{key.replaceAll(/([A-Z])/g, " $1").replace(/^./, (letter) => letter.toUpperCase())}:</strong> {detail}</p>
       ))}
     </div> : null}
-    {selected?.provider === "paypal" && usdAmount !== null && usdAmount !== undefined && usdAmount !== ""
-      && Number.isFinite(Number(usdAmount)) && resolvedPkrAmount !== null
-      ? <p className="payment-method-instructions" role="note">
-        You will be charged {new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(Number(usdAmount))}
-        {" "}USD (PKR {resolvedPkrAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}).
-      </p>
-      : null}
   </div>;
 }

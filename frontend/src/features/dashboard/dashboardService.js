@@ -5,7 +5,7 @@ import { projectService } from "../../services/projectService.js";
 const formatDate = (value) => value ? new Date(value).toLocaleDateString() : "—";
 const formatMoney = (value, currency) => new Intl.NumberFormat(undefined, {
   style: "currency",
-  currency: currency || "PKR",
+  currency: currency || "USD",
 }).format(Number(value));
 
 function label(value) {

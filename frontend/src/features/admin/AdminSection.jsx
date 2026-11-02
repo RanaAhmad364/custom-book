@@ -5,13 +5,14 @@ import { SafeImage } from "../../components/common/SafeImage.jsx";
 import {
   loadAdminSection, publishAdminRecord, removeAdminRecord, saveAdminRecord,
   createAdminPricing, createAdminVariant, loadAdminBookReferences, removeAdminPricing,
-  adminExportUrl, loadAdminOrderHistory, loadAdminRelatedOrders, sendAdminEmail, updateAdminOrder, updateAdminPricing, updateAdminRefund, reviewAdminPayment, updateAdminSupport, updateAdminUser, uploadAdminAsset,
+  adminExportUrl, loadAdminOrderHistory, loadAdminRelatedOrders, sendAdminEmail, updateAdminOrder, updateAdminPricing, updateAdminRefund, reviewAdminPayment, refundAdminReviewCapture, updateAdminSupport, updateAdminUser, uploadAdminAsset,
 } from "./adminService.js";
 import BookProductForm from "./BookProductForm.jsx";
 import AdminRecordEditor from "./AdminRecordEditor.jsx";
 import { DashboardPageHeading } from "../dashboard/DashboardUI.jsx";
 import { pricingRecordDefaults } from "./pricingForm.js";
 import OrderTimeline from "../orders/OrderTimeline.jsx";
+import { formatCurrency } from "../../services/money.js";
 
 const sectionTitles = {
   dashboard: ["Operations overview", "Admin dashboard", "Live platform activity and order health."],
@@ -36,7 +37,7 @@ const sectionTitles = {
 };
 
 const defaults = {
-  books: { title: "", slug: "", description: "", categoryId: "", collectionId: "", style: "Editorial", occasion: "", bookType: "BASIC", pageCountMin: 24, pageCountMax: 80, startingPrice: "0.00", currency: "PKR", featured: false, coverAssetKey: "", adminMetadata: { dimensions: { widthMm: "203.00", heightMm: "203.00" }, pageCountOptions: [24, 32, 40], sizeOptions: [], coverOptions: [], paperOptions: [], previewImageKeys: [], printingTiers: [], pdfPrice: "0.00", printingPrice: "0.00", basePageCount: 24, extraPagePrice: "", evenPageCountRequired: false, productionDays: 10 } },
+  books: { title: "", slug: "", description: "", categoryId: "", collectionId: "", style: "Editorial", occasion: "", bookType: "BASIC", pageCountMin: 24, pageCountMax: 80, startingPrice: "0.00", currency: "USD", featured: false, coverAssetKey: "", adminMetadata: { dimensions: { widthMm: "203.00", heightMm: "203.00" }, pageCountOptions: [24, 32, 40], sizeOptions: [], coverOptions: [], paperOptions: [], previewImageKeys: [], printingTiers: [], pdfPrice: "0.00", printingPrice: "0.00", basePageCount: 24, extraPagePrice: "", evenPageCountRequired: false, productionDays: 10 } },
   categories: { name: "", slug: "", description: "", style: "", heroAssetKey: "", sortOrder: 0, isPublished: true },
   collections: { name: "", slug: "", description: "", eyebrow: "", categoryId: "", heroAssetKey: "", recommendedLayouts: [], relatedCategories: [] },
   templates: { name: "", slug: "", description: "", categoryId: "", pages: [{ pageNumber: 1, type: "cover", layout: "cover-photo", background: "#F4F0E8", elements: [{ type: "image", x: 0.08, y: 0.08, width: 0.84, height: 0.84, content: { placeholder: "Cover photo" } }] }] },
@@ -82,12 +83,12 @@ function rowDetails(record) {
     record.published === undefined ? undefined : (record.published ? "Published" : "Draft"),
     record.masterDesignStatus ? `Master design ${record.masterDesignStatus.replaceAll("_", " ")}` : undefined,
     record.masterDesignVersion ? `v${record.masterDesignVersion}` : undefined,
-    record.amount ? `${record.currency || "PKR"} ${record.amount}` : undefined,
-    record.startingPrice ? `${record.currency || "PKR"} ${record.startingPrice}` : undefined,
-    record.kind === "tier" ? `${record.currency || "PKR"} ${record.basePrice} base` : undefined,
+    record.amount ? formatCurrency(record.amount, record.currency || "USD") : undefined,
+    record.startingPrice ? formatCurrency(record.startingPrice, record.currency || "USD") : undefined,
+    record.kind === "tier" ? `${formatCurrency(record.basePrice, record.currency || "USD")} base` : undefined,
     record.kind === "pagePricing" ? `${record.pricePerPage} per additional page` : undefined,
-    record.kind === "shipping" ? `${record.currency || "PKR"} ${record.price}` : undefined,
-    record.kind === "variant" ? `${record.currency || "PKR"} ${record.basePrice} printing` : undefined,
+    record.kind === "shipping" ? formatCurrency(record.price, record.currency || "USD") : undefined,
+    record.kind === "variant" ? `${formatCurrency(record.basePrice, record.currency || "USD")} printing` : undefined,
     record.widthMm && record.heightMm ? `${record.widthMm} × ${record.heightMm} mm` : undefined,
     record.active === undefined ? undefined : (record.active ? "Active" : "Inactive"),
   ].filter(Boolean);
@@ -174,7 +175,7 @@ function AdminHistoryTable({ records, mode, onSelect }) {
         <td>{record.bookTitle || record.projectTitle || "Untitled project"}</td>
         <td>{record.type === "pdf" ? "PDF" : "Print"}</td>
         <td>{record.pageCount ?? "—"}</td>
-        <td>{record.currency || "PKR"} {record.amount ?? "—"}</td>
+        <td>{record.amount == null ? "—" : formatCurrency(record.amount, record.currency || "USD")}</td>
         <td><span className="admin-status">{(record.paymentStatus || record.status || "unknown").replaceAll("_", " ")}</span></td>
         <td>{record.downloadedAt || record.createdAt ? new Date(record.downloadedAt || record.createdAt).toLocaleString() : "—"}</td>
         {showOrderAction ? <td><button className="admin-inline-button" type="button" onClick={() => onSelect(record)}>View order</button></td> : null}
@@ -357,7 +358,7 @@ export default function AdminSection({ sectionOverride }) {
 
   function startPricingCreate(kind) {
     setSelected(null);
-    setDraft(pricingRecordDefaults(kind, payload?.currency || "PKR"));
+    setDraft(pricingRecordDefaults(kind, payload?.currency || "USD"));
     setMessage("");
     setError("");
   }
@@ -569,6 +570,19 @@ export default function AdminSection({ sectionOverride }) {
     }
   }
 
+  async function refundReviewCapture(payment) {
+    if (!window.confirm(`Refund the captured ${payment.providerCaptureCurrency} ${payment.providerCaptureAmount} to resolve this payment review?`)) return;
+    setError("");
+    setMessage("");
+    try {
+      const refund = await refundAdminReviewCapture(payment);
+      setMessage(`PayPal refund ${refund.status}.`);
+      await refresh();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "The PayPal capture could not be refunded.");
+    }
+  }
+
   async function uploadAsset(file) {
     setError("");
     try {
@@ -602,7 +616,7 @@ export default function AdminSection({ sectionOverride }) {
         <MetricCard label="Active projects" value={stats.activeProjects} />
         <MetricCard label="Orders" value={(stats.pdfPurchases || 0) + (stats.printOrders || 0)} />
         <MetricCard label="Downloads" value={downloadTotal} note={`Last ${analyticsDays} days`} />
-        <MetricCard label="Revenue" value={`${stats.currency || "PKR"} ${stats.revenue || "0.00"}`} />
+        <MetricCard label="Revenue" value={formatCurrency(stats.revenue || 0, stats.currency || "USD")} />
         <MetricCard label="Pending payments" value={stats.needsAttention?.manualPayments ?? 0} />
         <MetricCard label="Orders to ship" value={stats.needsAttention?.ordersToShip ?? 0} />
         <MetricCard label="Favorites" value={stats.favoritesCount} />
@@ -611,7 +625,7 @@ export default function AdminSection({ sectionOverride }) {
         : <>
           <div className="admin-analytics-grid">
             <section className="admin-panel"><h2>Revenue trend</h2><div className="admin-series" role="img" aria-label={`Revenue for the last ${analyticsDays} days`}>
-              {(stats.revenueSeries || []).map((item) => <div className="admin-series-item" key={item.date} title={`${item.date}: ${stats.currency || "PKR"} ${item.revenue}`}>
+              {(stats.revenueSeries || []).map((item) => <div className="admin-series-item" key={item.date} title={`${item.date}: ${formatCurrency(item.revenue, stats.currency || "USD")}`}>
                 <span style={{ height: `${Math.max(3, Number(item.revenue) / revenueMax * 100)}%` }} />
                 <small>{item.date.slice(-2)}</small>
               </div>)}
@@ -625,7 +639,7 @@ export default function AdminSection({ sectionOverride }) {
           </div>
           <section className="admin-analytics-grid admin-rankings">
             {[
-              ["Best-selling books", stats.bestSellingBooks, (item) => `${item.orders} orders · ${stats.currency || "PKR"} ${item.revenue}`],
+              ["Best-selling books", stats.bestSellingBooks, (item) => `${item.orders} orders · ${formatCurrency(item.revenue, stats.currency || "USD")}`],
               ["Most-downloaded", stats.mostDownloadedBooks, (item) => `${item.downloads} downloads`],
               ["Most-favorited", stats.mostFavoritedBooks, (item) => `${item.favorites} favorites`],
             ].map(([heading, items, description]) => <section className="admin-panel" key={heading}>
@@ -635,7 +649,7 @@ export default function AdminSection({ sectionOverride }) {
             </section>)}
           </section>
           <section className="admin-analytics-grid">
-            <div className="admin-panel"><h2>Recent orders</h2><div className="admin-table-wrap"><table><thead><tr><th>Order</th><th>Type</th><th>Placed</th><th>Status</th><th>Total</th></tr></thead><tbody>{(stats.recentOrders || []).map((order) => <tr key={`${order.type}-${order.id}`}><td>{order.orderNumber}</td><td>{order.type === "pdf" ? "PDF" : "Print"}</td><td>{new Date(order.createdAt).toLocaleDateString()}</td><td><span className="admin-status">{order.status}</span></td><td>{stats.currency || "PKR"} {order.amount}</td></tr>)}{!stats.recentOrders?.length ? <tr><td colSpan="5" className="admin-table-empty">No orders have been recorded yet.</td></tr> : null}</tbody></table></div></div>
+            <div className="admin-panel"><h2>Recent orders</h2><div className="admin-table-wrap"><table><thead><tr><th>Order</th><th>Type</th><th>Placed</th><th>Status</th><th>Total</th></tr></thead><tbody>{(stats.recentOrders || []).map((order) => <tr key={`${order.type}-${order.id}`}><td>{order.orderNumber}</td><td>{order.type === "pdf" ? "PDF" : "Print"}</td><td>{new Date(order.createdAt).toLocaleDateString()}</td><td><span className="admin-status">{order.status}</span></td><td>{formatCurrency(order.amount, order.currency || stats.currency || "USD")}</td></tr>)}{!stats.recentOrders?.length ? <tr><td colSpan="5" className="admin-table-empty">No orders have been recorded yet.</td></tr> : null}</tbody></table></div></div>
             <div className="admin-panel"><h2>Recent users</h2><div className="admin-compact-list">{(stats.recentUsers || []).map((user) => <div key={user.id}><strong>{user.name}</strong><span>{user.email}</span><small>{new Date(user.createdAt).toLocaleDateString()}</small></div>)}{!stats.recentUsers?.length ? <p className="admin-list-message">No user accounts yet.</p> : null}</div></div>
           </section>
           <section className="admin-analytics-grid">
@@ -717,7 +731,7 @@ export default function AdminSection({ sectionOverride }) {
             <label>Publication<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All products</option><option value="true">Published</option><option value="false">Draft</option></select></label>
             <label>Category<select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="">All categories</option>{categoryOptions.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
           </> : null}
-          {["payments", "refunds"].includes(section) ? <label>Status<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All statuses</option>{(section === "payments" ? ["pending", "successful", "failed", "partially_refunded", "refunded"] : ["requested", "pending", "manual_required", "processing", "succeeded", "rejected", "failed"]).map((status) => <option key={status} value={status}>{status.replaceAll("_", " ")}</option>)}</select></label> : null}
+          {["payments", "refunds"].includes(section) ? <label>Status<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All statuses</option>{(section === "payments" ? ["pending", "successful", "failed", "needs_review", "partially_refunded", "refunded"] : ["requested", "pending", "manual_required", "processing", "succeeded", "rejected", "failed"]).map((status) => <option key={status} value={status}>{status.replaceAll("_", " ")}</option>)}</select></label> : null}
           {["categories", "collections", "templates"].includes(section) ? <label>{section === "categories" ? "Status" : "Publication"}<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All records</option><option value="true">{section === "categories" ? "Active" : "Published"}</option><option value="false">{section === "categories" ? "Inactive" : "Draft"}</option></select></label> : null}
           {["pdf-orders", "print-orders"].includes(section) ? <label>Status<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All statuses</option>{(section === "pdf-orders" ? ["pending", "paid", "generating", "ready", "failed", "cancellation_requested", "cancelled", "refunded"] : ["order_placed", "payment_confirmed", "processing", "printed", "shipped", "delivered", "design_verified", "in_production", "quality_check", "packed", "out_for_delivery", "cancellation_requested", "cancelled", "refunded"]).map((status) => <option key={status} value={status}>{status.replaceAll("_", " ")}</option>)}</select></label> : null}
           {section === "support" ? <label>Status<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All statuses</option>{["open", "in_progress", "waiting_for_customer", "resolved", "closed"].map((status) => <option key={status} value={status}>{status.replaceAll("_", " ")}</option>)}</select></label> : null}
@@ -771,6 +785,12 @@ export default function AdminSection({ sectionOverride }) {
               <button type="button" onClick={() => reviewManualPayment(record, "approved")}>Approve transfer</button>
               <button type="button" onClick={() => reviewManualPayment(record, "rejected")}>Reject transfer</button>
             </div> : null}
+            {section === "payments" && record.status === "needs_review"
+              && record.provider === "paypal" && record.providerCaptureCurrency
+              && record.providerCaptureAmount && record.providerCaptureId
+              ? <div className="admin-record-actions">
+                <button type="button" onClick={() => refundReviewCapture(record)}>Refund captured amount</button>
+              </div> : null}
           </article>)}
         </div> : null}
         <AdminPagination pagination={payload?.pagination} page={listPage} loading={loading}

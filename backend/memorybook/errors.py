@@ -57,6 +57,16 @@ def register_error_handlers(app: Flask) -> None:
 
     @app.errorhandler(HTTPException)
     def handle_http_error(error: HTTPException):
+        if error.code == 429:
+            response, status = _error_response(
+                429,
+                "TOO_MANY_REQUESTS",
+                "You are making requests too quickly. Please wait a moment and try again.",
+            )
+            retry_after = error.get_response().headers.get("Retry-After")
+            if retry_after:
+                response.headers["Retry-After"] = retry_after
+            return response, status
         return _error_response(error.code or 500, error.name.upper().replace(" ", "_"), error.description)
 
     @app.errorhandler(JWTExtendedException)

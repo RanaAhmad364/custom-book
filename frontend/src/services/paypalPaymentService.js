@@ -17,7 +17,7 @@ export const paypalPaymentService = {
       || typeof data.paypalOrderId !== "string"
       || !data.paypalOrderId
       || !Number.isFinite(Number(data.chargedAmountUsd))
-      || !Number.isFinite(Number(data.rate))
+      || (data.rate !== null && data.rate !== undefined && !Number.isFinite(Number(data.rate)))
     ) {
       throw new Error("Payment service returned an invalid PayPal order.");
     }

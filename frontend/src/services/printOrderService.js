@@ -2,7 +2,7 @@ import { apiRequest } from "./apiClient.js";
 import { paymentMethodService } from "./paymentMethodService.js";
 
 const API_ROOT = "/print";
-const paymentStates = new Set(["pending", "successful", "failed", "partially_refunded", "refunded"]);
+const paymentStates = new Set(["pending", "successful", "failed", "needs_review", "partially_refunded", "refunded"]);
 const productionStates = [
   "pending_payment",
   "order_placed",
@@ -124,7 +124,7 @@ export const printOrderService = {
     return paymentMethodService.list(currency);
   },
 
-  async createOrder(projectId, configuration, shippingAddress, quoteId, paymentMethod) {
+  async createOrder(projectId, configuration, shippingAddress, quoteId, paymentMethod, consentAccepted = false) {
     if (!quoteId) throw new Error("Refresh the server quote before placing your print order.");
     const order = await request("/orders", {
       method: "POST",
@@ -135,6 +135,7 @@ export const printOrderService = {
         quoteId,
         provider: paymentMethod?.provider,
         paymentMethod: paymentMethod?.method,
+        consentAccepted,
       },
       headers: { "Idempotency-Key": crypto.randomUUID() },
     });

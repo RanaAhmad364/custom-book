@@ -178,6 +178,8 @@ export function PrintOrderFlow() {
   const [paypalCheckoutOrder, setPaypalCheckoutOrder] = useState(null);
   const [submitError, setSubmitError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [consentAccepted, setConsentAccepted] = useState(false);
+  useEffect(() => setConsentAccepted(false), [projectId]);
   useEffect(() => {
     let active = true;
     setAvailableCombinations(null);
@@ -325,6 +327,10 @@ export function PrintOrderFlow() {
       setSubmitError("Wait for a current server quote before continuing.");
       return;
     }
+    if (!consentAccepted) {
+      setSubmitError("Please confirm that your book and delivery address may be shared with the MemoryBook team for printing.");
+      return;
+    }
     if (!selectedMethod) {
       setSubmitError("No verified payment method is currently available for this currency.");
       return;
@@ -337,7 +343,7 @@ export function PrintOrderFlow() {
         cover: configuration.cover,
         quantity: configuration.quantity,
         discountCode: configuration.discountCode,
-      }, configuration.address, quote.id, selectedMethod);
+      }, configuration.address, quote.id, selectedMethod, consentAccepted);
       if (selectedMethod.provider === "paypal") {
         setPaypalCheckoutOrder(order);
         return;
@@ -404,7 +410,7 @@ export function PrintOrderFlow() {
             </div><button className="button button-dark print-address-submit" type="submit">Save address and review <ArrowRight size={15} /></button>
           </form> : null}
 
-          {step === "checkout" ? <><h2>Print order summary</h2><div className="print-choice-summary"><div><span>Tier</span><strong>{configuration.tier.toUpperCase()}</strong></div><div><span>Paper</span><strong>{paperOptions.find((item) => item.id === configuration.paper)?.title}</strong></div><div><span>Cover</span><strong>{coverOptions.find((item) => item.id === configuration.cover)?.title}</strong></div><div><span>Quantity</span><strong>{configuration.quantity}</strong></div><div><span>Delivery to</span><strong>{configuration.address.fullName}<br />{configuration.address.line1}, {configuration.address.city} {configuration.address.postalCode}</strong></div></div><label className="print-discount-field">Discount code<input value={configuration.discountCode} maxLength={80} autoCapitalize="characters" onChange={(event) => updateConfiguration({ discountCode: event.target.value })} placeholder="Enter code (optional)" /></label><p className="print-discount-note">Your code is validated by the server and reflected in the refreshed quote.</p><button className="print-refresh-quote" type="button" onClick={() => updateConfiguration({})} disabled={quoteLoading}><RefreshCw size={14} /> Refresh server quote</button></> : null}
+          {step === "checkout" ? <><h2>Print order summary</h2><div className="print-choice-summary"><div><span>Tier</span><strong>{configuration.tier.toUpperCase()}</strong></div><div><span>Paper</span><strong>{paperOptions.find((item) => item.id === configuration.paper)?.title}</strong></div><div><span>Cover</span><strong>{coverOptions.find((item) => item.id === configuration.cover)?.title}</strong></div><div><span>Quantity</span><strong>{configuration.quantity}</strong></div><div><span>Delivery to</span><strong>{configuration.address.fullName}<br />{configuration.address.line1}, {configuration.address.city} {configuration.address.postalCode}</strong></div></div><label className="print-discount-field">Discount code<input value={configuration.discountCode} maxLength={80} autoCapitalize="characters" onChange={(event) => updateConfiguration({ discountCode: event.target.value })} placeholder="Enter code (optional)" /></label><p className="print-discount-note">Your code is validated by the server and reflected in the refreshed quote.</p><button className="print-refresh-quote" type="button" onClick={() => updateConfiguration({})} disabled={quoteLoading}><RefreshCw size={14} /> Refresh server quote</button><label className="print-consent"><input type="checkbox" checked={consentAccepted} onChange={(event) => setConsentAccepted(event.target.checked)} /><span>My book and delivery address will be shared with the MemoryBook team for printing.</span></label></> : null}
 
           {step === "checkout" ? <><QuoteBreakdown quote={quote} /><PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading || Boolean(paypalCheckoutOrder)} pkrAmount={quote?.total} usdAmount={quote?.usdAmount} exchangeRate={quote?.exchangeRate} />{methodsError ? <p className="print-inline-error" role="alert">{methodsError}</p> : null}{paypalCheckoutOrder && selectedMethod?.provider === "paypal" ? <PayPalSmartCheckout paymentId={paypalCheckoutOrder.paymentId} pkrAmount={paypalCheckoutOrder.pkrAmount ?? quote?.total} usdAmount={paypalCheckoutOrder.usdAmount ?? quote?.usdAmount} onRetry={retryPaypalCheckout} onSuccess={() => navigate(`/print/orders/${encodeURIComponent(paypalCheckoutOrder.id)}/processing`, { replace: true })} /> : null}</> : null}
           {quoteLoading ? <div className="print-message"><LoaderCircle className="print-spin" size={18} /> Requesting a current quote from the printing service…</div> : null}
@@ -560,6 +566,7 @@ export function PrintOrderResult() {
         {!isTracking ? <div className="print-order-dates"><div><Clock3 size={16} /><span>Estimated production<strong>{formatDate(order.productionEstimate)}</strong></span></div><div><Truck size={16} /><span>Estimated delivery<strong>{formatDate(order.deliveryEstimate)}</strong></span></div></div> : null}
       </section>
       <ManualPaymentPanel order={order} onSubmitted={refresh} />
+      {order.paymentStatus === "needs_review" ? <div className="print-message" role="status"><CircleAlert size={18} /><span>Your PayPal payment needs review. Please do not pay again; the MemoryBook team will review it.</span></div> : null}
       {order.paymentStatus === "pending" && !order.paymentExpired && order.paymentProvider === "paypal" ? <PayPalSmartCheckout paymentId={order.paymentId} pkrAmount={order.pkrAmount ?? order.amount ?? order.quote?.total} usdAmount={order.usdAmount} onRetry={retryCheckout} onSuccess={() => navigate(`/print/orders/${encodeURIComponent(order.id)}/processing`, { replace: true })} /> : null}
       <section className="print-timeline-card"><div className="print-timeline-heading"><div><span className="eyebrow">{isTracking ? "Live order progress" : "What happens next"}</span><h2>{productionSteps[statusIndex]?.[1] || "Order status"}</h2></div><button className="print-refresh-quote" type="button" onClick={refresh}><RefreshCw size={14} /> Refresh status</button></div>
         <ol className="print-production-timeline">{productionSteps.map(([id, label], index) => <li className={index < statusIndex ? "complete" : index === statusIndex ? "current" : ""} key={id}><span>{index < statusIndex ? <Check size={13} /> : index === statusIndex ? <PackageCheck size={13} /> : null}</span><div><strong>{label}</strong>{id === "shipped" && order.trackingNumber ? <small>Tracking number: {order.trackingNumber}</small> : null}</div></li>)}</ol>

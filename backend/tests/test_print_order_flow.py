@@ -11,7 +11,10 @@ from werkzeug.exceptions import NotFound
 from memorybook.errors import ConflictError
 from memorybook.extensions import db
 from memorybook.models import (
+    AdminActivityLog,
+    BackgroundJob,
     EmailLog,
+    GeneratedFile,
     Notification,
     OrderStatusHistory,
     Payment,
@@ -135,6 +138,20 @@ def _create_print_order(*, created_at=None, email="print-flow@example.test"):
     return user, project, revision, order, payment, attempt
 
 
+def _create_admin(email):
+    user = User(email=email, password_hash="test-hash")
+    role = db.session.scalar(select(Role).where(Role.name == "admin"))
+    if role is None:
+        role = Role(name="admin", description="Admin", is_system=True)
+        db.session.add(role)
+        db.session.flush()
+    db.session.add(user)
+    db.session.flush()
+    db.session.add(UserRole(user_id=user.id, role_id=role.id))
+    db.session.flush()
+    return user
+
+
 def _authenticated_client(app, email):
     client = app.test_client()
     response = client.post(
@@ -251,6 +268,136 @@ def test_payment_received_notification_and_no_smtp_do_not_break_payment(app):
         assert email_log.status == "failed"
         assert email_log.error_message == "Email delivery is not configured."
         assert db.session.get(PrintOrder, order.id).paid_at is not None
+
+
+def test_successful_print_payment_queues_only_expected_admin_events_once(app):
+    with app.app_context():
+        admin = _create_admin("print-payment-events-admin@example.test")
+        _, _, _, order, payment, _ = _create_print_order(
+            email="print-payment-events-customer@example.test",
+        )
+        payments._apply_payment_result(
+            payment,
+            success=True,
+            provider_reference="print-event-capture",
+        )
+        db.session.commit()
+
+        payments._apply_payment_result(
+            db.session.get(Payment, payment.id),
+            success=True,
+            provider_reference="print-event-capture",
+        )
+        db.session.commit()
+
+        event_notifications = [
+            item
+            for item in db.session.scalars(
+                select(Notification).where(Notification.user_id == admin.id)
+            ).all()
+            if (item.data or {}).get("event", "").startswith(
+                ("payment_confirmed:", "paid_print_order:", "payment_failed:")
+            )
+        ]
+        assert sorted(item.title for item in event_notifications) == [
+            "New paid print order",
+            "Payment confirmed",
+        ], [(item.title, item.event_key) for item in event_notifications]
+        assert all(order.order_number in item.message for item in event_notifications)
+
+        event_emails = [
+            item
+            for item in db.session.scalars(
+                select(EmailLog).where(EmailLog.user_id == admin.id)
+            ).all()
+            if item.event_key.startswith(
+                ("payment_confirmed:", "paid_print_order:", "payment_failed:")
+            )
+        ]
+        assert len(event_emails) == 2
+        assert {item.event_key for item in event_emails} == {item.event_key for item in event_notifications}
+
+
+def test_declined_payment_creates_exactly_one_admin_failure_event_and_email(app):
+    with app.app_context():
+        admin = _create_admin("declined-payment-events-admin@example.test")
+        _, _, _, _, payment, _ = _create_print_order(
+            email="declined-payment-events-customer@example.test",
+        )
+        payments._apply_payment_result(
+            payment,
+            success=False,
+            provider_reference="provider-declined",
+        )
+        db.session.commit()
+
+        event_notifications = [
+            item
+            for item in db.session.scalars(
+                select(Notification).where(Notification.user_id == admin.id)
+            ).all()
+            if (item.data or {}).get("event", "").startswith("payment_failed:")
+        ]
+        event_emails = db.session.scalars(
+            select(EmailLog).where(
+                EmailLog.user_id == admin.id,
+                EmailLog.event_key.like("payment_failed:%"),
+            )
+        ).all()
+        assert len(event_notifications) == 1
+        assert event_notifications[0].title == "Payment failed"
+        assert len(event_emails) == 1
+        assert event_emails[0].event_key == event_notifications[0].event_key
+
+
+def test_successful_retry_emits_payment_recovered_not_another_failure(app):
+    with app.app_context():
+        admin = _create_admin("recovered-payment-events-admin@example.test")
+        _, _, _, order, payment, _ = _create_print_order(
+            email="recovered-payment-events-customer@example.test",
+        )
+        payments._apply_payment_result(
+            payment,
+            success=False,
+            provider_reference="first-attempt-declined",
+        )
+        db.session.commit()
+
+        payments._apply_payment_result(
+            db.session.get(Payment, payment.id),
+            success=True,
+            provider_reference="retry-captured",
+        )
+        db.session.commit()
+
+        events = [
+            item
+            for item in db.session.scalars(
+                select(Notification).where(Notification.user_id == admin.id)
+            ).all()
+            if (item.data or {}).get("event", "").startswith(
+                ("payment_failed:", "payment_recovered:", "payment_confirmed:", "paid_print_order:")
+            )
+        ]
+        assert sorted(item.title for item in events) == [
+            "New paid print order",
+            "Payment confirmed",
+            "Payment failed",
+            "Payment recovered",
+        ], [(item.title, item.event_key) for item in events]
+        recovered = next(item for item in events if item.title == "Payment recovered")
+        assert order.order_number in recovered.message
+        assert "previous failed attempt" in recovered.message
+        assert sum(item.title == "Payment failed" for item in events) == 1
+        assert len([
+            item
+            for item in db.session.scalars(
+                select(EmailLog).where(EmailLog.user_id == admin.id)
+            ).all()
+            if item.event_key.startswith(
+                ("payment_failed:", "payment_recovered:", "payment_confirmed:", "paid_print_order:")
+            )
+        ]) == 4
 
 
 def test_print_pdf_failure_notifies_admin_once_with_error_message(app):
@@ -405,6 +552,232 @@ def test_verified_print_payment_unlocks_pdf_and_queues_both_profiles(app, monkey
         assert all(job.status == "queued" for job in jobs)
         assert len(dispatched) == 2
         assert db.session.get(PaymentAttempt, attempt.id).status == "successful"
+
+
+def test_paypal_print_order_full_production_and_tracking_flow(app, monkeypatch):
+    class MemoryStorage:
+        def __init__(self):
+            self.objects = {}
+
+        def upload(self, key, stream, content_type):
+            self.objects[key] = (stream.read(), content_type)
+
+        def download(self, key):
+            return self.objects[key][0]
+
+        def content_type(self, key):
+            return self.objects[key][1]
+
+        def private_download_url(self, key):
+            return f"/private/{key}"
+
+    app.config.update(
+        PAYPAL_MODE="sandbox",
+        PAYPAL_CLIENT_ID="sandbox-client",
+        PAYPAL_CLIENT_SECRET="sandbox-secret",
+    )
+    customer_email = "paypal-print-e2e@example.test"
+    admin_email = "paypal-print-e2e-admin@example.test"
+    customer, customer_csrf = _authenticated_client(app, customer_email)
+    admin, admin_csrf = _authenticated_client(app, admin_email)
+    storage = MemoryStorage()
+    app.extensions["asset_storage"] = storage
+
+    with app.app_context():
+        admin_user = db.session.scalar(select(User).where(User.email == admin_email))
+        admin_role = db.session.scalar(select(Role).where(Role.name == "admin"))
+        if admin_role is None:
+            admin_role = Role(name="admin", description="Admin", is_system=True)
+            db.session.add(admin_role)
+            db.session.flush()
+        db.session.add(UserRole(user_id=admin_user.id, role_id=admin_role.id))
+        db.session.flush()
+        _, project, original_revision, order, payment, _ = _create_print_order(
+            email=customer_email,
+        )
+        original_revision_id = original_revision.id
+        order.currency = "USD"
+        order.total_amount = Decimal("16.00")
+        order.book_amount = Decimal("16.00")
+        order.printing_amount = Decimal("0.00")
+        order.shipping_amount = Decimal("0.00")
+        payment.currency = "USD"
+        payment.amount = Decimal("16.00")
+        payment.usd_amount = Decimal("16.00")
+        order_id, payment_id, project_id = order.id, payment.id, project.id
+        order_number = order.order_number
+        original_document = original_revision.document
+        changed_document = {**project.document, "metadata": {"title": "Changed after order submission"}}
+        project.document = changed_document
+        project.version += 1
+        db.session.commit()
+
+    monkeypatch.setattr(
+        "memorybook.integrations.payment_gateways.PayPalGateway.create_smart_order",
+        lambda _self, _payment, _reference_id, _key: "PAYPAL-PRINT-E2E",
+    )
+    monkeypatch.setattr(
+        "memorybook.integrations.payment_gateways.PayPalGateway.capture_order",
+        lambda _self, paypal_order_id, _key: {
+            "id": paypal_order_id,
+            "status": "COMPLETED",
+            "purchase_units": [{
+                "reference_id": order_number,
+                "payments": {"captures": [{
+                    "id": "PAYPAL-PRINT-E2E-CAPTURE",
+                    "status": "COMPLETED",
+                    "amount": {"currency_code": "USD", "value": "16.00"},
+                }]},
+            }],
+        },
+    )
+    paypal_order = customer.post(
+        f"/api/v1/payments/{payment_id}/paypal/create-order",
+        headers=customer_csrf,
+    )
+    assert paypal_order.status_code == 200, paypal_order.get_json()
+    captured = customer.post(
+        f"/api/v1/payments/{payment_id}/paypal/capture-order",
+        json={"paypalOrderId": paypal_order.json["paypalOrderId"]},
+        headers=customer_csrf,
+    )
+    assert captured.status_code == 200, captured.get_json()
+    assert captured.json["status"] == "successful"
+
+    with app.app_context():
+        print_job = db.session.scalar(
+            select(PdfJob).where(PdfJob.generation_profile == "print")
+        )
+        digital_job = db.session.scalar(
+            select(PdfJob).where(PdfJob.generation_profile == "digital")
+        )
+        print_background_id = db.session.scalar(
+            select(BackgroundJob.id).where(
+                BackgroundJob.job_type == "generate_pdf",
+                BackgroundJob.reference_id == print_job.id,
+            )
+        )
+        digital_background_id = db.session.scalar(
+            select(BackgroundJob.id).where(
+                BackgroundJob.job_type == "generate_pdf",
+                BackgroundJob.reference_id == digital_job.id,
+            )
+        )
+        free_pdf_order = db.session.scalar(
+            select(PdfOrder).where(PdfOrder.idempotency_key == f"print-free:{order_id}")
+        )
+        frozen_revision_id = free_pdf_order.project_revision_id
+        assert frozen_revision_id == original_revision_id
+        assert print_background_id and digital_background_id
+
+    from memorybook.services import pdf_generation
+
+    renderer = pdf_generation.render_project_pdf
+    rendered_documents = []
+
+    def capture_rendered_document(document, *args, **kwargs):
+        rendered_documents.append(document)
+        return renderer(document, *args, **kwargs)
+
+    monkeypatch.setattr(pdf_generation, "render_project_pdf", capture_rendered_document)
+    app.extensions["background_jobs"]._run_job(digital_background_id)
+    app.extensions["background_jobs"]._run_job(print_background_id)
+
+    with app.app_context():
+        print_job = db.session.get(PdfJob, print_job.id)
+        generated_file = db.session.scalar(
+            select(GeneratedFile).where(
+                GeneratedFile.pdf_order_id == free_pdf_order.id,
+                GeneratedFile.generation_profile == "print",
+            )
+        )
+        assert print_job.status == "ready"
+        assert generated_file is not None
+        print_bytes = storage.download(generated_file.storage_key)
+        assert print_bytes.startswith(b"%PDF")
+        assert rendered_documents
+        assert all(document == original_document for document in rendered_documents)
+
+    admin_pdf_link = admin.get(f"/api/v1/admin/orders/print/{order_id}/pdf")
+    assert admin_pdf_link.status_code == 200, admin_pdf_link.get_json()
+    admin_pdf = admin.get(f"/api/v1{admin_pdf_link.json['url']}")
+    assert admin_pdf.status_code == 200
+    assert admin_pdf.mimetype == "application/pdf"
+    assert admin_pdf.data.startswith(b"%PDF")
+    with app.app_context():
+        assert db.session.scalar(
+            select(AdminActivityLog.id).where(
+                AdminActivityLog.action == "private_print_order.pdf_accessed",
+                AdminActivityLog.target_id == order_id,
+            )
+        )
+
+    for status, extra in (
+        ("processing", {}),
+        ("printed", {}),
+        ("shipped", {"carrier": "Sandbox Courier", "trackingNumber": "SBX-TRACK-2101"}),
+        ("out_for_delivery", {}),
+        ("delivered", {}),
+    ):
+        response = admin.patch(
+            f"/api/v1/admin/orders/print/{order_id}",
+            json={"status": status, **extra},
+            headers=admin_csrf,
+        )
+        assert response.status_code == 200, response.get_json()
+
+    order_response = customer.get(f"/api/v1/print/orders/{order_id}")
+    assert order_response.status_code == 200
+    statuses = [item["status"] for item in order_response.json["statusHistory"]]
+    assert statuses[-5:] == ["processing", "printed", "shipped", "out_for_delivery", "delivered"]
+    assert order_response.json["shipment"]["carrier"] == "Sandbox Courier"
+    assert order_response.json["shipment"]["trackingNumber"] == "SBX-TRACK-2101"
+    assert order_response.json["shippingAddress"]["city"] == "Lahore"
+
+    customer_notifications = customer.get("/api/v1/payments/notifications")
+    assert customer_notifications.status_code == 200
+    titles = {item["title"] for item in customer_notifications.json["items"]}
+    assert {
+        "Payment received",
+        "Your book is being prepared",
+        "Your book has been printed",
+        "Your book has been shipped",
+        "Your book is out for delivery",
+        "Your book has been delivered",
+    } <= titles
+    admin_notifications = admin.get("/api/v1/admin/notifications")
+    assert admin_notifications.status_code == 200
+    assert any(item["title"] == "New paid print order" for item in admin_notifications.json["items"])
+
+    with app.app_context():
+        pending_email_jobs = db.session.scalars(
+            select(BackgroundJob.id).where(
+                BackgroundJob.job_type.in_(("send_admin_email", "send_notification_email")),
+                BackgroundJob.status == "queued",
+            )
+        ).all()
+    for background_id in pending_email_jobs:
+        app.extensions["background_jobs"]._run_job(background_id)
+    delivered_subjects = {subject for _, subject, _ in app.extensions["auth_email_outbox"]}
+    assert {
+        "New paid print order",
+        "Payment received",
+        "Your book is being prepared",
+        "Your book has been printed",
+        "Your book has been shipped",
+        "Your book is out for delivery",
+        "Your book has been delivered",
+    } <= delivered_subjects
+    with app.app_context():
+        email_logs = db.session.scalars(
+            select(EmailLog).where(
+                EmailLog.template_key.in_(
+                    ("paid_print_order", "payment_confirmed", "order_status")
+                )
+            )
+        ).all()
+        assert email_logs
+        assert all(log.status == "sent" for log in email_logs)
 
 
 def test_customer_can_retry_failed_print_pdf_after_replacing_low_resolution_photo(app, monkeypatch):

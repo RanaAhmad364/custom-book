@@ -27,7 +27,7 @@ PLAN_RULES = {
 
 
 def default_currency() -> str:
-    return str(current_app.config.get("PAYMENT_DEFAULT_CURRENCY", "PKR")).upper()
+    return str(current_app.config.get("PAYMENT_DEFAULT_CURRENCY", "USD")).upper()
 
 
 def plan_code(book_type: str | None) -> str:

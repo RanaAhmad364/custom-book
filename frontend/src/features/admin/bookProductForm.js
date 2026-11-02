@@ -31,7 +31,7 @@ export function bookFormValues(record = {}) {
     pageCountMin: record.pageCountMin ?? 24,
     pageCountMax: record.pageCountMax ?? 80,
     startingPrice: String(record.startingPrice ?? "0.00"),
-    currency: record.currency ?? "PKR",
+    currency: record.currency ?? "USD",
     featured: record.featured ?? false,
     coverAssetKey: record.coverAssetKey ?? "",
     adminMetadata: {

@@ -171,7 +171,7 @@ def test_public_plan_catalog_uses_active_catalog_prices_and_configured_currency(
     plans = {item["id"]: item for item in response.json["items"]}
     assert set(plans) == {"basic", "medium", "premium"}
     assert plans["basic"]["startingPrice"] == "42.50"
-    assert plans["basic"]["currency"] == "PKR"
+    assert plans["basic"]["currency"] == "USD"
     assert plans["basic"]["maximumPages"] == 80
     assert plans["medium"]["startingPrice"] is None
     assert plans["premium"]["startingPrice"] is None

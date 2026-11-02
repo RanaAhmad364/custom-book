@@ -8,7 +8,7 @@ from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, In
 from sqlalchemy.orm import Mapped, mapped_column
 
 from memorybook.extensions import db
-from memorybook.models.base import IdMixin, SoftDeleteMixin, TimestampMixin
+from memorybook.models.base import IdMixin, SoftDeleteMixin, TimestampMixin, configured_currency
 
 
 class BookCategory(IdMixin, TimestampMixin, SoftDeleteMixin, db.Model):
@@ -63,7 +63,7 @@ class BookProduct(IdMixin, TimestampMixin, SoftDeleteMixin, db.Model):
     is_featured: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     cover_asset_key: Mapped[str | None] = mapped_column(String(1024))
     starting_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=Decimal("0"))
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="PKR", server_default="PKR")
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default=configured_currency, server_default="USD")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     admin_metadata: Mapped[dict | None] = mapped_column(db.JSON)
 
@@ -185,5 +185,5 @@ class BookVariant(IdMixin, TimestampMixin, db.Model):
     paper_type_id: Mapped[str] = mapped_column(ForeignKey("paper_types.id", ondelete="RESTRICT"), nullable=False)
     sku: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
     base_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="PKR", server_default="PKR")
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default=configured_currency, server_default="USD")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")

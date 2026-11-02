@@ -217,8 +217,7 @@ def _configure_jwt_revocation() -> None:
 
 def _register_cli_commands(app: Flask) -> None:
     import click
-    from sqlalchemy import text
-    from sqlalchemy import select
+    from sqlalchemy import delete, or_, select, text
     from pathlib import Path
     import json
 
@@ -273,6 +272,38 @@ def _register_cli_commands(app: Flask) -> None:
         with app.app_context():
             count = expire_pending_print_orders()
         click.echo(f"Expired {count} unpaid print order(s).")
+
+    @app.cli.command("cleanup-legacy-payment-failure-events")
+    def cleanup_legacy_payment_failure_events() -> None:
+        """Delete erroneous legacy payment-failure admin notifications and queued emails."""
+        from memorybook.models import EmailLog, Notification
+
+        legacy_event_key = or_(
+            Notification.event_key.like("%:legacy"),
+            Notification.event_key.like("%:legacy:admin:%"),
+        )
+        legacy_email_key = or_(
+            EmailLog.event_key.like("%:legacy"),
+            EmailLog.event_key.like("%:legacy:admin:%"),
+        )
+        with app.app_context():
+            email_result = db.session.execute(
+                delete(EmailLog).where(
+                    EmailLog.status == "queued",
+                    legacy_email_key,
+                )
+            )
+            notification_result = db.session.execute(
+                delete(Notification).where(
+                    Notification.category == "admin_event",
+                    legacy_event_key,
+                )
+            )
+            db.session.commit()
+        click.echo(
+            f"Deleted {notification_result.rowcount or 0} legacy admin notification(s) "
+            f"and {email_result.rowcount or 0} queued email log(s)."
+        )
 
     @app.cli.command("grant-admin")
     @click.argument("email")

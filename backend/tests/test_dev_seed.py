@@ -27,6 +27,7 @@ from memorybook.models import (
     PdfOrder,
     PrintOrder,
     PrintQuote,
+    ProjectAsset,
     PricingTier,
     ProjectRevision,
     ShippingRate,
@@ -69,7 +70,7 @@ def test_demo_catalog_seed_is_previewed_idempotent_and_complete(app, client, tmp
         assert len(templates) == 12
         assert len(variants) == 108
         assert len(projects) == 3
-        assert all(product.is_active and product.currency == "PKR" for product in products)
+        assert all(product.is_active and product.currency == "USD" for product in products)
         assert all(product.collection_id for product in products)
         assert all(template.is_active and template.published_design_document for template in templates)
         assert all(project.product_id and project.template_id and project.status == "draft" for project in projects)
@@ -110,12 +111,12 @@ def test_demo_catalog_seed_is_previewed_idempotent_and_complete(app, client, tmp
                 "phone": "+920000000000",
             },
         )
-        assert quote["currency"] == "PKR"
-        assert quote["bookPrice"] == "5900.00"
-        assert quote["printingCharge"] == "2650.00"
+        assert quote["currency"] == "USD"
+        assert quote["bookPrice"] == "30.00"
+        assert quote["printingCharge"] == "10.00"
         assert quote["additionalPages"] == "0.00"
-        assert quote["shipping"] == "350.00"
-        assert quote["total"] == "8900.00"
+        assert quote["shipping"] == "5.99"
+        assert quote["total"] == "45.99"
         assert db.session.scalar(select(db.func.count()).select_from(PrintOrder)) == 0
         assert db.session.scalar(select(db.func.count()).select_from(PrintQuote)) == 1
 
@@ -194,7 +195,7 @@ def test_migrated_seeded_books_quote_every_available_print_combination(tmp_path)
         "ENVIRONMENT": "testing",
         "MIGRATIONS_DIRECTORY": str(migrations),
         "CORS_ORIGINS": [],
-        "PAYMENT_DEFAULT_CURRENCY": "PKR",
+        "PAYMENT_DEFAULT_CURRENCY": "USD",
         "LOG_LEVEL": "CRITICAL",
         "ASSET_STORAGE_BACKEND": "filesystem",
         "ASSET_LOCAL_DIRECTORY": str(tmp_path / "assets"),
@@ -230,6 +231,28 @@ def test_migrated_seeded_books_quote_every_available_print_combination(tmp_path)
             Image.new("RGB", (900, 1100), color="#cdbb9c").save(small_art, format="PNG")
             small_art.seek(0)
             storage.upload(key, small_art, "image/png")
+        seeded_customer_project = db.session.scalar(
+            select(UserProject).where(
+                UserProject.product_id == product.id,
+                UserProject.title == f"Demo draft: {product.title}",
+            )
+        )
+        seeded_customer_project_id = seeded_customer_project.id
+        seeded_project_art = db.session.scalars(
+            select(ProjectAsset).where(ProjectAsset.project_id == seeded_customer_project.id)
+        ).all()
+        for project_asset in seeded_project_art:
+            if project_asset.original_filename in {
+                "demo-our-family-story-cover.png",
+                "demo-our-family-story-gallery.png",
+            }:
+                small_art = BytesIO()
+                Image.new("RGB", (900, 1100), color="#cdbb9c").save(small_art, format="PNG")
+                small_art.seek(0)
+                storage.upload(project_asset.storage_key, small_art, "image/png")
+                project_asset.width_px = 900
+                project_asset.height_px = 1100
+        db.session.commit()
 
     with app.app_context(), app.test_request_context("/seed-demo-catalog"):
         from memorybook.demo_catalog import seed_demo_catalog
@@ -250,8 +273,20 @@ def test_migrated_seeded_books_quote_every_available_print_combination(tmp_path)
         } == set(product.admin_metadata["previewImageKeys"][:2])
         for asset in template.published_design_document["assets"]:
             with Image.open(BytesIO(get_asset_storage().download(asset["assetKey"]))) as image:
-                assert image.width >= 3600
-                assert image.height >= 4400
+                assert image.width >= 4200
+                assert image.height >= 5133
+        repaired_project_assets = db.session.scalars(
+            select(ProjectAsset).where(ProjectAsset.project_id == seeded_customer_project_id)
+        ).all()
+        for asset in repaired_project_assets:
+            if asset.original_filename in {
+                "demo-our-family-story-cover.png",
+                "demo-our-family-story-gallery.png",
+            }:
+                assert asset.width_px >= 4200
+                assert asset.height_px >= 5133
+                with Image.open(BytesIO(get_asset_storage().download(asset.storage_key))) as image:
+                    assert min(image.size) >= 4200
 
     outbox = []
     app.extensions["auth_email_outbox"] = outbox
@@ -411,6 +446,60 @@ def test_migrated_seeded_books_quote_every_available_print_combination(tmp_path)
                     DownloadEntitlement.generated_file_id == generated_file.id,
                 )
             ) is not None
+
+    with app.app_context():
+        seeded_project = db.session.scalar(
+            select(UserProject)
+            .join(BookProduct, BookProduct.id == UserProject.product_id)
+            .where(
+                BookProduct.slug == "demo-our-family-story",
+                UserProject.title == "Demo draft: Our Family Story",
+            )
+        )
+        seeded_revision = create_revision(seeded_project, seeded_project.version)
+        seeded_order = PdfOrder(
+            order_number="PDF-SEEDED-CUSTOMER-PROJECT",
+            user_id=seeded_project.user_id,
+            project_id=seeded_project.id,
+            project_revision_id=seeded_revision.id,
+            status="paid",
+            currency="PKR",
+            service_price=Decimal("850.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("850.00"),
+            price_snapshot={"printPdfIncluded": True},
+            page_count=seeded_project.page_count,
+            paid_at=datetime.now(UTC),
+        )
+        db.session.add(seeded_order)
+        db.session.flush()
+        db.session.add(Payment(
+            user_id=seeded_project.user_id,
+            pdf_order_id=seeded_order.id,
+            provider="manual",
+            status="successful",
+            amount=seeded_order.total_amount,
+            currency=seeded_order.currency,
+        ))
+        seeded_jobs = [
+            PdfJob(order_id=seeded_order.id, generation_profile=profile, status="queued")
+            for profile in ("digital", "print")
+        ]
+        db.session.add_all(seeded_jobs)
+        db.session.commit()
+        assert app.config.get("PDF_MIN_PRINT_DPI", 300) == 300
+        for job in seeded_jobs:
+            result = generate_pdf_job(job.id)
+            assert result["status"] == "ready"
+            generated_file = db.session.scalar(
+                select(GeneratedFile).where(
+                    GeneratedFile.pdf_order_id == seeded_order.id,
+                    GeneratedFile.generation_profile == job.generation_profile,
+                )
+            )
+            assert generated_file is not None
+            assert generated_file.byte_size > 0
 
 
 def test_demo_catalog_seed_requires_explicit_apply_confirmation(app):

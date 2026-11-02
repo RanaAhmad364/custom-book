@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertCircle, FilePlus2, Plus, Save } from "lucide-react";
 import { SafeImage } from "../../components/common/SafeImage.jsx";
-import { loadAdminBookReferences, loadAdminPrintOrderPdf, loadAdminSection, loadPrivatePrintOrderPhotos } from "./adminService.js";
+import { loadAdminBookReferences, loadAdminPrintOrderPdf, loadAdminSection, loadPrivatePrintOrderPhotos, retryAdminPrintOrderPdf } from "./adminService.js";
 import { categoryFormPayload, validateCategoryRecord } from "./categoryForm.js";
 import { validatePricingRecord } from "./pricingForm.js";
 import { apiUrl } from "../../services/apiClient.js";
@@ -19,6 +19,25 @@ function labelFor(key) {
   return key.replace(/([A-Z])/g, " $1").replace(/^./, (letter) => letter.toUpperCase());
 }
 
+async function retryPrintPdf() {
+  setPrintPdfRetrying(true);
+  setPrintPdfError("");
+  try {
+    const job = await retryAdminPrintOrderPdf(record.id);
+    setRecord((current) => ({
+      ...current,
+      printPdf: {
+        ...current.printPdf,
+        print: { status: job.status, error: null },
+      },
+    }));
+  } catch (failure) {
+    setPrintPdfError(failure instanceof Error ? failure.message : "The print PDF could not be retried.");
+  } finally {
+    setPrintPdfRetrying(false);
+  }
+}
+
 function Input({ label, value, onChange, type = "text", required = false, ...props }) {
   return <label className="admin-form-field">
     <span>{label}{required ? " *" : ""}</span>
@@ -32,7 +51,7 @@ function Select({ label, value, options, onChange, required = false, multiple = 
     <select required={required} multiple={multiple} value={multiple ? (value ?? []) : (value ?? "")} onChange={(event) => onChange(multiple
       ? Array.from(event.target.selectedOptions, (option) => option.value)
       : event.target.value)}>
-      {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+      {options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
     </select>
   </label>;
 }
@@ -167,7 +186,7 @@ function FormFields({ section, record, update, categories = [], books = [], pric
     return <>
       <Input label="Setting key" required value={record.key} onChange={(value) => update("key", value)} maxLength={120} />
       {record.key === "paypal_pkr_to_usd_rate"
-        ? <p className="admin-form-hint">PayPal PKR to USD rate: set the USD amount for 1 PKR as JSON, for example {"{\"rate\":\"0.0036\"}"}.</p>
+        ? <p className="admin-form-hint">Future PKR checkout rate: set the USD amount for 1 PKR as JSON, for example {"{\"rate\":\"0.0036\"}"}.</p>
         : null}
       <Textarea label="Configuration object (JSON)" rows={8} value={settingValueText} onChange={(value) => {
         setSettingValueText(value);
@@ -191,9 +210,17 @@ function FormFields({ section, record, update, categories = [], books = [], pric
   }
 
   if (section === "pdf-orders" || section === "print-orders") {
+    const printPdfReady = record.printPdf?.print?.status === "ready";
     const options = section === "pdf-orders"
       ? ["cancellation_requested", "cancelled"]
-      : PRINT_ORDER_STATUSES;
+      : PRINT_ORDER_STATUSES.map((status) => ({
+        value: status,
+        label: labelFor(status),
+        disabled: !printPdfReady && [
+          "processing", "printed", "design_verified", "in_production",
+          "quality_check", "packed", "shipped", "out_for_delivery", "delivered",
+        ].includes(status),
+      }));
     return <>
       <div className="admin-detail-grid">
         <ReadOnlyValue label="Order reference" value={record.orderNumber} />
@@ -207,8 +234,11 @@ function FormFields({ section, record, update, categories = [], books = [], pric
         {section === "print-orders" ? <ReadOnlyValue label="Configuration" value={record.configuration} /> : null}
         {section === "print-orders" ? <ReadOnlyValue label="Price snapshot" value={record.priceSnapshot} /> : null}
         {section === "print-orders" ? <ReadOnlyValue label="Delivery address" value={formatDeliveryAddress(record.deliveryAddress)} /> : null}
+        {section === "print-orders" ? <ReadOnlyValue label="Print consent recorded" value={record.consentAt ? new Date(record.consentAt).toLocaleString() : "Not recorded"} /> : null}
       </div>
-      <Select label="Order status" value={record.status} options={options.map((status) => ({ value: status, label: labelFor(status) }))} onChange={(value) => update("status", value)} />
+      <Select label="Order status" value={record.status} options={section === "pdf-orders"
+        ? options.map((status) => ({ value: status, label: labelFor(status) }))
+        : options} onChange={(value) => update("status", value)} />
       {section === "print-orders" ? <>
         <Input label="Carrier" value={record.carrier} onChange={(value) => update("carrier", value)} maxLength={100} />
         <Input label="Tracking number" value={record.trackingNumber} onChange={(value) => update("trackingNumber", value)} maxLength={160} />
@@ -370,6 +400,7 @@ export default function AdminRecordEditor({ section, record, setRecord, onSave, 
   const [privatePhotosError, setPrivatePhotosError] = useState("");
   const [printPdfLoading, setPrintPdfLoading] = useState(false);
   const [printPdfError, setPrintPdfError] = useState("");
+  const [printPdfRetrying, setPrintPdfRetrying] = useState(false);
   const readOnly = ["users", "payments", "refunds", "notifications"].includes(section);
   const title = record.title || record.name || record.email || record.orderNumber || record.ticketNumber || record.code || record.key || "Record details";
   const imageTarget = section === "templates" ? "previewAssetKey" : "heroAssetKey";
@@ -520,9 +551,10 @@ export default function AdminRecordEditor({ section, record, setRecord, onSave, 
         <strong>Print PDF</strong>
         <p>Generation status: {labelFor(record.printPdf?.print?.status || "not started")}</p>
         {record.printPdf?.print?.error?.message ? <p role="alert">{record.printPdf.print.error.message}</p> : null}
+        {record.printPdf?.print?.status === "failed" ? <button type="button" className="button button-outline" onClick={retryPrintPdf} disabled={printPdfRetrying}>{printPdfRetrying ? "Retrying…" : "Retry print PDF"}</button> : null}
       </div>
       <button className="admin-button admin-button-secondary" type="button"
-        disabled={printPdfLoading || record.printPdf?.print?.status !== "completed"}
+        disabled={printPdfLoading || record.printPdf?.print?.status !== "ready"}
         onClick={() => void downloadPrintPdf()}>
         {printPdfLoading ? "Preparing download…" : "Download print PDF"}
       </button>

@@ -7,6 +7,7 @@ test("pricing record defaults cover each supported create form", () => {
     const record = pricingRecordDefaults(kind);
     assert.equal(record.kind, kind);
     assert.equal(record.__create, true);
+    if ("currency" in record) assert.equal(record.currency, "USD");
   }
 });
 

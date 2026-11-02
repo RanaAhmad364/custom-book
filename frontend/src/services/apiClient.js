@@ -19,13 +19,22 @@ const AUTH_PATHS_WITHOUT_REFRESH = new Set([
 let refreshInFlight;
 
 export class ApiError extends Error {
-  constructor(message, { status, code, details } = {}) {
+  constructor(message, { status, code, details, retryAfterMs } = {}) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.details = details;
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+function retryAfterMilliseconds(value) {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
 }
 
 function refreshSession() {
@@ -84,6 +93,9 @@ export async function apiRequest(path, {
         status: response.status,
         code: payload?.error?.code,
         details: payload?.error?.details,
+        retryAfterMs: response.status === 429
+          ? retryAfterMilliseconds(response.headers.get("Retry-After"))
+          : undefined,
       },
     );
   }

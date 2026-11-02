@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import io
 import json
 import re
 import time
@@ -14,6 +15,7 @@ from memorybook.extensions import db
 from memorybook.integrations.payment_gateways import (
     CheckoutSession,
     PayPalGateway,
+    PayPalOrderAlreadyCaptured,
     StripeGateway,
     available_payment_methods,
     pkr_amount_to_usd,
@@ -22,6 +24,7 @@ from memorybook.integrations.payment_gateways import (
 )
 from memorybook.models import (
     DownloadEntitlement,
+    EmailLog,
     GeneratedFile,
     Invoice,
     Payment,
@@ -32,7 +35,9 @@ from memorybook.models import (
     Notification,
     ProjectRevision,
     Refund,
+    Role,
     User,
+    UserRole,
     UserProject,
 )
 from memorybook.services import payments
@@ -130,6 +135,23 @@ def test_manual_payment_methods_are_disabled_by_default(app):
             PAYPAL_WEBHOOK_ID=None,
         )
         assert available_payment_methods("PKR") == []
+
+
+def test_usd_payment_methods_offer_paypal_without_webhook_configuration(app):
+    with app.app_context():
+        app.config.update(
+            PAYMENT_PRIMARY_GATEWAY="paypal",
+            PAYPAL_MODE="sandbox",
+            PAYPAL_CLIENT_ID="server-client",
+            PAYPAL_CLIENT_SECRET="server-secret",
+            PAYPAL_WEBHOOK_ID=None,
+        )
+        assert available_payment_methods("USD") == [{
+            "provider": "paypal",
+            "method": "paypal_checkout",
+            "label": "PayPal",
+        }]
+        assert provider_for("USD").name == "paypal"
 
 
 def test_paypal_method_and_admin_rate_setting_are_server_configured(app, monkeypatch):
@@ -481,11 +503,44 @@ def test_paypal_smart_button_rejects_mismatched_capture_amount(app, monkeypatch)
                 value="9.99",
             ),
         )
-        with pytest.raises(ValidationError, match="amount or currency"):
-            payments.capture_paypal_order(payment, created["paypalOrderId"])
-        db.session.rollback()
+        result = payments.capture_paypal_order(payment, created["paypalOrderId"])
         db.session.expire_all()
-        assert db.session.get(Payment, payment_id).status == "pending"
+        reviewed = db.session.get(Payment, payment_id)
+        assert result["status"] == "needs_review"
+        assert reviewed.status == "needs_review"
+        assert reviewed.provider_capture_id == "PAYPAL-SMART-CAPTURE"
+        assert reviewed.provider_capture_amount == Decimal("9.99")
+        assert reviewed.provider_capture_currency == "USD"
+        assert db.session.get(PdfOrder, order_id).paid_at is None
+
+
+def test_paypal_smart_button_rejects_wrong_order_reference(app, monkeypatch):
+    app.config.update(PAYPAL_MODE="sandbox", PAYPAL_CLIENT_ID="client", PAYPAL_CLIENT_SECRET="secret")
+    with app.app_context():
+        payment_id, order_id = _make_smart_paypal_payment()
+        payment = db.session.get(Payment, payment_id)
+        monkeypatch.setattr(
+            PayPalGateway,
+            "create_smart_order",
+            lambda *_args: "PAYPAL-WRONG-REFERENCE",
+        )
+        created = payments.create_paypal_order(payment)
+        monkeypatch.setattr(
+            PayPalGateway,
+            "capture_order",
+            lambda *_args: _paypal_completed_capture(
+                "PAYPAL-WRONG-REFERENCE",
+                "ANOTHER-ORDER-NUMBER",
+            ),
+        )
+
+        result = payments.capture_paypal_order(payment, created["paypalOrderId"])
+
+        db.session.expire_all()
+        reviewed = db.session.get(Payment, payment_id)
+        assert result["status"] == "needs_review"
+        assert reviewed.status == "needs_review"
+        assert reviewed.provider_capture_id == "PAYPAL-SMART-CAPTURE"
         assert db.session.get(PdfOrder, order_id).paid_at is None
 
 
@@ -612,8 +667,9 @@ def test_paypal_approved_order_captures_and_marks_paid_once(app, monkeypatch):
     def capture_order(_self, paypal_order_id, idempotency_key):
         captures.append((paypal_order_id, idempotency_key))
         return {
+            "id": paypal_order_id,
             "status": "COMPLETED",
-            "purchase_units": [{"payments": {"captures": [{
+            "purchase_units": [{"reference_id": "PDF-PAYMENT-TEST", "payments": {"captures": [{
                 "id": "PAYPAL-CAPTURE-1",
                 "status": "COMPLETED",
                 "amount": {"currency_code": "USD", "value": "10.08"},
@@ -645,7 +701,7 @@ def test_paypal_approved_order_captures_and_marks_paid_once(app, monkeypatch):
         assert [row.status for row in history] == ["paid"]
 
 
-def test_paypal_wrong_capture_amount_does_not_mark_order_paid(app, monkeypatch):
+def test_paypal_wrong_capture_amount_needs_review_and_preserves_capture(app, monkeypatch):
     with app.app_context():
         payment_id, order_id = _make_paypal_payment()
     event = {
@@ -661,19 +717,24 @@ def test_paypal_wrong_capture_amount_does_not_mark_order_paid(app, monkeypatch):
         PayPalGateway,
         "capture_order",
         lambda *_args: {
+            "id": "PAYPAL-ORDER-1",
             "status": "COMPLETED",
-            "purchase_units": [{"payments": {"captures": [{
+            "purchase_units": [{"reference_id": "PDF-PAYMENT-TEST", "payments": {"captures": [{
                 "id": "PAYPAL-CAPTURE-WRONG",
+                "status": "COMPLETED",
                 "amount": {"currency_code": "USD", "value": "9.99"},
             }]}}],
         },
     )
-    with app.app_context(), pytest.raises(ValidationError, match="amount or currency"):
-        payments.process_paypal_event(json.dumps(event).encode(), _paypal_headers())
-        db.session.rollback()
     with app.app_context():
+        result = payments.process_paypal_event(json.dumps(event).encode(), _paypal_headers())
         db.session.expire_all()
-        assert db.session.get(Payment, payment_id).status == "pending"
+        payment = db.session.get(Payment, payment_id)
+        assert result["needsReview"] is True
+        assert payment.status == "needs_review"
+        assert payment.provider_capture_id == "PAYPAL-CAPTURE-WRONG"
+        assert payment.provider_capture_amount == Decimal("9.99")
+        assert payment.provider_capture_currency == "USD"
         assert db.session.get(PdfOrder, order_id).paid_at is None
 
 
@@ -798,6 +859,166 @@ def test_new_paypal_payment_snapshots_pkr_usd_and_admin_rate(app, monkeypatch):
         assert payment.usd_amount == Decimal("10.36")
         assert payment.exchange_rate == Decimal("0.00370000")
         assert result["usdAmount"] == "10.36"
+
+
+def test_new_usd_paypal_payment_is_charged_without_conversion(app, monkeypatch):
+    app.config.update(
+        PAYPAL_MODE="sandbox",
+        PAYPAL_CLIENT_ID="server-client-id",
+        PAYPAL_CLIENT_SECRET="server-only-secret",
+    )
+    with app.app_context():
+        captured_amounts = []
+        old_payment_id, order_id, _ = _make_pdf_payment(paid=False, currency="USD")
+        db.session.delete(db.session.get(Payment, old_payment_id))
+        db.session.flush()
+        order = db.session.get(PdfOrder, order_id)
+        order.total_amount = Decimal("8.00")
+
+        result = payments.create_payment(order, "pdf", "paypal", "new-usd-paypal-payment")
+        payment = db.session.scalar(
+            db.select(Payment).where(Payment.pdf_order_id == order_id)
+        )
+        monkeypatch.setattr(
+            PayPalGateway,
+            "create_smart_order",
+            lambda _self, received_payment, *_args: captured_amounts.append(received_payment.usd_amount) or "USD-ORDER",
+        )
+        payments.create_paypal_order(payment)
+
+        assert result["paymentProvider"] == "paypal"
+        assert payment.amount == Decimal("8.00")
+        assert payment.currency == "USD"
+        assert payment.pkr_amount is None
+        assert payment.usd_amount == Decimal("8.00")
+        assert payment.exchange_rate is None
+        assert result["usdAmount"] == "8.00"
+        assert captured_amounts == [Decimal("8.00")]
+
+
+def test_paypal_order_already_captured_response_is_classified(app, monkeypatch):
+    from urllib.error import HTTPError
+
+    error_body = json.dumps({
+        "name": "UNPROCESSABLE_ENTITY",
+        "details": [{"issue": "ORDER_ALREADY_CAPTURED"}],
+    }).encode()
+    error = HTTPError("https://api-m.sandbox.paypal.com", 422, "Unprocessable", {}, io.BytesIO(error_body))
+    monkeypatch.setattr("memorybook.integrations.payment_gateways.urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(error))
+    with app.app_context(), pytest.raises(PayPalOrderAlreadyCaptured):
+        from memorybook.integrations.payment_gateways import _read_json_response
+
+        _read_json_response(None, "PayPal")
+
+
+def test_paypal_order_not_approved_has_a_clear_error(app, monkeypatch):
+    from urllib.error import HTTPError
+
+    error_body = json.dumps({
+        "name": "UNPROCESSABLE_ENTITY",
+        "details": [{"issue": "ORDER_NOT_APPROVED"}],
+    }).encode()
+    error = HTTPError("https://api-m.sandbox.paypal.com", 422, "Unprocessable", {}, io.BytesIO(error_body))
+    monkeypatch.setattr("memorybook.integrations.payment_gateways.urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(error))
+    from memorybook.integrations.payment_gateways import _read_json_response
+
+    with app.app_context(), pytest.raises(ConflictError, match="was not approved"):
+        _read_json_response(None, "PayPal")
+
+
+def test_paypal_already_captured_order_not_in_database_moves_to_review(app, monkeypatch):
+    app.config.update(PAYPAL_MODE="sandbox", PAYPAL_CLIENT_ID="client", PAYPAL_CLIENT_SECRET="secret")
+    with app.app_context():
+        payment_id, _ = _make_smart_paypal_payment()
+        payment = db.session.get(Payment, payment_id)
+        monkeypatch.setattr(PayPalGateway, "create_smart_order", lambda *_args: "PAYPAL-ALREADY-CAPTURED")
+        created = payments.create_paypal_order(payment)
+        monkeypatch.setattr(
+            PayPalGateway,
+            "capture_order",
+            lambda *_args: (_ for _ in ()).throw(PayPalOrderAlreadyCaptured()),
+        )
+        generated = []
+        monkeypatch.setattr(payments, "_queue_pdf_generation", lambda item: generated.append(item.id))
+
+        completed = payments.capture_paypal_order(payment, created["paypalOrderId"])
+
+        assert completed["status"] == "needs_review"
+        assert payment.status == "needs_review"
+        assert generated == []
+        assert payment.provider_capture_id is None
+
+
+def test_paypal_approved_webhook_marks_unknown_already_captured_order_for_review(app, monkeypatch):
+    app.config.update(PAYPAL_MODE="sandbox", PAYPAL_CLIENT_ID="client", PAYPAL_CLIENT_SECRET="secret")
+    event = {}
+    with app.app_context():
+        payment_id, _ = _make_smart_paypal_payment()
+        payment = db.session.get(Payment, payment_id)
+        monkeypatch.setattr(PayPalGateway, "create_smart_order", lambda *_args: "PAYPAL-WEBHOOK-ALREADY-CAPTURED")
+        created = payments.create_paypal_order(payment)
+        event.update({
+            "id": "WH-APPROVED-ALREADY-CAPTURED",
+            "event_type": "CHECKOUT.ORDER.APPROVED",
+            "resource": {
+                "id": created["paypalOrderId"],
+                "custom_id": payment.id,
+                "purchase_units": [{"reference_id": "PDF-PAYMENT-TEST"}],
+            },
+        })
+        monkeypatch.setattr(
+            PayPalGateway,
+            "handle_webhook",
+            lambda *_args: event,
+        )
+        monkeypatch.setattr(
+            PayPalGateway,
+            "capture_order",
+            lambda *_args: (_ for _ in ()).throw(PayPalOrderAlreadyCaptured()),
+        )
+        generation_calls = []
+        monkeypatch.setattr(payments, "_queue_pdf_generation", lambda item: generation_calls.append(item.id))
+
+        result = payments.process_paypal_event(json.dumps(event).encode(), _paypal_headers())
+        duplicate = payments.process_paypal_event(json.dumps(event).encode(), _paypal_headers())
+
+        assert result["needsReview"] is True
+        assert duplicate["ignored"] is True
+        assert payment.status == "needs_review"
+        assert payment.provider_capture_id is None
+        assert generation_calls == []
+
+
+def test_paypal_capture_uses_a_payment_row_lock_to_serialize_competing_captures(app, monkeypatch):
+    app.config.update(PAYPAL_MODE="sandbox", PAYPAL_CLIENT_ID="client", PAYPAL_CLIENT_SECRET="secret")
+    with app.app_context():
+        payment_id, _ = _make_smart_paypal_payment()
+        payment = db.session.get(Payment, payment_id)
+        monkeypatch.setattr(PayPalGateway, "create_smart_order", lambda *_args: "PAYPAL-PARALLEL-CAPTURE")
+        created = payments.create_paypal_order(payment)
+        monkeypatch.setattr(
+            PayPalGateway,
+            "capture_order",
+            lambda *_args: _paypal_completed_capture(
+                created["paypalOrderId"],
+                "PDF-PAYMENT-TEST",
+                capture_id="PAYPAL-PARALLEL-CAPTURE-ID",
+            ),
+        )
+        observed_locks = []
+        original_scalar = db.session.scalar
+
+        def capture_locked_select(statement, *args, **kwargs):
+            if getattr(statement, "_for_update_arg", None) is not None:
+                observed_locks.append(statement)
+            return original_scalar(statement, *args, **kwargs)
+
+        monkeypatch.setattr(db.session, "scalar", capture_locked_select)
+        result = payments.capture_paypal_order(payment, created["paypalOrderId"])
+
+        assert result["status"] == "successful"
+        assert observed_locks
+        assert observed_locks[0]._for_update_arg is not None
 
 
 def test_paypal_refund_uses_the_payment_rate_snapshot(app, monkeypatch):
@@ -970,7 +1191,7 @@ def test_stripe_webhook_requires_valid_signature_and_matches_order_amount(app, m
 
 def test_successful_refund_revokes_pdf_entitlement_and_supports_remaining_balance(app, monkeypatch):
     with app.app_context():
-        payment_id, _, download_id = _make_pdf_payment(paid=True)
+        payment_id, order_id, download_id = _make_pdf_payment(paid=True)
     provider_calls = []
 
     def fake_refund(self, payment, amount, key):
@@ -990,7 +1211,14 @@ def test_successful_refund_revokes_pdf_entitlement_and_supports_remaining_balanc
 
         full = payments.request_refund(payment_id, Decimal("5.00"), "Remaining balance", "refund-2")
         assert full["status"] == "succeeded"
-        assert db.session.get(Payment, payment_id).status == "refunded"
+        payment = db.session.get(Payment, payment_id)
+        assert payment.status == "refunded"
+        from memorybook.services.pdf_generation import create_download_link, project_pdf_access
+
+        project_id = db.session.get(PdfOrder, order_id).project_id
+        assert project_pdf_access(project_id, payment.user_id)["state"] != "ready"
+        with pytest.raises(ConflictError, match="revoked"):
+            create_download_link(payment.user_id, download_id, None)
     assert len(provider_calls) == 2
 
 
@@ -1110,3 +1338,106 @@ def test_customer_refund_request_is_owned_reserved_and_admin_approvable(app):
             )
         approved = payments.approve_refund_request(request["id"])
         assert approved["status"] == "manual_required"
+
+
+def test_successful_pdf_payment_queues_only_expected_admin_events_once(app):
+    with app.app_context():
+        admin_role = Role(name="admin", description="Admin", is_system=True)
+        admin = User(email="pdf-payment-events-admin@example.test", password_hash="test-hash")
+        db.session.add_all([admin_role, admin])
+        db.session.flush()
+        db.session.add(UserRole(user_id=admin.id, role_id=admin_role.id))
+        db.session.flush()
+
+        payment_id, order_id, _ = _make_pdf_payment(
+            paid=False,
+            email="pdf-payment-events-customer@example.test",
+        )
+        payment = db.session.get(Payment, payment_id)
+        payments._apply_payment_result(
+            payment,
+            success=True,
+            provider_reference="pdf-event-capture",
+        )
+        db.session.commit()
+
+        payments._apply_payment_result(
+            db.session.get(Payment, payment_id),
+            success=True,
+            provider_reference="pdf-event-capture",
+        )
+        db.session.commit()
+
+        event_notifications = [
+            item
+            for item in db.session.scalars(
+                db.select(Notification).where(Notification.user_id == admin.id)
+            ).all()
+            if (item.data or {}).get("event", "").startswith(("payment_confirmed:", "pdf_purchased:", "payment_failed:"))
+        ]
+        assert sorted(item.title for item in event_notifications) == ["PDF purchased", "Payment confirmed"]
+        pdf_notice = next(item for item in event_notifications if item.title == "PDF purchased")
+        assert order_id not in pdf_notice.message
+        assert "PDF-PAYMENT-TEST" in pdf_notice.message
+
+        event_emails = [
+            item
+            for item in db.session.scalars(
+                db.select(EmailLog).where(EmailLog.user_id == admin.id)
+            ).all()
+            if item.event_key.startswith(("payment_confirmed:", "pdf_purchased:", "payment_failed:"))
+        ]
+        assert len(event_emails) == 2
+        assert {item.event_key for item in event_emails} == {item.event_key for item in event_notifications}
+
+
+def test_cleanup_legacy_payment_failure_events_removes_notices_and_queued_emails(app):
+    with app.app_context():
+        user = User(email="legacy-event-cleanup@example.test", password_hash="test-hash")
+        db.session.add(user)
+        db.session.flush()
+        legacy_event_key = f"payment_failed:payment-1:legacy:admin:{user.id}"
+        orphan_email_key = f"payment_failed:payment-2:legacy:admin:{user.id}"
+        db.session.add_all([
+            Notification(
+                user_id=user.id,
+                category="admin_event",
+                title="Payment failed",
+                message="Legacy false alert",
+                event_key=legacy_event_key,
+            ),
+            EmailLog(
+                user_id=user.id,
+                recipient_email=user.email,
+                template_key="payment_failed",
+                status="queued",
+                event_key=legacy_event_key,
+            ),
+            EmailLog(
+                user_id=user.id,
+                recipient_email=user.email,
+                template_key="payment_failed",
+                status="queued",
+                event_key=orphan_email_key,
+            ),
+        ])
+        db.session.commit()
+
+    runner = app.test_cli_runner()
+    result = runner.invoke(args=["cleanup-legacy-payment-failure-events"])
+    assert result.exit_code == 0, result.output
+    assert "Deleted 1 legacy admin notification(s) and 2 queued email log(s)." in result.output
+    with app.app_context():
+        assert db.session.scalar(
+            db.select(Notification.id).where(Notification.event_key == legacy_event_key)
+        ) is None
+        assert db.session.scalar(
+            db.select(EmailLog.id).where(EmailLog.event_key == legacy_event_key)
+        ) is None
+        assert db.session.scalar(
+            db.select(EmailLog.id).where(EmailLog.event_key == orphan_email_key)
+        ) is None
+
+    repeated = runner.invoke(args=["cleanup-legacy-payment-failure-events"])
+    assert repeated.exit_code == 0, repeated.output
+    assert "Deleted 0 legacy admin notification(s) and 0 queued email log(s)." in repeated.output
