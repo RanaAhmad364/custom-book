@@ -176,6 +176,7 @@ export function PrintOrderFlow() {
   const [methodsError, setMethodsError] = useState("");
   const [selectedMethod, setSelectedMethod] = useState(null);
   const [paypalCheckoutOrder, setPaypalCheckoutOrder] = useState(null);
+  const [paymentNeedsReview, setPaymentNeedsReview] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [consentAccepted, setConsentAccepted] = useState(false);
@@ -268,7 +269,12 @@ export function PrintOrderFlow() {
       }, configuration.address).then((updatedQuote) => {
         if (active) setQuote(updatedQuote);
       }).catch((failure) => {
-        if (active) setQuoteError(failure instanceof Error ? failure.message : "A current print quote could not be loaded.");
+        if (active && failure?.code === "PAYMENT_NEEDS_REVIEW") {
+          setPaymentNeedsReview(true);
+          setQuoteError("");
+        } else if (active) {
+          setQuoteError(failure instanceof Error ? failure.message : "A current print quote could not be loaded.");
+        }
       }).finally(() => {
         if (active) setQuoteLoading(false);
       });
@@ -354,7 +360,12 @@ export function PrintOrderFlow() {
       }
       navigate(`/print/orders/${encodeURIComponent(order.id)}/processing`, { replace: true });
     } catch (failure) {
-      setSubmitError(failure instanceof Error ? failure.message : "Your print checkout could not be started.");
+      if (failure?.code === "PAYMENT_NEEDS_REVIEW") {
+        setPaymentNeedsReview(true);
+        setSubmitError("");
+      } else {
+        setSubmitError(failure instanceof Error ? failure.message : "Your print checkout could not be started.");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -383,6 +394,7 @@ export function PrintOrderFlow() {
     <LoadError loading={loading} error={projectError} onRetry={reload} />
     {!loading && !projectError && project ? <>
       <BookSummary project={project} />
+      {paymentNeedsReview ? <p className="print-inline-error" role="status">A payment for this book needs review. Please do not pay again; contact MemoryBook support.</p> : null}
       {storageError ? <p className="print-inline-error" role="alert"><CircleAlert size={15} />{storageError}</p> : null}
       {availabilityLoading ? <div className="print-message" role="status"><LoaderCircle className="print-spin" size={18} /> Checking print availability…</div> : null}
       {availabilityError ? <div className="print-message print-error" role="alert"><CircleAlert size={18} /><span>{availabilityError}</span></div> : null}
@@ -412,15 +424,15 @@ export function PrintOrderFlow() {
 
           {step === "checkout" ? <><h2>Print order summary</h2><div className="print-choice-summary"><div><span>Tier</span><strong>{configuration.tier.toUpperCase()}</strong></div><div><span>Paper</span><strong>{paperOptions.find((item) => item.id === configuration.paper)?.title}</strong></div><div><span>Cover</span><strong>{coverOptions.find((item) => item.id === configuration.cover)?.title}</strong></div><div><span>Quantity</span><strong>{configuration.quantity}</strong></div><div><span>Delivery to</span><strong>{configuration.address.fullName}<br />{configuration.address.line1}, {configuration.address.city} {configuration.address.postalCode}</strong></div></div><label className="print-discount-field">Discount code<input value={configuration.discountCode} maxLength={80} autoCapitalize="characters" onChange={(event) => updateConfiguration({ discountCode: event.target.value })} placeholder="Enter code (optional)" /></label><p className="print-discount-note">Your code is validated by the server and reflected in the refreshed quote.</p><button className="print-refresh-quote" type="button" onClick={() => updateConfiguration({})} disabled={quoteLoading}><RefreshCw size={14} /> Refresh server quote</button><label className="print-consent"><input type="checkbox" checked={consentAccepted} onChange={(event) => setConsentAccepted(event.target.checked)} /><span>My book and delivery address will be shared with the MemoryBook team for printing.</span></label></> : null}
 
-          {step === "checkout" ? <><QuoteBreakdown quote={quote} /><PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading || Boolean(paypalCheckoutOrder)} pkrAmount={quote?.total} usdAmount={quote?.usdAmount} exchangeRate={quote?.exchangeRate} />{methodsError ? <p className="print-inline-error" role="alert">{methodsError}</p> : null}{paypalCheckoutOrder && selectedMethod?.provider === "paypal" ? <PayPalSmartCheckout paymentId={paypalCheckoutOrder.paymentId} pkrAmount={paypalCheckoutOrder.pkrAmount ?? quote?.total} usdAmount={paypalCheckoutOrder.usdAmount ?? quote?.usdAmount} onRetry={retryPaypalCheckout} onSuccess={() => navigate(`/print/orders/${encodeURIComponent(paypalCheckoutOrder.id)}/processing`, { replace: true })} /> : null}</> : null}
+          {step === "checkout" ? <><QuoteBreakdown quote={quote} />{paymentNeedsReview ? <p className="print-inline-error" role="status">A payment for this book needs review. Please do not pay again; contact MemoryBook support.</p> : <PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading || Boolean(paypalCheckoutOrder)} />}{methodsError ? <p className="print-inline-error" role="alert">{methodsError}</p> : null}{paypalCheckoutOrder && selectedMethod?.provider === "paypal" ? <PayPalSmartCheckout paymentId={paypalCheckoutOrder.paymentId} orderCurrency={paypalCheckoutOrder.currency} pkrAmount={paypalCheckoutOrder.pkrAmount} exchangeRate={paypalCheckoutOrder.exchangeRate} usdAmount={paypalCheckoutOrder.usdAmount} onRetry={retryPaypalCheckout} onSuccess={() => navigate(`/print/orders/${encodeURIComponent(paypalCheckoutOrder.id)}/processing`, { replace: true })} /> : null}</> : null}
           {quoteLoading ? <div className="print-message"><LoaderCircle className="print-spin" size={18} /> Requesting a current quote from the printing service…</div> : null}
-          {quoteError ? <div className="print-message print-error" role="alert"><CircleAlert size={18} /><span>{quoteError}</span><button className="button button-outline" type="button" onClick={() => updateConfiguration({})}><RefreshCw size={14} /> Try quote again</button></div> : null}
+          {quoteError ? <div className="print-message print-error" role="alert"><CircleAlert size={18} /><span>{quoteError}</span>{!paymentNeedsReview ? <button className="button button-outline" type="button" onClick={() => updateConfiguration({})}><RefreshCw size={14} /> Try quote again</button> : null}</div> : null}
           {step !== "checkout" && step !== "shipping" ? <QuoteBreakdown quote={quote} compact /> : null}
           {submitError ? <p className="print-inline-error" role="alert"><CircleAlert size={16} />{submitError}</p> : null}
 
           <div className="print-step-actions">
             {stepIndex > 0 ? <Link className="button button-outline" to={`/create/design/${encodeURIComponent(projectId)}/print${previousStep.id === "print" ? "" : `/${previousStep.id}`}`}><ArrowLeft size={15} /> Back</Link> : <Link className="button button-outline" to={`/create/design/${encodeURIComponent(projectId)}`}><ArrowLeft size={15} /> Back to editor</Link>}
-            {step === "checkout" && !paypalCheckoutOrder ? <button className="button button-dark" type="button" onClick={placeOrder} disabled={submitting || quoteLoading || methodsLoading || !quote || !selectedMethod}>{submitting ? <><LoaderCircle className="print-spin" size={16} /> Starting secure checkout…</> : <>Continue to payment <ArrowRight size={15} /></>}</button>
+            {step === "checkout" && !paypalCheckoutOrder && !paymentNeedsReview ? <button className="button button-dark" type="button" onClick={placeOrder} disabled={submitting || quoteLoading || methodsLoading || !quote || !selectedMethod}>{submitting ? <><LoaderCircle className="print-spin" size={16} /> Starting secure checkout…</> : <>Continue to payment <ArrowRight size={15} /></>}</button>
               : step === "checkout" || step === "shipping" ? null
                 : <Link className="button button-dark" aria-disabled={availabilityLoading || Boolean(availabilityError) || !matchingOptions.length}
                   onClick={(event) => {
@@ -456,8 +468,9 @@ function usePrintOrder(orderId) {
         if (!active) return;
         setOrder(item);
         setError("");
-        if ((!item.paymentExpired && item.paymentStatus === "pending")
-          || !["delivered", "cancelled", "refunded"].includes(item.productionStatus)) {
+        if (item.paymentStatus !== "needs_review"
+          && ((!item.paymentExpired && item.paymentStatus === "pending")
+            || !["delivered", "cancelled", "refunded"].includes(item.productionStatus))) {
           timer = window.setTimeout(load, 15000);
         }
       } catch (failure) {
@@ -555,7 +568,7 @@ export function PrintOrderResult() {
 
   return <main className="print-order-page print-result-page">
     <Link to="/print/orders" className="print-back-link"><ArrowLeft size={15} /> All print orders</Link>
-    <PageHeading eyebrow={isTracking ? "Delivery updates" : "Print order"} title={isTracking ? "Follow your book home." : order?.paymentStatus === "successful" ? "Your book is in good hands." : "Checking your order."} description={isTracking ? "Production and delivery updates are retrieved from your order record." : "Your order and payment are confirmed by the printing service, never by this browser."} />
+    <PageHeading eyebrow={isTracking ? "Delivery updates" : "Print order"} title={order?.paymentStatus === "needs_review" ? "Payment needs review." : isTracking ? "Follow your book home." : order?.paymentStatus === "successful" ? "Your book is in good hands." : "Checking your order."} description={isTracking ? "Production and delivery updates are retrieved from your order record." : "Your order and payment are confirmed by the printing service, never by this browser."} />
     <OrderState loading={loading && !order} error={error} onRefresh={refresh} />
     {order ? <>
       <section className="print-order-status-card">
@@ -567,7 +580,7 @@ export function PrintOrderResult() {
       </section>
       <ManualPaymentPanel order={order} onSubmitted={refresh} />
       {order.paymentStatus === "needs_review" ? <div className="print-message" role="status"><CircleAlert size={18} /><span>Your PayPal payment needs review. Please do not pay again; the MemoryBook team will review it.</span></div> : null}
-      {order.paymentStatus === "pending" && !order.paymentExpired && order.paymentProvider === "paypal" ? <PayPalSmartCheckout paymentId={order.paymentId} pkrAmount={order.pkrAmount ?? order.amount ?? order.quote?.total} usdAmount={order.usdAmount} onRetry={retryCheckout} onSuccess={() => navigate(`/print/orders/${encodeURIComponent(order.id)}/processing`, { replace: true })} /> : null}
+      {order.paymentStatus === "pending" && !order.paymentExpired && order.paymentProvider === "paypal" ? <PayPalSmartCheckout paymentId={order.paymentId} orderCurrency={order.currency} pkrAmount={order.pkrAmount} exchangeRate={order.exchangeRate} usdAmount={order.usdAmount} onRetry={retryCheckout} onSuccess={() => navigate(`/print/orders/${encodeURIComponent(order.id)}/processing`, { replace: true })} /> : null}
       <section className="print-timeline-card"><div className="print-timeline-heading"><div><span className="eyebrow">{isTracking ? "Live order progress" : "What happens next"}</span><h2>{productionSteps[statusIndex]?.[1] || "Order status"}</h2></div><button className="print-refresh-quote" type="button" onClick={refresh}><RefreshCw size={14} /> Refresh status</button></div>
         <ol className="print-production-timeline">{productionSteps.map(([id, label], index) => <li className={index < statusIndex ? "complete" : index === statusIndex ? "current" : ""} key={id}><span>{index < statusIndex ? <Check size={13} /> : index === statusIndex ? <PackageCheck size={13} /> : null}</span><div><strong>{label}</strong>{id === "shipped" && order.trackingNumber ? <small>Tracking number: {order.trackingNumber}</small> : null}</div></li>)}</ol>
       </section>

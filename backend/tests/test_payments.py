@@ -23,6 +23,8 @@ from memorybook.integrations.payment_gateways import (
     provider_for,
 )
 from memorybook.models import (
+    BookCategory,
+    BookProduct,
     DownloadEntitlement,
     EmailLog,
     GeneratedFile,
@@ -41,6 +43,7 @@ from memorybook.models import (
     UserProject,
 )
 from memorybook.services import payments
+from memorybook.services import orders as order_services
 from werkzeug.exceptions import NotFound
 
 
@@ -122,7 +125,7 @@ def test_payment_methods_fail_closed_for_unverified_pkr_gateways(app, client):
     response = client.get("/api/v1/payments/methods?currency=PKR")
     assert response.status_code == 200
     assert response.json["currency"] == "PKR"
-    assert response.json["primaryGateway"] == "payfast"
+    assert response.json["primaryGateway"] == "manual"
     assert {method["provider"] for method in response.json["items"]} == {"manual"}
 
 
@@ -135,6 +138,68 @@ def test_manual_payment_methods_are_disabled_by_default(app):
             PAYPAL_WEBHOOK_ID=None,
         )
         assert available_payment_methods("PKR") == []
+
+
+def test_payment_methods_return_the_configured_available_paypal_provider(app, client):
+    app.config.update(
+        PAYMENT_PRIMARY_GATEWAY="manual",
+        PAYPAL_MODE="sandbox",
+        PAYPAL_CLIENT_ID="paypal-client",
+        PAYPAL_CLIENT_SECRET="paypal-secret",
+        STRIPE_ENABLED=False,
+        MANUAL_PAYMENTS_ENABLED=False,
+    )
+    response = client.get("/api/v1/payments/methods?currency=USD")
+    assert response.status_code == 200
+    assert [item["provider"] for item in response.json["items"]] == ["paypal"]
+    assert response.json["primaryGateway"] == "paypal"
+
+
+def test_needs_review_payment_blocks_new_orders_and_payments_for_project(app):
+    with app.app_context():
+        payment_id, order_id = _make_smart_paypal_payment()
+        payment = db.session.get(Payment, payment_id)
+        order = db.session.get(PdfOrder, order_id)
+        payment.status = "needs_review"
+        project = db.session.get(UserProject, order.project_id)
+        category = BookCategory(name="Review test", slug="needs-review-test")
+        db.session.add(category)
+        db.session.flush()
+        product = BookProduct(
+            category_id=category.id,
+            title="Review test book",
+            slug="needs-review-test-book",
+            description="Test product",
+            starting_price=Decimal("5.00"),
+            currency="USD",
+        )
+        db.session.add(product)
+        db.session.flush()
+        project.product_id = product.id
+        db.session.commit()
+
+        with pytest.raises(ConflictError) as pdf_order_error:
+            order_services.create_pdf_order(
+                project.id, project.user_id, "new-pdf-order", "paypal",
+            )
+        assert pdf_order_error.value.error_code == "PAYMENT_NEEDS_REVIEW"
+
+        with pytest.raises(ConflictError) as print_order_error:
+            order_services.create_print_order(
+                project.id,
+                project.user_id,
+                {"tier": "basic", "paper": "standard", "cover": "hardcover", "quantity": 1},
+                {},
+                "unused-quote",
+                "new-print-order",
+                "paypal",
+                consent_accepted=True,
+            )
+        assert print_order_error.value.error_code == "PAYMENT_NEEDS_REVIEW"
+
+        with pytest.raises(ConflictError) as payment_error:
+            payments.create_payment(order, "pdf", "paypal", "new-payment")
+        assert payment_error.value.error_code == "PAYMENT_NEEDS_REVIEW"
 
 
 def test_usd_payment_methods_offer_paypal_without_webhook_configuration(app):

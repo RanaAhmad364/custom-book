@@ -5,7 +5,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from werkzeug.exceptions import NotFound
 
@@ -37,6 +37,25 @@ from memorybook.models import (
 from memorybook.services.notifications import queue_order_event
 
 
+def ensure_project_payment_not_needs_review(project_id: str) -> None:
+    reviewed_pdf_orders = select(PdfOrder.id).where(PdfOrder.project_id == project_id)
+    reviewed_print_orders = select(PrintOrder.id).where(PrintOrder.project_id == project_id)
+    payment_id = db.session.scalar(
+        select(Payment.id).where(
+            Payment.status == "needs_review",
+            or_(
+                Payment.pdf_order_id.in_(reviewed_pdf_orders),
+                Payment.print_order_id.in_(reviewed_print_orders),
+            ),
+        ).limit(1)
+    )
+    if payment_id is not None:
+        raise ConflictError(
+            "A payment for this book needs review. Please do not pay again; contact MemoryBook support.",
+            error_code="PAYMENT_NEEDS_REVIEW",
+        )
+
+
 def create_payment(
     order: PdfOrder | PrintOrder,
     kind: str,
@@ -44,6 +63,7 @@ def create_payment(
     idempotency_key: str,
     payment_method: str | None = None,
 ) -> dict:
+    ensure_project_payment_not_needs_review(order.project_id)
     payment = db.session.scalar(
         select(Payment).where(
             (Payment.pdf_order_id == order.id) if kind == "pdf" else (Payment.print_order_id == order.id)

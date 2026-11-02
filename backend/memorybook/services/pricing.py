@@ -30,6 +30,15 @@ def default_currency() -> str:
     return str(current_app.config.get("PAYMENT_DEFAULT_CURRENCY", "USD")).upper()
 
 
+def currency_mismatch_message(data_currency: str) -> str:
+    configured = default_currency()
+    actual = data_currency.upper()
+    return (
+        f"PAYMENT_DEFAULT_CURRENCY is {configured} but the data is {actual}: "
+        f"set PAYMENT_DEFAULT_CURRENCY={actual} in backend/.env."
+    )
+
+
 def plan_code(book_type: str | None) -> str:
     code = (book_type or "BASIC").strip().upper()
     return "BASIC" if code in {"LIGHT", "BASIC"} else code
@@ -58,7 +67,7 @@ def validate_product_pricing(product, *, admin=False) -> dict:
     if currency != default_currency():
         error = ValidationError if admin else ConflictError
         raise error(
-            f"Book pricing must use the configured {default_currency()} currency.",
+            currency_mismatch_message(currency),
             {"currency": "mismatch"},
         )
     code = plan_code(product.book_type)
@@ -126,11 +135,12 @@ def calculate_book_price(
     quantity: int = 1,
     shipping: Decimal = Decimal("0.00"),
     discount: Decimal = Decimal("0.00"),
+    shipping_per_copy: bool = False,
 ) -> dict[str, Decimal | int]:
     extras = max(0, page_count - base_page_count)
     base = (base_price * quantity).quantize(CENT, rounding=ROUND_HALF_UP)
     additional = (extra_page_price * extras * quantity).quantize(CENT, rounding=ROUND_HALF_UP)
-    shipping_total = (shipping * quantity).quantize(CENT, rounding=ROUND_HALF_UP)
+    shipping_total = (shipping * (quantity if shipping_per_copy else 1)).quantize(CENT, rounding=ROUND_HALF_UP)
     discount_total = min(discount.quantize(CENT, rounding=ROUND_HALF_UP), base + additional)
     total = (base + additional + shipping_total - discount_total).quantize(CENT, rounding=ROUND_HALF_UP)
     return {

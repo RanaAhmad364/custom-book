@@ -111,6 +111,7 @@ def test_initial_migration_upgrades_database(tmp_path):
         assert "alembic_version" in inspector.get_table_names()
         assert "code" in {column["name"] for column in inspector.get_columns("cover_types")}
         assert "code" in {column["name"] for column in inspector.get_columns("paper_types")}
+        assert "per_copy" in {column["name"] for column in inspector.get_columns("shipping_rates")}
         assert {
             "full_name",
             "phone",

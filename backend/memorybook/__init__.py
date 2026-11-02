@@ -236,6 +236,26 @@ def _register_cli_commands(app: Flask) -> None:
     @app.cli.command("config-check")
     def config_check() -> None:
         """Validate backend configuration without printing secret values."""
+        from sqlalchemy import inspect, select
+
+        from memorybook.models import BookProduct, BookVariant, DiscountCode, PricingTier, ShippingRate
+
+        configured_currency = str(app.config.get("PAYMENT_DEFAULT_CURRENCY", "USD")).upper()
+        existing_tables = set(inspect(db.engine).get_table_names())
+        data_currencies: set[str] = set()
+        for model in (BookProduct, BookVariant, DiscountCode, PricingTier, ShippingRate):
+            if model.__tablename__ in existing_tables:
+                data_currencies.update(
+                    currency.upper()
+                    for currency in db.session.scalars(
+                        select(model.currency).where(model.currency.is_not(None)).distinct()
+                    ).all()
+                )
+        for currency in sorted(currency for currency in data_currencies if currency != configured_currency):
+            click.echo(
+                f"Warning: PAYMENT_DEFAULT_CURRENCY is {configured_currency} but the data is {currency}: "
+                f"set PAYMENT_DEFAULT_CURRENCY={currency} in backend/.env."
+            )
         click.echo("Backend configuration is valid.")
 
     @app.cli.command("retry-failed-jobs")

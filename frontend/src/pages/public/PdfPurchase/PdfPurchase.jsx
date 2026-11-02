@@ -91,6 +91,7 @@ export function PdfCheckout() {
   const [submitError, setSubmitError] = useState("");
   const [selectedMethod, setSelectedMethod] = useState(null);
   const [paypalCheckoutOrder, setPaypalCheckoutOrder] = useState(null);
+  const [paymentNeedsReview, setPaymentNeedsReview] = useState(false);
   useEffect(() => {
     let active = true;
     setPaymentMethods([]);
@@ -130,7 +131,12 @@ export function PdfCheckout() {
       }
       navigate(`/pdf/orders/${encodeURIComponent(order.id)}/processing`, { replace: true });
     } catch (failure) {
-      setSubmitError(failure instanceof Error ? failure.message : "Checkout could not be started.");
+      if (failure?.code === "PAYMENT_NEEDS_REVIEW") {
+        setPaymentNeedsReview(true);
+        setSubmitError("");
+      } else {
+        setSubmitError(failure instanceof Error ? failure.message : "Checkout could not be started.");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -141,11 +147,11 @@ export function PdfCheckout() {
   }
   return <PdfPage eyebrow="Secure checkout" title="Your PDF, ordered with care." description="The server determines the final charge and payment status. This browser cannot mark an order paid or unlock a file.">
     <LoadState loading={loading} error={error} onRetry={reload} />
-    {project && !loading && !error ? <><PdfProjectCard project={project} price={price} />    <section className="pdf-checkout-card"><LockKeyhole size={20} /><div><h2>Payment verification</h2><p>Continue to create a payment order. Payment remains pending until verified by the backend; PDF generation starts only after that confirmation.</p><strong>{formatPrice(price.amount, price.currency)} due</strong><PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading || Boolean(paypalCheckoutOrder)} pkrAmount={price.amount} usdAmount={price.usdAmount} exchangeRate={price.exchangeRate} />{methodsError ? <p className="pdf-inline-error" role="alert">{methodsError}</p> : null}</div></section>{submitError ? <p className="pdf-inline-error" role="alert"><CircleAlert size={16} />{submitError}</p> : null}{paypalCheckoutOrder && selectedMethod?.provider === "paypal" ? <PayPalSmartCheckout paymentId={paypalCheckoutOrder.paymentId} pkrAmount={paypalCheckoutOrder.pkrAmount ?? price.amount} usdAmount={paypalCheckoutOrder.usdAmount ?? price.usdAmount} onRetry={retryPaypalCheckout} onSuccess={() => navigate(`/pdf/orders/${encodeURIComponent(paypalCheckoutOrder.id)}/processing`, { replace: true })} /> : null}<div className="pdf-actions"><Link className="button button-outline" to={`/create/design/${projectId}/pdf/summary`}><ArrowLeft size={15} /> Back to summary</Link>{!paypalCheckoutOrder ? <button className="button button-dark" type="button" onClick={submitOrder} disabled={submitting || !price || methodsLoading || !selectedMethod}>{submitting ? <><LoaderCircle className="pdf-spin" size={16} /> Starting checkout…</> : <>Continue to payment <ArrowRight size={15} /></>}</button> : null}</div></> : null}
+    {project && !loading && !error ? <><PdfProjectCard project={project} price={price} />    <section className="pdf-checkout-card"><LockKeyhole size={20} /><div><h2>Payment verification</h2><p>Continue to create a payment order. Payment remains pending until verified by the backend; PDF generation starts only after that confirmation.</p><strong>{formatPrice(price.amount, price.currency)} due</strong>{paymentNeedsReview ? <p className="pdf-inline-error" role="status">A payment for this book needs review. Please do not pay again; contact MemoryBook support.</p> : <PaymentMethodSelect methods={paymentMethods} value={selectedMethod?.id ?? ""} onChange={setSelectedMethod} loading={methodsLoading || Boolean(paypalCheckoutOrder)} />}{methodsError ? <p className="pdf-inline-error" role="alert">{methodsError}</p> : null}</div></section>{submitError ? <p className="pdf-inline-error" role="alert"><CircleAlert size={16} />{submitError}</p> : null}{paypalCheckoutOrder && selectedMethod?.provider === "paypal" ? <PayPalSmartCheckout paymentId={paypalCheckoutOrder.paymentId} orderCurrency={paypalCheckoutOrder.currency} pkrAmount={paypalCheckoutOrder.pkrAmount} exchangeRate={paypalCheckoutOrder.exchangeRate} usdAmount={paypalCheckoutOrder.usdAmount} onRetry={retryPaypalCheckout} onSuccess={() => navigate(`/pdf/orders/${encodeURIComponent(paypalCheckoutOrder.id)}/processing`, { replace: true })} /> : null}<div className="pdf-actions"><Link className="button button-outline" to={`/create/design/${projectId}/pdf/summary`}><ArrowLeft size={15} /> Back to summary</Link>{!paypalCheckoutOrder && !paymentNeedsReview ? <button className="button button-dark" type="button" onClick={submitOrder} disabled={submitting || !price || methodsLoading || !selectedMethod}>{submitting ? <><LoaderCircle className="pdf-spin" size={16} /> Starting checkout…</> : <>Continue to payment <ArrowRight size={15} /></>}</button> : null}</div></> : null}
   </PdfPage>;
 }
 
-const paymentLabels = { pending: "Payment pending", successful: "Payment successful", failed: "Payment failed" };
+const paymentLabels = { pending: "Payment pending", successful: "Payment successful", failed: "Payment failed", needs_review: "Payment needs review" };
 const generationLabels = { queued: "Generation queued", generating: "Generating PDF", ready: "PDF ready", failed: "Generation failed", not_started: "Waiting for payment confirmation" };
 
 export function PdfOrderProcessing() {
@@ -243,14 +249,15 @@ export function PdfOrderProcessing() {
       setRetrying(false);
     }
   }
-  return <PdfPage eyebrow="Order status" title={downloadable ? "Your PDF is ready." : "We’re checking on your book."} description="Payment and generation states below are read from the backend order record.">
+  return <PdfPage eyebrow="Order status" title={order?.paymentStatus === "needs_review" ? "Payment needs review." : downloadable ? "Your PDF is ready." : "We’re checking on your book."} description="Payment and generation states below are read from the backend order record.">
     {loading && !order ? <div className="pdf-state"><LoaderCircle className="pdf-spin" size={20} /> Checking payment and generation status…</div> : null}
     {pollingMessage ? <p className="pdf-inline-message" role="status">{pollingMessage}</p> : null}
     {error ? <div className="pdf-state pdf-error" role="alert"><CircleAlert size={20} /><span>{error}</span><button className="button button-outline" type="button" onClick={() => { setLoading(true); setRefreshKey((value) => value + 1); }}><RefreshCw size={15} /> Check again</button></div> : null}
     {order ? <><div className="pdf-status-card"><div className="pdf-state-row"><span><span className="eyebrow">Payment</span><strong>{paymentLabels[order.paymentStatus]}</strong></span>{order.paymentStatus === "successful" ? <BadgeCheck /> : order.paymentStatus === "failed" ? <CircleAlert /> : <Clock3 />}</div><div className="pdf-state-row"><span><span className="eyebrow">PDF generation</span><strong>{generationLabels[order.generationStatus]}</strong></span>{order.generationStatus === "ready" ? <Check /> : order.generationStatus === "failed" ? <CircleAlert /> : <LoaderCircle className={order.generationStatus === "generating" || order.generationStatus === "queued" ? "pdf-spin" : ""} />}</div><div className="pdf-status-meta"><span>Order {order.id}</span>{order.amount !== null ? <strong>{formatPrice(order.amount, order.currency)}</strong> : null}</div></div>
       <ManualPaymentPanel order={order} onSubmitted={() => { setLoading(true); setRefreshKey((value) => value + 1); }} />
+      {order.paymentStatus === "needs_review" ? <p className="pdf-inline-error" role="status">Your payment needs review. Please do not pay again; the MemoryBook team will review it.</p> : null}
       {order.paymentStatus === "failed" ? <div className="pdf-inline-error" role="alert"><span>Payment was not confirmed. No PDF is available.</span><button className="button button-outline" type="button" onClick={retryCheckout} disabled={retrying}>{retrying ? "Starting retry…" : "Retry payment"}</button>{retryError ? <span>{retryError}</span> : null}</div> : null}
-      {order.paymentStatus === "pending" && order.paymentProvider === "paypal" ? <PayPalSmartCheckout paymentId={order.paymentId} pkrAmount={order.pkrAmount ?? order.amount} usdAmount={order.usdAmount} onRetry={retryCheckout} onSuccess={() => navigate(`/pdf/orders/${encodeURIComponent(order.id)}/processing`, { replace: true })} /> : null}
+      {order.paymentStatus === "pending" && order.paymentProvider === "paypal" ? <PayPalSmartCheckout paymentId={order.paymentId} orderCurrency={order.currency} pkrAmount={order.pkrAmount} exchangeRate={order.exchangeRate} usdAmount={order.usdAmount} onRetry={retryCheckout} onSuccess={() => navigate(`/pdf/orders/${encodeURIComponent(order.id)}/processing`, { replace: true })} /> : null}
       {order.generationStatus === "failed" && order.paymentStatus === "successful" ? <p className="pdf-inline-error" role="alert">Payment is valid, but PDF generation failed. Use the retry option to generate it again without paying again.</p> : null}
       {downloadable ? <div className="pdf-actions"><Link className="button button-outline" to={`/pdf/downloads/${encodeURIComponent(order.id)}`}>View download details <ArrowRight size={15} /></Link><ProjectPdfAccessAction projectId={order.projectId} className="button button-dark" /></div> : <div className="pdf-actions"><ProjectPdfAccessAction projectId={order.projectId} className="button button-outline" /><button className="button button-outline" type="button" onClick={() => { setLoading(true); setRefreshKey((value) => value + 1); }}><RefreshCw size={15} /> Refresh status</button><Link className="pdf-text-link" to="/dashboard/downloads">PDF download history</Link></div>}
     </> : null}

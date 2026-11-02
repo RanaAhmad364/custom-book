@@ -62,6 +62,8 @@ test("shipping validation accepts country-level rates and rejects invalid delive
   assert.equal(validatePricingRecord("shipping", shipping).estimatedDaysMax,
     "Maximum delivery days must be at least the minimum.");
   assert.deepEqual(validatePricingRecord("shipping", { ...shipping, estimatedDaysMax: 10 }), {});
+  assert.equal(pricingRecordDefaults("shipping").perCopy, false);
+  assert.ok(validatePricingRecord("shipping", { ...shipping, estimatedDaysMax: 10, perCopy: "yes" }).perCopy);
 });
 
 test("variant validation requires a complete, non-negative priced configuration", () => {

@@ -32,7 +32,7 @@ export const paypalPaymentService = {
       method: "POST",
       body: { paypalOrderId },
     });
-    if (!data || !["successful", "failed"].includes(data.status)) {
+    if (!data || !["successful", "failed", "needs_review"].includes(data.status)) {
       throw new Error("Payment service returned an invalid PayPal capture status.");
     }
     return data;

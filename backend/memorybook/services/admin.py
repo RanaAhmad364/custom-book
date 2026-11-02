@@ -65,7 +65,11 @@ from memorybook.services.catalog_projects import (
     serialize_template,
 )
 from memorybook.services.notifications import queue_order_event
-from memorybook.services.pricing import default_currency, validate_product_pricing
+from memorybook.services.pricing import (
+    currency_mismatch_message,
+    default_currency,
+    validate_product_pricing,
+)
 
 ADMIN_PRINT_STATES = {
     "pending_payment",
@@ -2178,6 +2182,7 @@ def list_pricing() -> dict:
             "serviceName": x.service_name,
             "price": str(x.price),
             "currency": x.currency,
+            "perCopy": x.per_copy,
             "estimatedDaysMin": x.estimated_days_min,
             "estimatedDaysMax": x.estimated_days_max,
             "active": x.is_active,
@@ -2214,7 +2219,7 @@ def _pricing_currency(value, field: str = "currency") -> str:
         raise ValidationError(f"{field} must be a three-letter currency code.", {field: "invalid"})
     if currency != default_currency():
         raise ValidationError(
-            f"{field} must use the configured {default_currency()} currency.",
+            currency_mismatch_message(currency),
             {field: "mismatch"},
         )
     return currency
@@ -2285,6 +2290,9 @@ def create_pricing(kind: str, data: dict) -> dict:
             raise ConflictError("A shipping service already exists for this destination.", {"serviceCode": "duplicate"})
         minimum_days = _positive_int(data.get("estimatedDaysMin"), "estimatedDaysMin", optional=True)
         maximum_days = _positive_int(data.get("estimatedDaysMax"), "estimatedDaysMax", optional=True)
+        per_copy = data.get("perCopy", False)
+        if not isinstance(per_copy, bool):
+            raise ValidationError("perCopy must be a boolean.", {"perCopy": "invalid"})
         if minimum_days and maximum_days and maximum_days < minimum_days:
             raise ValidationError("Maximum delivery days must be at least the minimum.", {"estimatedDaysMax": "invalid_range"})
         item = ShippingRate(
@@ -2294,6 +2302,7 @@ def create_pricing(kind: str, data: dict) -> dict:
             service_name=_text(data, "serviceName", required=True, maximum=100),
             price=_money(data.get("price"), "price"),
             currency=_pricing_currency(data.get("currency", default_currency())),
+            per_copy=per_copy,
             estimated_days_min=minimum_days,
             estimated_days_max=maximum_days,
             is_active=active,
@@ -2403,6 +2412,10 @@ def update_pricing(kind: str, item_id: str, data: dict) -> dict:
             item.service_code = _text(data, "serviceCode", required=True, maximum=40)
         if "currency" in data:
             item.currency = _pricing_currency(data["currency"])
+        if "perCopy" in data:
+            if not isinstance(data["perCopy"], bool):
+                raise ValidationError("perCopy must be a boolean.", {"perCopy": "invalid"})
+            item.per_copy = data["perCopy"]
         if "estimatedDaysMin" in data:
             item.estimated_days_min = _positive_int(data["estimatedDaysMin"], "estimatedDaysMin", optional=True)
         if "estimatedDaysMax" in data:

@@ -1,14 +1,64 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ChevronLeft, ChevronRight, Expand, ImageOff, Minimize, X } from "lucide-react";
 import { CoverArtwork } from "./CoverArtwork.jsx";
+import { fetchPrivateImage, isPrivateAssetUrl } from "../../services/privateImageLoader.js";
 
 function PageImage({ element, style, previewWidth, imageLoading, onAssetError }) {
+  const frameRef = useRef(null);
   const [status, setStatus] = useState(element.src ? "loading" : "missing");
+  const [shouldLoad, setShouldLoad] = useState(imageLoading !== "lazy");
+  const [privateImageUrl, setPrivateImageUrl] = useState("");
+  const privateUrl = isPrivateAssetUrl(element.src);
+
   useEffect(() => {
     setStatus(element.src ? "loading" : "missing");
   }, [element.src]);
 
-  return <span className={`book-preview-element book-preview-photo-frame${status === "loading" ? " is-loading" : ""}${status === "error" || status === "missing" ? " is-unavailable" : ""}`} style={{
+  useEffect(() => {
+    if (imageLoading !== "lazy") {
+      setShouldLoad(true);
+      return undefined;
+    }
+    setShouldLoad(false);
+    const frame = frameRef.current;
+    if (!frame || typeof IntersectionObserver === "undefined") {
+      setShouldLoad(true);
+      return undefined;
+    }
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        setShouldLoad(true);
+        observer.disconnect();
+      }
+    });
+    observer.observe(frame);
+    return () => observer.disconnect();
+  }, [element.src, imageLoading]);
+
+  useEffect(() => {
+    setPrivateImageUrl("");
+    if (!privateUrl || !shouldLoad) return undefined;
+    let active = true;
+    let objectUrl = "";
+    setStatus("loading");
+    fetchPrivateImage(element.src, {
+      refreshSource: () => onAssetError?.(element.assetId, element.src),
+    }).then(({ blob }) => {
+      if (!active) return;
+      objectUrl = URL.createObjectURL(blob);
+      setPrivateImageUrl(objectUrl);
+    }).catch((failure) => {
+      if (!active) return;
+      setStatus("error");
+      if (!failure?.refreshed) onAssetError?.(element.assetId, element.src);
+    });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [element.assetId, element.src, onAssetError, privateUrl, shouldLoad]);
+
+  return <span ref={frameRef} className={`book-preview-element book-preview-photo-frame${status === "loading" ? " is-loading" : ""}${status === "error" || status === "missing" ? " is-unavailable" : ""}`} style={{
     ...style,
     border: element.borderWidth ? `${element.borderWidth * previewWidth}px solid ${element.borderColor ?? "#fffdf9"}` : undefined,
     borderRadius: element.borderRadius ? `${element.borderRadius * previewWidth}px` : undefined,
@@ -16,21 +66,21 @@ function PageImage({ element, style, previewWidth, imageLoading, onAssetError })
   }}>
     {status === "loading" ? <span className="book-preview-image-skeleton" aria-hidden="true" /> : null}
     {status === "error" || status === "missing" ? <span className="book-preview-image-fallback" aria-label={status === "missing" ? "Image unavailable" : "Image could not be loaded"}><ImageOff size={14} /></span> : null}
-    {element.src ? <img
+    {element.src && shouldLoad ? <img
       className={`book-preview-photo${status === "loaded" ? " is-loaded" : ""}`}
       style={{
         objectFit: element.fit === "contain" ? "contain" : "cover",
         objectPosition: `${(element.cropX ?? 0.5) * 100}% ${(element.cropY ?? 0.5) * 100}%`,
         transform: `scale(${element.fit === "contain" ? 1 : element.zoom ?? 1})`,
       }}
-      src={element.src}
+      src={privateUrl ? privateImageUrl || undefined : element.src}
       alt={element.name ?? ""}
       loading={imageLoading}
       decoding="async"
       onLoad={() => setStatus("loaded")}
       onError={() => {
         setStatus("error");
-        onAssetError?.(element.assetId, element.src);
+        if (!privateUrl) onAssetError?.(element.assetId, element.src);
       }}
     /> : null}
   </span>;

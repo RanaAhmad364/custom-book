@@ -1,7 +1,10 @@
 from pathlib import Path
+from decimal import Decimal
 
 import pytest
 
+from memorybook.extensions import db
+from memorybook.models import PricingTier
 
 def test_live_health_and_security_headers(client):
     response = client.get("/api/v1/health/live", headers={"X-Request-ID": "qa-request_13"})
@@ -166,6 +169,23 @@ def test_backend_cli_checks_are_registered(app):
     assert "configuration is valid" in config_result.output
     assert database_result.exit_code == 0
     assert "Database connection successful" in database_result.output
+
+
+def test_config_check_warns_with_actionable_catalog_currency_guidance(app):
+    app.config["PAYMENT_DEFAULT_CURRENCY"] = "USD"
+    with app.app_context():
+        db.session.add(PricingTier(
+            code="CONFIG-CHECK-PKR",
+            name="Legacy PKR tier",
+            base_price=Decimal("1000.00"),
+            currency="PKR",
+        ))
+        db.session.commit()
+
+    result = app.test_cli_runner().invoke(args=["config-check"])
+    assert result.exit_code == 0
+    assert "PAYMENT_DEFAULT_CURRENCY is USD but the data is PKR" in result.output
+    assert "set PAYMENT_DEFAULT_CURRENCY=PKR in backend/.env" in result.output
 
 
 def test_local_app_uses_in_process_jobs_without_redis_or_celery(app):

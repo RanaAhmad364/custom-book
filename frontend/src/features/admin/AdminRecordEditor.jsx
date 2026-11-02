@@ -333,6 +333,7 @@ function FormFields({ section, record, update, categories = [], books = [], pric
       <Input label="Currency" required value={record.currency} maxLength={3} onChange={(value) => update("currency", value.toUpperCase())} />
       <Input label="Minimum delivery days" type="number" min="1" step="1" value={record.estimatedDaysMin} onChange={(value) => update("estimatedDaysMin", value === "" ? "" : Number(value))} />
       <Input label="Maximum delivery days" type="number" min="1" step="1" value={record.estimatedDaysMax} onChange={(value) => update("estimatedDaysMax", value === "" ? "" : Number(value))} />
+      <Toggle label="Charge shipping per copy" checked={record.perCopy} onChange={(value) => update("perCopy", value)} />
       <Toggle label="Active" checked={record.active} onChange={(value) => update("active", value)} />
     </div>;
     if (record.kind === "size") return <div className="admin-form-grid">

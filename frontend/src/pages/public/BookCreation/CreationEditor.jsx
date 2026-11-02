@@ -336,9 +336,13 @@ function CreationEditorSession({ adminMode }) {
   }, []);
 
   const refreshAssetUrls = useCallback((assetId, failedSource) => {
-    if (!assetId || assetRefreshRef.current) return assetRefreshRef.current;
+    if (!assetId) return Promise.resolve(undefined);
     const activeSource = documentRef.current?.assets?.find((asset) => asset.id === assetId)?.src;
-    if (activeSource && activeSource !== failedSource) return Promise.resolve();
+    if (activeSource && activeSource !== failedSource) return Promise.resolve(activeSource);
+    if (assetRefreshRef.current) {
+      return assetRefreshRef.current.then(() =>
+        documentRef.current?.assets?.find((asset) => asset.id === assetId)?.src);
+    }
 
     const request = (async () => {
       try {
@@ -354,8 +358,10 @@ function CreationEditorSession({ adminMode }) {
         } else if (latest?.assets?.find((asset) => asset.id === assetId)?.src === failedSource) {
           setSaveError("A page image could not be loaded. Its secure preview link could not be refreshed; reload the editor or sign in again.");
         }
+        return documentRef.current?.assets?.find((asset) => asset.id === assetId)?.src;
       } catch {
         setSaveError("A page image could not be loaded. Its secure preview link could not be refreshed; reload the editor or sign in again.");
+        return undefined;
       } finally {
         assetRefreshRef.current = null;
       }

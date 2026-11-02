@@ -89,6 +89,23 @@ def test_discounts_and_shipping_are_accounted_for_by_the_price_calculator(app):
     assert quote["total"] == Decimal("570.00")
 
 
+def test_shipping_is_charged_once_per_order_unless_rate_is_per_copy(app):
+    with app.app_context():
+        per_order = calculate_book_price(
+            Decimal("40.00"), 24, 24, Decimal("0.00"),
+            quantity=2, shipping=Decimal("45.99"),
+        )
+        per_copy = calculate_book_price(
+            Decimal("40.00"), 24, 24, Decimal("0.00"),
+            quantity=2, shipping=Decimal("45.99"), shipping_per_copy=True,
+        )
+
+    assert per_order["shipping"] == Decimal("45.99")
+    assert per_order["total"] == Decimal("125.99")
+    assert per_copy["shipping"] == Decimal("91.98")
+    assert per_copy["total"] == Decimal("171.98")
+
+
 def test_configured_currency_and_plan_page_rules_are_enforced(app):
     product = SimpleNamespace(
         currency="USD",
@@ -105,3 +122,17 @@ def test_configured_currency_and_plan_page_rules_are_enforced(app):
             validate_order_page_count(product, 51, print_order=True)
         with pytest.raises(ConflictError, match="cannot exceed"):
             validate_order_page_count(product, 81)
+
+
+def test_catalog_currency_mismatch_error_identifies_the_configuration_to_change(app):
+    product = SimpleNamespace(
+        currency="PKR",
+        book_type="BASIC",
+        page_count_min=24,
+        page_count_max=80,
+        admin_metadata={"basePageCount": 24},
+    )
+    with app.app_context(), pytest.raises(ConflictError) as failure:
+        validate_order_page_count(product, 24)
+    assert "PAYMENT_DEFAULT_CURRENCY is USD but the data is PKR" in str(failure.value)
+    assert "set PAYMENT_DEFAULT_CURRENCY=PKR in backend/.env" in str(failure.value)

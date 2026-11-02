@@ -33,7 +33,7 @@ from memorybook.models import (
     UserProject,
 )
 from memorybook.services.catalog_projects import create_revision
-from memorybook.services.payments import serialize_order
+from memorybook.services.payments import ensure_project_payment_not_needs_review, serialize_order
 from memorybook.services.pricing import (
     calculate_book_price,
     calculate_discount,
@@ -68,6 +68,8 @@ def create_pdf_order(
     provider: str | None,
     payment_method: str | None = None,
 ) -> dict:
+    project, product = _owned_project_and_product(project_id, user_id)
+    ensure_project_payment_not_needs_review(project.id)
     existing = db.session.scalar(
         select(PdfOrder).where(PdfOrder.user_id == user_id, PdfOrder.idempotency_key == idempotency_key)
     )
@@ -148,6 +150,7 @@ def create_print_quote(
     shipping: dict,
 ) -> dict:
     project, product = _owned_project_and_product(project_id, user_id)
+    ensure_project_payment_not_needs_review(project.id)
     if not project.document:
         raise ConflictError("Save your book before requesting a print quote.")
     config = _validate_configuration(configuration)
@@ -256,6 +259,7 @@ def create_print_quote(
     base_pages = int(product_metadata.get("basePageCount", product.page_count_min or page_rule.minimum_pages))
     extra_page_price = money(product_metadata.get("extraPagePrice", page_rule.price_per_page), "additional-page price")
     shipping_unit_price = money(shipping_rate.price, "shipping")
+    shipping_per_copy = shipping_rate.per_copy
     undiscounted = calculate_book_price(
         book_unit_price + printing_unit_price,
         page_count,
@@ -263,6 +267,7 @@ def create_print_quote(
         extra_page_price,
         quantity=quantity,
         shipping=shipping_unit_price,
+        shipping_per_copy=shipping_per_copy,
     )
     discount_code = _active_discount(config["discountCode"], default_currency()) if config["discountCode"] else None
     discount_base = undiscounted["basePrice"] + undiscounted["additionalPages"]
@@ -278,6 +283,7 @@ def create_print_quote(
         quantity=quantity,
         shipping=shipping_unit_price,
         discount=discount,
+        shipping_per_copy=shipping_per_copy,
     )
     book_price = (book_unit_price * quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     printing_charge = (printing_unit_price * quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -303,6 +309,7 @@ def create_print_quote(
         "printingCharge": str(printing_charge),
         "additionalPages": str(additional_pages),
         "shipping": str(shipping_amount),
+        "shippingPerCopy": shipping_per_copy,
         "discount": str(discount),
         "tax": str(tax),
         "taxApplicable": False,
@@ -449,6 +456,8 @@ def create_print_order(
             "Consent to share the book and delivery address with the MemoryBook team is required.",
             {"consentAccepted": "required"},
         )
+    project, _ = _owned_project_and_product(project_id, user_id)
+    ensure_project_payment_not_needs_review(project.id)
     existing = db.session.scalar(
         select(PrintOrder).where(PrintOrder.user_id == user_id, PrintOrder.idempotency_key == idempotency_key)
     )

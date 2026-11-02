@@ -36,7 +36,14 @@ def payment_methods():
     return jsonify({
         "currency": currency,
         "items": methods,
-        "primaryGateway": current_app.config.get("PAYMENT_PRIMARY_GATEWAY"),
+        "primaryGateway": next(
+            (
+                method["provider"]
+                for method in methods
+                if method["provider"] == current_app.config.get("PAYMENT_PRIMARY_GATEWAY")
+            ),
+            methods[0]["provider"] if methods else None,
+        ),
     })
 
 

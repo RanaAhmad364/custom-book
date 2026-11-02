@@ -1,30 +1,15 @@
 import { useEffect, useState } from "react";
 import { PayPalButtons, PayPalScriptProvider, usePayPalScriptReducer } from "@paypal/react-paypal-js";
 import { paypalPaymentService } from "../../services/paypalPaymentService.js";
+import { paypalChargeSummary } from "../../services/paypalChargeSummary.js";
 
 const clientId = import.meta.env.VITE_PAYPAL_CLIENT_ID?.trim();
 
-function currency(value, code) {
-  const amount = Number(value);
-  if (!Number.isFinite(amount)) return `${code} amount unavailable`;
-  return new Intl.NumberFormat(undefined, {
-    style: "currency",
-    currency: code,
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(amount);
-}
-
-function number(value) {
-  const amount = Number(value);
-  return Number.isFinite(amount)
-    ? amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-    : "unavailable";
-}
-
 export function PayPalSmartCheckout({
   paymentId,
+  orderCurrency,
   pkrAmount,
+  exchangeRate,
   usdAmount,
   onSuccess,
   onRetry,
@@ -96,13 +81,8 @@ export function PayPalSmartCheckout({
   }
 
   return <section className="paypal-smart-checkout" aria-label="PayPal checkout">
-    <p className="paypal-charge-summary">
-      You will be charged {currency(usdAmount, "USD")} USD
-      {pkrAmount !== null && pkrAmount !== undefined && pkrAmount !== ""
-        ? ` (PKR ${number(pkrAmount)})`
-        : ""}.
-    </p>
-    <PayPalScriptProvider key={scriptKey} options={{ "client-id": clientId, currency: "USD", intent: "capture" }}>
+    <p className="paypal-charge-summary">{paypalChargeSummary({ orderCurrency, usdAmount, pkrAmount, exchangeRate })}</p>
+    {!needsReview ? <PayPalScriptProvider key={scriptKey} options={{ "client-id": clientId, currency: "USD", intent: "capture" }}>
       <PayPalButtonsState
         renderKey={renderKey}
         createOrder={createOrder}
@@ -114,8 +94,8 @@ export function PayPalSmartCheckout({
           setRetryRequired(false);
         }}
       />
-    </PayPalScriptProvider>
-    {message ? <p className="paypal-smart-error" role="alert">{message}</p> : null}
+    </PayPalScriptProvider> : null}
+    {message ? <p className={needsReview ? "paypal-smart-error paypal-needs-review" : "paypal-smart-error"} role={needsReview ? "status" : "alert"}>{message}</p> : null}
     {message && !needsReview ? <button className="button button-outline" type="button" onClick={handleRetry} disabled={retrying}>
       {retrying ? "Preparing retry…" : "Try PayPal again"}
     </button> : null}

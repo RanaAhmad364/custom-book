@@ -79,6 +79,7 @@ class ShippingRate(IdMixin, TimestampMixin, db.Model):
     service_name: Mapped[str] = mapped_column(String(100), nullable=False)
     price: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default=configured_currency, server_default="USD")
+    per_copy: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=False, server_default="false")
     estimated_days_min: Mapped[int | None] = mapped_column(Integer)
     estimated_days_max: Mapped[int | None] = mapped_column(Integer)
     is_active: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=True, server_default="true")

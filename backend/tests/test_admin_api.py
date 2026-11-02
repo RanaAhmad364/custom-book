@@ -760,6 +760,24 @@ def test_pricing_catalog_crud_validation_and_variant_compatibility(app):
     assert shipping["countryCode"] == "US"
     assert shipping["estimatedDaysMin"] == 3
     assert shipping["estimatedDaysMax"] == 7
+    assert shipping["perCopy"] is False
+    per_copy_shipping = client.patch(
+        f"/api/v1/admin/pricing/shipping/{shipping['id']}",
+        json={"perCopy": True},
+        headers=csrf,
+    )
+    assert per_copy_shipping.status_code == 200
+    refreshed_shipping = next(
+        item for item in client.get("/api/v1/admin/pricing").json["shipping"]
+        if item["id"] == shipping["id"]
+    )
+    assert refreshed_shipping["perCopy"] is True
+    invalid_per_copy = client.patch(
+        f"/api/v1/admin/pricing/shipping/{shipping['id']}",
+        json={"perCopy": "yes"},
+        headers=csrf,
+    )
+    assert invalid_per_copy.status_code == 400
     alternate_shipping = client.post(
         "/api/v1/admin/pricing/shipping",
         json={
@@ -930,9 +948,10 @@ def test_print_quote_uses_catalog_price_components_and_product_page_limits(app, 
     assert quote.json["bookPrice"] == "20.20"
     assert quote.json["printingCharge"] == "40.40"
     assert quote.json["additionalPages"] == "0.00"
-    assert quote.json["shipping"] == "9.00"
+    assert quote.json["shipping"] == "4.50"
     assert quote.json["discount"] == "5.00"
-    assert quote.json["total"] == "64.60"
+    assert quote.json["total"] == "60.10"
+    assert quote.json["shippingPerCopy"] is False
     assert quote.json["currency"] == "PKR"
     editor_quote = client.get(f"/api/v1/projects/{project_id}/pricing-quote?pageCount=50")
     assert editor_quote.status_code == 200, editor_quote.get_json()
@@ -988,7 +1007,7 @@ def test_print_quote_uses_catalog_price_components_and_product_page_limits(app, 
     assert updated_page_count_quote.status_code == 200, updated_page_count_quote.get_json()
     assert updated_page_count_quote.json["pageCount"] == 50
     assert updated_page_count_quote.json["additionalPages"] == "13.20"
-    assert updated_page_count_quote.json["total"] == "77.80"
+    assert updated_page_count_quote.json["total"] == "73.30"
 
     with app.app_context():
         product = db.session.get(BookProduct, book["id"])

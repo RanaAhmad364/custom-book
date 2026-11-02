@@ -9,6 +9,7 @@ export function pricingRecordDefaults(kind, currency = "USD") {
       serviceName: "",
       price: "0.00",
       currency,
+      perCopy: false,
       estimatedDaysMin: "",
       estimatedDaysMax: "",
       active: true,
@@ -72,6 +73,7 @@ export function validatePricingRecord(kind, record) {
     requireText("countryCode", "a country code");
     requireText("serviceCode", "a service code");
     requireText("serviceName", "a service name");
+    if (typeof record.perCopy !== "boolean") errors.perCopy = "Choose whether shipping is charged per copy.";
     if (!/^[A-Za-z]{2}$/.test(String(record.countryCode ?? "").trim())) errors.countryCode = "Use a two-letter country code.";
     amount("price", "shipping price");
     currency();

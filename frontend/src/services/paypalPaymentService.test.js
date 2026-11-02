@@ -40,3 +40,15 @@ test("PayPal capture service sends only the PayPal order ID", async (t) => {
   assert.match(request.url, /\/payments\/payment-123\/paypal\/capture-order$/);
   assert.deepEqual(JSON.parse(request.options.body), { paypalOrderId: "PAYPAL-SDK-ORDER" });
 });
+
+test("PayPal capture service accepts needs_review without turning it into a retryable failure", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    status: "needs_review",
+    payment: { status: "needs_review" },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  const result = await paypalPaymentService.captureOrder("payment-123", "PAYPAL-SDK-ORDER");
+  assert.equal(result.status, "needs_review");
+});

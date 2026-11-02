@@ -117,8 +117,46 @@ def test_demo_catalog_seed_is_previewed_idempotent_and_complete(app, client, tmp
         assert quote["additionalPages"] == "0.00"
         assert quote["shipping"] == "5.99"
         assert quote["total"] == "45.99"
+        quote_quantity_two = create_print_quote(
+            project.id,
+            customer.id,
+            {"cover": "hardcover", "paper": "standard", "tier": "basic", "quantity": 2},
+            {
+                "fullName": "Demo Customer",
+                "line1": "1 Sample Street",
+                "city": "Lahore",
+                "region": "Punjab",
+                "postalCode": "54000",
+                "country": "PK",
+                "phone": "+920000000000",
+            },
+        )
+        assert quote_quantity_two["shipping"] == "5.99"
+        assert quote_quantity_two["total"] == "85.99"
+        assert quote_quantity_two["shippingPerCopy"] is False
+        shipping_rate = db.session.scalar(select(ShippingRate))
+        shipping_rate.per_copy = True
+        db.session.commit()
+        quote_per_copy = create_print_quote(
+            project.id,
+            customer.id,
+            {"cover": "hardcover", "paper": "standard", "tier": "basic", "quantity": 2},
+            {
+                "fullName": "Demo Customer",
+                "line1": "1 Sample Street",
+                "city": "Lahore",
+                "region": "Punjab",
+                "postalCode": "54000",
+                "country": "PK",
+                "phone": "+920000000000",
+            },
+        )
+        assert quote_per_copy["shipping"] == "11.98"
+        assert quote_per_copy["shippingPerCopy"] is True
+        shipping_rate.per_copy = False
+        db.session.commit()
         assert db.session.scalar(select(db.func.count()).select_from(PrintOrder)) == 0
-        assert db.session.scalar(select(db.func.count()).select_from(PrintQuote)) == 1
+        assert db.session.scalar(select(db.func.count()).select_from(PrintQuote)) == 3
 
         customized = db.session.scalar(
             select(BookProduct).where(BookProduct.slug == "demo-our-family-story")
